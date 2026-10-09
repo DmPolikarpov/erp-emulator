@@ -136,6 +136,12 @@ function listSourceFiles(dir, acc = []) {
 /**
  * Отпечаток исходников SDK.
  *
+ * Переводы строк нормализуются (`\r\n` -> `\n`): в проекте включён
+ * `core.autocrlf=true`, поэтому один и тот же файл в рабочей копии может быть
+ * как LF, так и CRLF. Без нормализации хэш менялся бы от одного `checkout`,
+ * и проверка «сборка актуальна» ложно падала бы (в том числе после клона
+ * репозитория на другой машине).
+ *
  * @returns {{ hash: string, files: string[], count: number }}
  *   `hash` — sha256 по парам «относительный путь + содержимое»,
  *   `files` — относительные пути (для диагностики).
@@ -148,7 +154,7 @@ function computeSourceHash() {
     const relative = path.relative(SDK_ROOT, file).split(path.sep).join('/');
     digest.update(relative);
     digest.update('\0');
-    digest.update(fs.readFileSync(file));
+    digest.update(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'));
     digest.update('\0');
   }
 

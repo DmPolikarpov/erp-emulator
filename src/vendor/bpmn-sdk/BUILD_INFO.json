@@ -1,8 +1,8 @@
 {
   "package": "@erp/bpmn-client-sdk",
   "version": "0.1.0",
-  "builtAt": "2026-10-09T17:53:03.614Z",
-  "sourceHash": "7975d81d6c060641ce6880cbcc99ec2531638db5917840716bcc5645e9c30a43",
+  "builtAt": "2026-10-09T18:01:13.918Z",
+  "sourceHash": "59b196f7ea02ae2c5c1edd79c535d82966f54fa1c80617b4fd0d2f095b33ab8d",
   "sourceFileCount": 17,
   "toolchain": {
     "webpack": "5.111.1",

@@ -220,6 +220,16 @@ function checkDemoPage() {
 }
 
 function main() {
+  if (!fs.existsSync(DIST_DIR)) {
+    console.error(
+      '\nКаталог dist отсутствует: проверять нечего.\n' +
+        'Соберите артефакты — `npm run sdk:refresh` (build + sync + verify).\n' +
+        'Клиенту сборка не нужна: в src/vendor/bpmn-sdk лежит готовый артефакт.\n'
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   checkArtifacts();
   checkFreshness();
   checkVendor();
