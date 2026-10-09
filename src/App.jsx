@@ -11,7 +11,7 @@ import {
   isDeployInstanceId,
   useBpmnEngine,
   useProcessTokens,
-} from './bpmn-sdk';
+} from './vendor/bpmn-sdk';
 import { 
   Factory, Truck, ShieldCheck, ClipboardCheck, FileText, Upload, Send, 
   LogOut, History, KeyRound, Layers, PlusCircle, Crown, Building2, BarChart2,

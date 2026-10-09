@@ -4,6 +4,15 @@
   "private": true,
   "description": "Клиентский SDK BPMN-оркестратора: компоненты редактора и просмотрщика схем, клиент HTTP-шлюза и WebSocket-подписка на токены процесса.",
   "main": "index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "sync": "node tools/sync.mjs",
+    "verify": "node tools/verify.mjs",
+    "refresh": "npm run build && npm run sync && npm run verify"
+  },
   "sideEffects": [
     "*.css"
   ],

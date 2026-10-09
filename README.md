@@ -1,6 +1,35 @@
-# Getting Started with Create React App
+# ERP Simulator — тестовый клиент BPMN-оркестратора
+
+Учебный клиент оркестратора: роли Заказчика и Поставщика, просмотр и
+редактирование BPMN-схем, деплой схемы и отслеживание токенов процесса через
+HTTP- и WebSocket-шлюзы (`bpmn-gateways`).
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+
+## BPMN Client SDK
+
+Работа с оркестратором вынесена в SDK — [`src/bpmn-sdk`](src/bpmn-sdk/README.md).
+Приложение импортирует не исходники SDK, а собранный артефакт из
+[`src/vendor/bpmn-sdk`](src/vendor/README.md): он самодостаточен
+(`bpmn-js` и стили внутри, React — external) и одинаково работает в браузере,
+Jest и через `<script>`.
+
+| Команда | Назначение |
+| --- | --- |
+| `npm run sdk:refresh` | сборка артефактов + синхронизация с клиентом + проверки |
+| `npm run sdk:build` | только сборка `src/bpmn-sdk/dist` (UMD + ESM + CSS + карты) |
+| `npm run sdk:sync` | только копирование артефакта в `src/vendor/bpmn-sdk` |
+| `npm run sdk:verify` | проверка контракта артефактов и актуальности сборки |
+| `npm run sdk:demo` | ассеты демо-страницы `<script>` (в `public/vendor`) |
+| `npm run sdk:demo:clean` | удалить ассеты демо-страницы |
+
+Порядок при правке SDK: `npm run sdk:refresh && npm run test:ci`. Если SDK
+изменили, но не пересобрали, упадут и `sdk:sync`, и тест
+`src/vendor/bpmnSdkBundle.test.js` — сравнивается `sourceHash` из
+`BUILD_INFO.json`.
+
+Витрина `<script>`-подключения: `npm run sdk:demo && npm start` →
+[http://localhost:3000/sdk-demo.html](http://localhost:3000/sdk-demo.html).
 
 ## Available Scripts
 

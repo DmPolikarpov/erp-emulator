@@ -1,17 +1,20 @@
 /**
- * Интеграционный тест `App` после перехода на BPMN Client SDK.
+ * Интеграционный тест `App` после перехода на вендорный бандл SDK.
  *
- * `bpmn-js` не транспилируется Jest-ом CRA (ESM), поэтому холсты и транспорт
- * подменяются моками: проверяются именно точки стыковки приложения с SDK —
- * подписка на токены, обновление списка заказов, деплой схемы и отправка
- * событий через `GatewayClient`.
+ * Приложение импортирует `./vendor/bpmn-sdk` — собранный UMD-артефакт
+ * (`npm run sdk:refresh`), внутри которого упакованы `bpmn-js` и
+ * `lucide-react`, а React остаётся external. Поэтому Jest может загрузить
+ * реальный SDK (`jest.requireActual`), а подменяются только точки стыковки:
+ * транспорт (`useBpmnEngine`) и холсты (`BpmnViewer`/`BpmnEditor`), пропсы
+ * которых проверяются. Заодно тест ловит регрессии артефакта: если бандл не
+ * собран или устарел, ожидаемое API из него не придёт.
  */
 
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import App from './App';
-import { SOCKET_EVENTS } from './bpmn-sdk/client/wsClient';
+import { SOCKET_EVENTS } from './vendor/bpmn-sdk';
 
 /* ------------------------------------------------------------------ *
  * Моки SDK
@@ -39,27 +42,31 @@ const mockEngine = {
   connected: true,
 };
 
-jest.mock('./bpmn-sdk/hooks/useBpmnEngine', () => ({
-  useBpmnEngine: () => mockEngine,
-}));
-
 /** Пропсы, с которыми `App` отрисовал компоненты SDK. */
 const mockViewerProps = [];
 const mockEditorProps = [];
 
-jest.mock('./bpmn-sdk/components/BpmnViewer', () => ({
-  BpmnViewer: (props) => {
-    mockViewerProps.push(props);
-    return <div data-testid="sdk-viewer" />;
-  },
-}));
+/**
+ * Подменяем только точки стыковки, остальное API берём из реального
+ * вендорного бандла (`jest.requireActual`): так тест проверяет ещё и то,
+ * что артефакт собран и отдаёт ожидаемый публичный API.
+ */
+jest.mock('./vendor/bpmn-sdk', () => {
+  const actual = jest.requireActual('./vendor/bpmn-sdk');
 
-jest.mock('./bpmn-sdk/components/BpmnEditor', () => ({
-  BpmnEditor: (props) => {
-    mockEditorProps.push(props);
-    return <div data-testid="sdk-editor" />;
-  },
-}));
+  return {
+    ...actual,
+    useBpmnEngine: () => mockEngine,
+    BpmnViewer: (props) => {
+      mockViewerProps.push(props);
+      return <div data-testid="sdk-viewer" />;
+    },
+    BpmnEditor: (props) => {
+      mockEditorProps.push(props);
+      return <div data-testid="sdk-editor" />;
+    },
+  };
+});
 
 /* ------------------------------------------------------------------ *
  * Вспомогательные функции

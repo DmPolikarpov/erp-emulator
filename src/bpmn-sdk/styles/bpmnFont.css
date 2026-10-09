@@ -1,0 +1,20 @@
+/**
+ * Шрифт иконок `bpmn-font` (иконки палитры, задач, шлюзов bpmn-js).
+ *
+ * Вместо `bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css` подключаем
+ * только `woff2` (~13 KB): в embedded-версии шрифт зашит во всех форматах
+ * (eot/svg/ttf/woff/woff2) и после base64 занимает ~390 KB — это 91 %
+ * веса CSS и он попадает в JS-бандл клиента. `bpmn-js@17` и так требует
+ * современный браузер, где `woff2` поддерживается.
+ *
+ * Правила иконок (`.bpmn-icon-*:before`) берутся из `bpmn-codes.css`:
+ * набор классов совпадает с embedded-версией (107 правил, проверяется
+ * в `tools/verify.mjs` косвенно — по непустому CSS и наличию `.bpmn-icon`).
+ */
+
+@font-face {
+  font-family: 'bpmn';
+  src: url('bpmn-js/dist/assets/bpmn-font/font/bpmn.woff2') format('woff2');
+  font-weight: normal;
+  font-style: normal;
+}

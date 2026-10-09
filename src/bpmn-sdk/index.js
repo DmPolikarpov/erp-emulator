@@ -7,9 +7,20 @@
  *   import { BpmnViewer, BpmnEditor, useBpmnEngine } from './bpmn-sdk';
  *
  * Стили подключаются здесь, чтобы потребителю барреля не нужно было
- * помнить про CSS-файл.
+ * помнить про CSS-файл: сначала базовые стили холста `bpmn-js`/`diagram-js`,
+ * затем стили SDK (они переопределяют базовые).
+ *
+ * CSS `bpmn-js` импортируется именно файлами, а не JS-прослойкой: пакет
+ * SDK объявляет `sideEffects: ["*.css"]`, поэтому JS-модуль без экспортов
+ * webpack вправе выбросить вместе с его импортами. Импорты CSS из
+ * `index.js` (точки входа) сохраняются всегда, а сами CSS-файлы помечены
+ * как «с побочными эффектами» в `package.json` пакета `bpmn-js`.
  */
 
+import 'bpmn-js/dist/assets/diagram-js.css';
+import 'bpmn-js/dist/assets/bpmn-js.css';
+import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-codes.css';
+import './styles/bpmnFont.css';
 import './styles/bpmn-sdk.css';
 
 export * from './constants';

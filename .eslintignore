@@ -1,0 +1,3 @@
+# Минифицированный вендорный бандл SDK: сторонний код без смысла линтить.
+/src/vendor/bpmn-sdk/bpmn-sdk.umd.js
+/src/bpmn-sdk/dist
