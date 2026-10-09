@@ -1,0 +1,209 @@
+/**
+ * BPMN Client SDK — стили холста и подсветки токенов процесса.
+ *
+ * Раньше эти правила инжектились inline через <style> из BpmnView.jsx:
+ * это дублировало стили на каждый экземпляр компонента. Теперь файл
+ * подключается один раз (через `src/bpmn-sdk/index.js` либо напрямую
+ * из компонентов SDK).
+ *
+ * Классы навешиваются через `canvas.addMarker(elementId, className)`,
+ * поэтому селекторы обязаны учитывать разметку diagram-js
+ * (`.djs-shape`, `.djs-connection`, `.djs-visual`).
+ */
+
+/* ------------------------------------------------------------------ *
+ * Контейнер холста
+ * ------------------------------------------------------------------ */
+
+.bpmn-sdk {
+  position: relative;
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background-color: #fff;
+}
+
+.bpmn-sdk__canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* Редактор чуть выше просмотрщика и с более заметной рамкой. */
+.bpmn-sdk--editor {
+  border-color: #cbd5e1;
+}
+
+/* ------------------------------------------------------------------ *
+ * Состояния токена
+ * ------------------------------------------------------------------ */
+
+.bpmn-sdk-token {
+  --bpmn-sdk-token-fill: #dbeafe;
+  --bpmn-sdk-token-stroke: #2563eb;
+}
+
+.bpmn-sdk-token--active {
+  --bpmn-sdk-token-fill: #dbeafe;
+  --bpmn-sdk-token-stroke: #2563eb;
+}
+
+.bpmn-sdk-token--completed {
+  --bpmn-sdk-token-fill: #dcfce7;
+  --bpmn-sdk-token-stroke: #16a34a;
+}
+
+.bpmn-sdk-token--failed {
+  --bpmn-sdk-token-fill: #fee2e2;
+  --bpmn-sdk-token-stroke: #dc2626;
+}
+
+.bpmn-sdk-token--timed-out {
+  --bpmn-sdk-token-fill: #fef3c7;
+  --bpmn-sdk-token-stroke: #d97706;
+}
+
+/* Заливка и обводка фигуры токена. */
+.bpmn-sdk-token:not(.djs-connection) .djs-visual > :nth-child(1) {
+  fill: var(--bpmn-sdk-token-fill) !important;
+  stroke: var(--bpmn-sdk-token-stroke);
+  stroke-width: 3px;
+}
+
+/* Пульсация — только для выполняющегося (ACTIVE) токена. */
+@keyframes bpmn-sdk-pulse {
+  0% {
+    stroke: #2563eb;
+    stroke-width: 3px;
+    filter: drop-shadow(0 0 2px rgba(37, 99, 235, 0.4));
+  }
+  50% {
+    stroke: #0284c7;
+    stroke-width: 4px;
+    filter: drop-shadow(0 0 8px rgba(2, 132, 199, 0.8));
+  }
+  100% {
+    stroke: #2563eb;
+    stroke-width: 3px;
+    filter: drop-shadow(0 0 2px rgba(37, 99, 235, 0.4));
+  }
+}
+
+.bpmn-sdk-token--active:not(.djs-connection) .djs-visual > :nth-child(1) {
+  animation: bpmn-sdk-pulse 2s infinite;
+}
+
+.bpmn-sdk-token--active.djs-shape .djs-visual rect,
+.bpmn-sdk-token--active.djs-shape .djs-visual circle,
+.bpmn-sdk-token--active.djs-shape .djs-visual polygon {
+  animation: bpmn-sdk-pulse 2s infinite;
+}
+
+/* Соединения (sequence flow) с активным токеном. */
+.bpmn-sdk-token.djs-connection .djs-visual > :nth-child(1) {
+  stroke: var(--bpmn-sdk-token-stroke) !important;
+  stroke-width: 3px;
+}
+
+/* ------------------------------------------------------------------ *
+ * Инспектор узлов (EnginePanel)
+ * ------------------------------------------------------------------ */
+
+.bpmn-sdk-panel {
+  padding: 12px;
+  background-color: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.bpmn-sdk-panel__title {
+  margin: 0 0 10px 0;
+  font-size: 12px;
+  color: #334155;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bpmn-sdk-panel__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  align-items: end;
+}
+
+.bpmn-sdk-panel__field {
+  min-width: 0;
+}
+
+.bpmn-sdk-panel__label {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+  margin-bottom: 2px;
+}
+
+.bpmn-sdk-panel__label--strong {
+  font-weight: 600;
+}
+
+.bpmn-sdk-panel__control {
+  width: 100%;
+  padding: 6px;
+  border-radius: 4px;
+  border: 1px solid #cbd5e1;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.bpmn-sdk-panel__control--mono {
+  font-family: monospace;
+}
+
+.bpmn-sdk-panel__control--invalid {
+  border-color: #dc2626;
+}
+
+.bpmn-sdk-panel__control:disabled {
+  background-color: #e2e8f0;
+  color: #94a3b8;
+}
+
+.bpmn-sdk-panel__error {
+  margin: 8px 0 0 0;
+  font-size: 11px;
+  color: #dc2626;
+}
+
+.bpmn-sdk-panel__hint {
+  margin: 8px 0 0 0;
+  font-size: 11px;
+  color: #64748b;
+}
+
+/* ------------------------------------------------------------------ *
+ * Редактор схемы (BpmnEditor)
+ * ------------------------------------------------------------------ */
+
+.bpmn-sdk-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+/* ------------------------------------------------------------------ *
+ * Совместимость со старым классом `active-node-highlight`
+ * ------------------------------------------------------------------ */
+
+.active-node-highlight:not(.djs-connection) .djs-visual > :nth-child(1) {
+  fill: #dbeafe !important;
+  animation: bpmn-sdk-pulse 2s infinite;
+}
+
+.active-node-highlight.djs-shape .djs-visual rect,
+.active-node-highlight.djs-shape .djs-visual circle,
+.active-node-highlight.djs-shape .djs-visual polygon {
+  animation: bpmn-sdk-pulse 2s infinite;
+}
+

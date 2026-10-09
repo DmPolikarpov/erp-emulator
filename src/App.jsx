@@ -1,14 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import { BpmnView } from './BpmnView';
-import { DEFAULT_CUSTOMER_BPMN_XML, DEFAULT_SUPPLIER_BPMN_XML } from './milk_process_bpmn';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  BpmnEditor,
+  BpmnViewer,
+  DEFAULT_CUSTOMER_BPMN_XML,
+  DEFAULT_GATEWAY_URL,
+  DEFAULT_SUPPLIER_BPMN_XML,
+  INSTANCE_PREFIX,
+  SOCKET_EVENTS,
+  createUuid,
+  isDeployInstanceId,
+  useBpmnEngine,
+  useProcessTokens,
+} from './bpmn-sdk';
 import { 
   Factory, Truck, ShieldCheck, ClipboardCheck, FileText, Upload, Send, 
   LogOut, History, KeyRound, Layers, PlusCircle, Crown, Building2, BarChart2,
-  PackageCheck, Clock, CheckCircle2, Loader2, AlertCircle
+  PackageCheck, Clock, CheckCircle2, Loader2, AlertCircle, Pencil
 } from 'lucide-react';
 
-const API_BASE_URL = '/api/v1/process';
-const WS_URL = process.env.REACT_APP_WS_URL || 'ws://localhost:8081/ws/status';
+// Базовый URL API Gateway: `REACT_APP_GATEWAY_URL` (см. `.env`) либо
+// относительный путь — тогда запросы идут через CRA-прокси (`package.json`).
+const API_BASE_URL = DEFAULT_GATEWAY_URL;
 
 const USERS = [
   { username: 'executive', pass: '123', name: 'Алексей Директоров', role: 'EXECUTIVE', org: 'CUSTOMER', orgName: 'Молочный Завод', roleName: 'Руководитель Заказчика', icon: Crown },
@@ -20,14 +32,6 @@ const USERS = [
   { username: 'supplier_mgr', pass: '123', name: 'Петр Отгрузчиков', role: 'SUPPLIER_MANAGER', org: 'SUPPLIER', orgName: 'ООО «Альпийские Луга»', roleName: 'Менеджер Поставщика', icon: Truck },
 ];
 
-const generateUUID = () => {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
-  });
-};
-
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [loginInput, setLoginInput] = useState('production');
@@ -37,7 +41,14 @@ export default function App() {
   const [customerBpmnXml, setCustomerBpmnXml] = useState(DEFAULT_CUSTOMER_BPMN_XML);
   const [supplierBpmnXml, setSupplierBpmnXml] = useState(DEFAULT_SUPPLIER_BPMN_XML);
   
-  const [wsConnected, setWsConnected] = useState(false);
+  // SDK: HTTP-клиент API Gateway и WS-подписка на токены процесса
+  // (реконнект, парсинг кадров и жизненный цикл соединения — внутри SDK).
+  const { client, socket, connected: wsConnected } = useBpmnEngine();
+
+  // Токены по всем экземплярам процесса — источник подсветки узлов на схеме.
+  const { tokensFor } = useProcessTokens(socket, []);
+
+  const [schemaMode, setSchemaMode] = useState('view');
   const [isDeploying, setIsDeploying] = useState(false);
   const [leftWidth, setLeftWidth] = useState(50);
 
@@ -58,10 +69,11 @@ export default function App() {
     }
   ]);
 
-  const logEvent = (org, targetRoles, title, message, orderNumber = null) => {
+  // `logEvent` стабилен между рендерами: подписка на токены не пересоздаётся.
+  const logEvent = useCallback((org, targetRoles, title, message, orderNumber = null) => {
     const rolesArray = Array.isArray(targetRoles) ? targetRoles : [targetRoles];
     const newEntries = rolesArray.map(r => ({
-      id: generateUUID(),
+      id: createUuid(),
       timestamp: new Date().toLocaleTimeString('ru-RU'),
       org,
       role: r,
@@ -69,35 +81,13 @@ export default function App() {
       message
     }));
     setNotifications(prev => [...newEntries, ...prev]);
-  };
+  }, []);
 
-  const sendGatewayEvent = async (instanceId, eventName, elementId, outputData = {}) => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/instances/${instanceId}/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event_name: eventName,
-          correlation_key: generateUUID(),
-          element_id: elementId || '',
-          output_data: outputData
-        })
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        return { ok: false, error: `Оркестратор вернул ошибку (${response.status})` };
-      }
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: 'Ошибка сети. Не удалось связаться с оркестратором.' };
-    }
-  };
-
+  // Деплой схемы: SDK сам формирует служебный экземпляр `inst-deploy-<org>`,
+  // имя события `DeploySchema` и `element_id` = `Process_Deployment`.
   const deployBpmnSchema = async (orgType, xmlData) => {
     setIsDeploying(true);
-    const dummyInstanceId = `inst-deploy-${orgType.toLowerCase()}`;
-    const result = await sendGatewayEvent(dummyInstanceId, 'DeploySchema', 'Process_Deployment', { bpmn_xml: xmlData, org_type: orgType });
+    const result = await client.deploySchema(orgType, xmlData);
     if (result.ok) {
       logEvent(orgType, 'ALL', 'Схема задеплоена', `Руководитель задеплоил новую конфигурацию схемы ${orgType} в кластер.`);
       alert(`Схема ${orgType} успешно передана в оркестратор!`);
@@ -107,94 +97,81 @@ export default function App() {
     setIsDeploying(false);
   };
 
+  // Подписка на токены процесса: WS-шлюз широковещательный, поэтому
+  // фильтруем служебные экземпляры деплоя/определений и обновляем заказы.
   useEffect(() => {
-    let ws;
-    const connectWs = () => {
-      try {
-        ws = new WebSocket(WS_URL);
-        ws.onopen = () => setWsConnected(true);
-        ws.onclose = () => {
-          setWsConnected(false);
-          setTimeout(connectWs, 3000);
-        };
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (!data.instance_id) return;
+    if (!socket) return undefined;
 
-            if (data.instance_id.startsWith('inst-deploy-') || data.instance_id.startsWith('inst-def-')) {
-              return;
-            }
+    return socket.on(SOCKET_EVENTS.TOKEN, (token) => {
+      const { instanceId, elementId, state } = token;
 
-            const payloadData = data.payload || data.variables || data.output_data || {};
-            const targetOrderNum = payloadData.orderNum;
-
-            setOrders(prevOrders => {
-              const orderIndex = prevOrders.findIndex(
-                o => o.customerInstanceId === data.instance_id || 
-                     o.supplierInstanceId === data.instance_id ||
-                     (targetOrderNum && o.id === targetOrderNum)
-              );
-
-              if (orderIndex !== -1) {
-                const updatedOrders = prevOrders.map((order, idx) => {
-                  if (idx !== orderIndex) return order;
-
-                  const isCustomer = order.customerInstanceId === data.instance_id;
-                  const isSupplier = order.supplierInstanceId === data.instance_id || data.instance_id.startsWith('inst-supp-');
-
-                  return {
-                    ...order,
-                    supplierInstanceId: isSupplier ? data.instance_id : order.supplierInstanceId,
-                    customerActiveElementId: isCustomer ? (data.element_id || order.customerActiveElementId) : order.customerActiveElementId,
-                    customerProcessState: isCustomer ? (data.state || order.customerProcessState) : order.customerProcessState,
-                    supplierActiveElementId: isSupplier ? (data.element_id || order.supplierActiveElementId) : order.supplierActiveElementId,
-                    supplierProcessState: isSupplier ? (data.state || order.supplierProcessState) : order.supplierProcessState,
-                    ...payloadData
-                  };
-                });
-
-                const updatedOrder = updatedOrders[orderIndex];
-                if (updatedOrder) {
-                  setActionLoading(prev => ({ ...prev, [updatedOrder.id]: null }));
-                }
-                return updatedOrders;
-              } else {
-                if (data.instance_id.startsWith('inst-supp-')) {
-                  return prevOrders;
-                }
-
-                const newOrderNum = targetOrderNum || `Заказ-${data.instance_id.slice(-6)}`;
-                const newOrder = {
-                  id: newOrderNum,
-                  createdAt: new Date().toLocaleTimeString('ru-RU'),
-                  volume: payloadData.volume || '100 Л',
-                  customerInstanceId: data.instance_id,
-                  customerActiveElementId: data.element_id,
-                  customerProcessState: data.state || 'ACTIVE',
-                  supplierInstanceId: null,
-                  supplierActiveElementId: null,
-                  supplierProcessState: 'IDLE',
-                  ...payloadData
-                };
-                setActionLoading(prev => ({ ...prev, [newOrderNum]: null }));
-                return [newOrder, ...prevOrders];
-              }
-            });
-
-            logEvent('SYSTEM', 'ALL', 'Событие Оркестратора', `Инстанс ${data.instance_id} -> Узел: ${data.element_id || '—'} [Статус: ${data.state}]`);
-          } catch (e) {
-            console.error('Ошибка разбора WS сообщения:', e);
-          }
-        };
-      } catch (err) {
-        console.warn('Ошибка подключения WS:', err);
+      if (
+        isDeployInstanceId(instanceId) ||
+        instanceId.startsWith(INSTANCE_PREFIX.DEFINITION)
+      ) {
+        return;
       }
-    };
 
-    connectWs();
-    return () => ws?.close();
-  }, []);
+      const payloadData = token.payload || {};
+      const targetOrderNum = payloadData.orderNum;
+
+      setOrders(prevOrders => {
+        const orderIndex = prevOrders.findIndex(
+          o => o.customerInstanceId === instanceId ||
+               o.supplierInstanceId === instanceId ||
+               (targetOrderNum && o.id === targetOrderNum)
+        );
+
+        if (orderIndex !== -1) {
+          const updatedOrders = prevOrders.map((order, idx) => {
+            if (idx !== orderIndex) return order;
+
+            const isCustomer = order.customerInstanceId === instanceId;
+            const isSupplier = order.supplierInstanceId === instanceId ||
+                               instanceId.startsWith(INSTANCE_PREFIX.SUPPLIER);
+
+            return {
+              ...order,
+              supplierInstanceId: isSupplier ? instanceId : order.supplierInstanceId,
+              customerActiveElementId: isCustomer ? (elementId || order.customerActiveElementId) : order.customerActiveElementId,
+              customerProcessState: isCustomer ? (state || order.customerProcessState) : order.customerProcessState,
+              supplierActiveElementId: isSupplier ? (elementId || order.supplierActiveElementId) : order.supplierActiveElementId,
+              supplierProcessState: isSupplier ? (state || order.supplierProcessState) : order.supplierProcessState,
+              ...payloadData
+            };
+          });
+
+          const updatedOrder = updatedOrders[orderIndex];
+          if (updatedOrder) {
+            setActionLoading(prev => ({ ...prev, [updatedOrder.id]: null }));
+          }
+          return updatedOrders;
+        }
+
+        if (instanceId.startsWith(INSTANCE_PREFIX.SUPPLIER)) {
+          return prevOrders;
+        }
+
+        const newOrderNum = targetOrderNum || `Заказ-${instanceId.slice(-6)}`;
+        const newOrder = {
+          id: newOrderNum,
+          createdAt: new Date().toLocaleTimeString('ru-RU'),
+          volume: payloadData.volume || '100 Л',
+          customerInstanceId: instanceId,
+          customerActiveElementId: elementId,
+          customerProcessState: state || 'ACTIVE',
+          supplierInstanceId: null,
+          supplierActiveElementId: null,
+          supplierProcessState: 'IDLE',
+          ...payloadData
+        };
+        setActionLoading(prev => ({ ...prev, [newOrderNum]: null }));
+        return [newOrder, ...prevOrders];
+      });
+
+      logEvent('SYSTEM', 'ALL', 'Событие Оркестратора', `Инстанс ${instanceId} -> Узел: ${elementId || '—'} [Статус: ${state}]`);
+    });
+  }, [socket, logEvent]);
 
   // 1. ТОЧКА ВХОДА: Создание заказа Производством
   const handleProductionCreateOrder = async () => {
@@ -204,7 +181,7 @@ export default function App() {
     setActionLoading(prev => ({ ...prev, [orderNum]: 'Создание заказа в оркестраторе...' }));
     setActionErrors(prev => ({ ...prev, [orderNum]: null }));
 
-    const res = await sendGatewayEvent(
+    const res = await client.sendEvent(
       custInstId, 'StartProcess', 'StartEvent_Customer', 
       { bpmn_xml: customerBpmnXml, orderNum, volume: '100 Л', initiator: 'PRODUCTION' }
     );
@@ -239,13 +216,13 @@ export default function App() {
     setActionLoading(prev => ({ ...prev, [orderId]: 'Оркестратор передает заказ Поставщику...' }));
     setActionErrors(prev => ({ ...prev, [orderId]: null }));
 
-    const resCust = await sendGatewayEvent(
+    const resCust = await client.sendEvent(
       targetOrder.customerInstanceId, 'SendToSupplier', 'Task_WaitForSupplierShipment', 
       { status: 'SENT_TO_SUPPLIER', supplierInstanceId: suppInstId, orderNum: orderId }
     );
 
     if (resCust.ok) {
-      const resSupp = await sendGatewayEvent(
+      const resSupp = await client.sendEvent(
         suppInstId, 'StartProcess', 'StartEvent_Supplier', 
         { bpmn_xml: supplierBpmnXml, orderNum: orderId }
       );
@@ -275,7 +252,7 @@ export default function App() {
       driverName: 'Иванов И.И.',
     };
 
-    const res = await sendGatewayEvent(
+    const res = await client.sendEvent(
       targetOrder.supplierInstanceId, 'CreateDocs', 'Task_SupplierShipment', 
       { documents: generatedDocs, orderNum: orderId }
     );
@@ -297,14 +274,14 @@ export default function App() {
     const shippedAt = new Date().toLocaleTimeString('ru-RU');
 
     // 1. Финализируем процесс Поставщика
-    const resSupp = await sendGatewayEvent(
+    const resSupp = await client.sendEvent(
       targetOrder.supplierInstanceId, 'Shipment', 'EndEvent_Supplier', 
       { shippedAt, orderNum: orderId }
     );
 
     if (resSupp.ok) {
       // 2. Отправляем триггер в процесс Заказчика, передавая документы и активируя шаг выписки пропуска!
-      const resCust = await sendGatewayEvent(
+      const resCust = await client.sendEvent(
         targetOrder.customerInstanceId, 'SupplierShippedSignal', 'Task_ReceiveDocsAndIssuePass', 
         { shippedAt, orderNum: orderId, documents: targetOrder.documents }
       );
@@ -332,7 +309,7 @@ export default function App() {
       issuedAt: new Date().toLocaleTimeString('ru-RU')
     };
 
-    const res = await sendGatewayEvent(
+    const res = await client.sendEvent(
       targetOrder.customerInstanceId, 'IssuePass', 'Task_SecurityCheck', 
       { passData: pass, orderNum: orderId }
     );
@@ -352,7 +329,7 @@ export default function App() {
     setActionErrors(prev => ({ ...prev, [orderId]: null }));
 
     const entryTime = new Date().toLocaleTimeString('ru-RU');
-    const res = await sendGatewayEvent(
+    const res = await client.sendEvent(
       targetOrder.customerInstanceId, 'SecurityPass', 'Task_QualityControl', 
       { entryTime, orderNum: orderId }
     );
@@ -372,7 +349,7 @@ export default function App() {
     setActionErrors(prev => ({ ...prev, [orderId]: null }));
 
     const checkedAt = new Date().toLocaleTimeString('ru-RU');
-    const res = await sendGatewayEvent(
+    const res = await client.sendEvent(
       targetOrder.customerInstanceId, 'QualityApprove', 'EndEvent_Customer', 
       { checkedAt, status: 'COMPLETED', orderNum: orderId }
     );
@@ -856,18 +833,62 @@ export default function App() {
                    </button>
                  </div>
 
+                 {/* Переключение режима: просмотр с токенами / редактор схемы */}
+                 <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+                   {[
+                     { mode: 'view', title: 'Просмотр процесса', Icon: Layers },
+                     { mode: 'edit', title: 'Редактор схемы', Icon: Pencil }
+                   ].map(({ mode, title, Icon }) => {
+                     const isActive = schemaMode === mode;
+                     return (
+                       <button
+                         key={mode}
+                         onClick={() => setSchemaMode(mode)}
+                         style={{
+                           display: 'flex', alignItems: 'center', gap: '6px',
+                           padding: '6px 12px', fontSize: '12px', fontWeight: '600',
+                           borderRadius: '6px', cursor: 'pointer',
+                           border: `1px solid ${isActive ? '#2563eb' : '#cbd5e1'}`,
+                           backgroundColor: isActive ? '#eff6ff' : '#fff',
+                           color: isActive ? '#1d4ed8' : '#475569'
+                         }}
+                       >
+                         <Icon size={14} /> {title}
+                       </button>
+                     );
+                   })}
+                 </div>
+
                  {currentUser.org === 'CUSTOMER' ? (
-                   <BpmnView 
-                     xml={customerBpmnXml} 
-                     onXmlChange={setCustomerBpmnXml}
-                     activeElementId={currentOrder?.customerActiveElementId} 
-                   />
+                   schemaMode === 'edit' ? (
+                     <BpmnEditor
+                       xml={customerBpmnXml}
+                       onChange={setCustomerBpmnXml}
+                       height={520}
+                     />
+                   ) : (
+                     <BpmnViewer
+                       xml={customerBpmnXml}
+                       tokens={tokensFor(currentOrder?.customerInstanceId)}
+                       activeElementId={currentOrder?.customerActiveElementId}
+                       height={520}
+                     />
+                   )
                  ) : (
-                   <BpmnView 
-                     xml={supplierBpmnXml} 
-                     onXmlChange={setSupplierBpmnXml}
-                     activeElementId={currentOrder?.supplierActiveElementId} 
-                   />
+                   schemaMode === 'edit' ? (
+                     <BpmnEditor
+                       xml={supplierBpmnXml}
+                       onChange={setSupplierBpmnXml}
+                       height={520}
+                     />
+                   ) : (
+                     <BpmnViewer
+                       xml={supplierBpmnXml}
+                       tokens={tokensFor(currentOrder?.supplierInstanceId)}
+                       activeElementId={currentOrder?.supplierActiveElementId}
+                       height={520}
+                     />
+                   )
                  )}
                </div>
              ) : (
