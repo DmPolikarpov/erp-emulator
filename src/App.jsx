@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BpmnEditor,
   BpmnViewer,
@@ -10,6 +10,7 @@ import {
   TOKEN_STATES,
   createUuid,
   getElementRole,
+  getProcessIds,
   isDeployInstanceId,
   useBpmnEngine,
   useProcessTokens,
@@ -135,6 +136,25 @@ export default function App() {
   const roleOf = useCallback(
     (org, elementId) => getElementRole(schemaXml(org), elementId),
     [schemaXml]
+  );
+
+  /**
+   * Идентификаторы процессов второй стороны — подсказки поля «Запускаемый
+   * процесс» в инспекторе узла.
+   *
+   * Кросс-процессный триггер (`trg:processTrigger/@targetProcessId`) запускает
+   * процесс соседа по цепочке, а не свой: у Заказчика подсказываются процессы
+   * из схемы Поставщика и наоборот. Значения берутся из схемы, а не из списка
+   * в коде, чтобы переименование процесса в редакторе сразу попадало в подсказки
+   * (движок сверяет их с `bpmn:process/@id`).
+   */
+  const customerTriggerTargets = useMemo(
+    () => getProcessIds(supplierBpmnXml),
+    [supplierBpmnXml]
+  );
+  const supplierTriggerTargets = useMemo(
+    () => getProcessIds(customerBpmnXml),
+    [customerBpmnXml]
   );
 
   /**
@@ -1147,6 +1167,7 @@ export default function App() {
                        xml={customerBpmnXml}
                        onChange={setCustomerBpmnXml}
                        roleOptions={ROLE_CODES}
+                       triggerTargets={customerTriggerTargets}
                        height={520}
                      />
                    ) : (
@@ -1163,6 +1184,7 @@ export default function App() {
                        xml={supplierBpmnXml}
                        onChange={setSupplierBpmnXml}
                        roleOptions={ROLE_CODES}
+                       triggerTargets={supplierTriggerTargets}
                        height={520}
                      />
                    ) : (

@@ -5,6 +5,9 @@ import {
   ELEMENT_ID_FORMAT_ERROR,
   EnginePanel,
   resolveElementRole,
+  resolveElementTrigger,
+  TRIGGER_FIELD_ERRORS,
+  triggerFieldError,
 } from './EnginePanel';
 
 const ELEMENTS = [
@@ -30,6 +33,23 @@ const ROLE_XML = `<?xml version="1.0" encoding="UTF-8"?>
   </bpmn:process>
 </bpmn:definitions>`;
 
+/**
+ * Схема, в которой кросс-процессный запуск объявлен прямо в XML.
+ *
+ * `xmlns:trg` обязателен: без объявления namespace схема не разбирается
+ * (`DOMParser` сообщает об ошибке, и `listFlowElements` вернёт пустой список).
+ */
+const TRIGGER_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:trg="http://erp.mes/schema/bpmn/trigger" targetNamespace="http://erp">
+  <bpmn:process id="Process_Demo" isExecutable="true">
+    <bpmn:userTask id="Task_Approve" name="Согласовать">
+      <bpmn:extensionElements>
+        <trg:processTrigger targetProcessId="Process_SupplierSupply_v1" instancePrefix="inst-supp-" payloadKeys="orderNum,volume" />
+      </bpmn:extensionElements>
+    </bpmn:userTask>
+  </bpmn:process>
+</bpmn:definitions>`;
+
 const setup = (props = {}) =>
   render(<EnginePanel elements={ELEMENTS} selectedElementId={null} {...props} />);
 
@@ -49,6 +69,28 @@ const roleOptionsOf = () =>
   within(roleField())
     .getAllByRole('option')
     .map((option) => option.value);
+
+/* --- поля триггера кросс-процессного запуска --- */
+
+const targetField = () => screen.getByLabelText('Запускаемый процесс (targetProcessId):');
+const prefixField = () => screen.getByLabelText('Префикс экземпляра (instancePrefix):');
+const firstField = () => screen.getByLabelText('Первый узел целевого процесса (firstElementId):');
+const startField = () => screen.getByLabelText('Узел-источник (startElementId):');
+const payloadField = () => screen.getByLabelText('Ключи payload через запятую (payloadKeys):');
+
+/** Подсказки `datalist` у поля «Запускаемый процесс» (других списков у панели нет). */
+const targetHintOptions = () =>
+  Array.from(document.querySelectorAll('datalist option')).map((option) => option.value);
+
+/** Полный триггер канонической формы — так его собирает форма. */
+const fullTrigger = (overrides = {}) => ({
+  targetProcessId: '',
+  instancePrefix: '',
+  startElementId: '',
+  firstElementId: '',
+  payloadKeys: '',
+  ...overrides,
+});
 
 describe('EnginePanel: список узлов', () => {
   it('наполняет выпадающий список переданными узлами', () => {
@@ -325,5 +367,259 @@ describe('EnginePanel: роль исполнителя (bpmn:potentialOwner)', (
     expect(resolveElementRole({ id: 'Task_Approve', role: 'QUALITY' }, ROLE_XML)).toBe('QUALITY');
     expect(resolveElementRole({ id: 'Task_Approve' }, ROLE_XML)).toBe('SECURITY');
     expect(resolveElementRole(null, ROLE_XML)).toBe('');
+  });
+});
+
+describe('EnginePanel: триггер кросс-процессного запуска', () => {
+  /** Узел, у которого триггер уже объявлен (живой реестр редактора). */
+  const elementWithTrigger = (trigger) => [
+    { id: 'Task_Approve', name: 'Согласовать', type: 'bpmn:UserTask', trigger },
+  ];
+
+  it('показывает поля триггера из реестра и подсказки-процессы', () => {
+    setup({
+      elements: elementWithTrigger(
+        fullTrigger({
+          targetProcessId: 'Process_SupplierSupply_v1',
+          instancePrefix: 'inst-supp-',
+          startElementId: 'Task_Approve',
+          payloadKeys: 'orderNum,volume',
+        })
+      ),
+      selectedElementId: 'Task_Approve',
+      triggerTargets: [' Process_SupplierSupply_v1 ', 'Process_CustomerOrder', ''],
+      onChangeTrigger: jest.fn(() => true),
+    });
+
+    expect(targetField().value).toBe('Process_SupplierSupply_v1');
+    expect(prefixField().value).toBe('inst-supp-');
+    expect(startField().value).toBe('Task_Approve');
+    expect(firstField().value).toBe('');
+    expect(payloadField().value).toBe('orderNum,volume');
+
+    // Подсказки не заменяют ввод: `datalist` их только предлагает, а пустые
+    // значения отброшены.
+    expect(targetHintOptions()).toEqual([
+      'Process_SupplierSupply_v1',
+      'Process_CustomerOrder',
+    ]);
+  });
+
+  it('читает триггер из XML, если его нет в `elements`', () => {
+    render(
+      <EnginePanel
+        xml={TRIGGER_XML}
+        selectedElementId="Task_Approve"
+        triggerTargets={['Process_SupplierSupply_v1']}
+        onChangeTrigger={jest.fn(() => true)}
+      />
+    );
+
+    expect(targetField().value).toBe('Process_SupplierSupply_v1');
+    expect(prefixField().value).toBe('inst-supp-');
+    expect(payloadField().value).toBe('orderNum,volume');
+    expect(firstField().value).toBe('');
+  });
+
+  it('передаёт заполненные поля наружу целиком', () => {
+    const onChangeTrigger = jest.fn(() => true);
+    setup({
+      selectedElementId: 'Task_Approve',
+      triggerTargets: ['Process_SupplierSupply_v1'],
+      onChangeTrigger,
+    });
+
+    fireEvent.change(targetField(), { target: { value: 'Process_SupplierSupply_v1' } });
+
+    expect(onChangeTrigger).toHaveBeenLastCalledWith(
+      'Task_Approve',
+      fullTrigger({ targetProcessId: 'Process_SupplierSupply_v1' })
+    );
+
+    // Следующая правка уносит и уже введённое обязательное поле.
+    fireEvent.change(payloadField(), { target: { value: 'orderNum, volume' } });
+
+    expect(onChangeTrigger).toHaveBeenLastCalledWith(
+      'Task_Approve',
+      fullTrigger({
+        targetProcessId: 'Process_SupplierSupply_v1',
+        payloadKeys: 'orderNum, volume',
+      })
+    );
+    expect(payloadField().value).toBe('orderNum, volume');
+  });
+
+  it('пустое поле «Запускаемый процесс» снимает триггер целиком', () => {
+    const onChangeTrigger = jest.fn(() => true);
+    setup({
+      elements: elementWithTrigger(
+        fullTrigger({
+          targetProcessId: 'Process_SupplierSupply_v1',
+          instancePrefix: 'inst-supp-',
+          payloadKeys: 'orderNum',
+        })
+      ),
+      selectedElementId: 'Task_Approve',
+      onChangeTrigger,
+    });
+
+    fireEvent.change(targetField(), { target: { value: '' } });
+
+    // `null` — «триггера нет»: владелец схемы снимает разметку, а не пишет
+    // её с пустым обязательным полем.
+    expect(onChangeTrigger).toHaveBeenCalledWith('Task_Approve', null);
+    expect(targetField().value).toBe('');
+    expect(prefixField().value).toBe('');
+    expect(payloadField().value).toBe('');
+  });
+
+  it('не отправляет в модель недопустимые значения и подсвечивает поле', () => {
+    const onChangeTrigger = jest.fn(() => true);
+    setup({ selectedElementId: 'Task_Approve', onChangeTrigger });
+
+    fireEvent.change(targetField(), { target: { value: '1 Плохой процесс' } });
+
+    expect(screen.getByText(TRIGGER_FIELD_ERRORS.targetProcessId)).toBeTruthy();
+    expect(targetField().getAttribute('aria-invalid')).toBe('true');
+    expect(onChangeTrigger).not.toHaveBeenCalled();
+    expect(targetField().value).toBe('1 Плохой процесс');
+
+    // Значение осталось в поле, поэтому следующая правка другого поля снова
+    // начинается с непустого «Запускаемый процесс» и уходит в модель.
+    fireEvent.change(payloadField(), { target: { value: 'orderNum' } });
+
+    expect(onChangeTrigger).toHaveBeenCalledWith(
+      'Task_Approve',
+      fullTrigger({ targetProcessId: '1 Плохой процесс', payloadKeys: 'orderNum' })
+    );
+  });
+
+  it('сообщает об ошибке поля, но помнит введённый текст', () => {
+    const onChangeTrigger = jest.fn(() => true);
+    setup({
+      elements: elementWithTrigger(fullTrigger({ targetProcessId: 'Process_Supplier' })),
+      selectedElementId: 'Task_Approve',
+      onChangeTrigger,
+    });
+
+    fireEvent.change(prefixField(), { target: { value: 'inst supp' } });
+
+    expect(screen.getByText(TRIGGER_FIELD_ERRORS.instancePrefix)).toBeTruthy();
+    expect(prefixField().getAttribute('aria-invalid')).toBe('true');
+    expect(prefixField().value).toBe('inst supp');
+    expect(onChangeTrigger).not.toHaveBeenCalled();
+
+    // Пустой «Первый узел» допустим: движок войдёт в цель штатным маршрутом.
+    fireEvent.change(prefixField(), { target: { value: 'inst-supp-' } });
+    fireEvent.change(firstField(), { target: { value: '' } });
+
+    expect(onChangeTrigger).toHaveBeenLastCalledWith(
+      'Task_Approve',
+      fullTrigger({ targetProcessId: 'Process_Supplier', instancePrefix: 'inst-supp-' })
+    );
+  });
+
+  it('откатывает поля триггера, если модель отвергла правку', () => {
+    const onChangeTrigger = jest.fn(() => false);
+    setup({
+      elements: elementWithTrigger(
+        fullTrigger({ targetProcessId: 'Process_Supplier', payloadKeys: 'orderNum' })
+      ),
+      selectedElementId: 'Task_Approve',
+      onChangeTrigger,
+    });
+
+    fireEvent.change(targetField(), { target: { value: 'Process_Other' } });
+
+    expect(targetField().value).toBe('Process_Supplier');
+    expect(payloadField().value).toBe('orderNum');
+    expect(screen.getByText(/Не удалось записать триггер/)).toBeTruthy();
+  });
+
+  it('откатывает поля триггера при исключении в модели', () => {
+    const onChangeTrigger = jest.fn(() => {
+      throw new Error('diagram-js: модель занята');
+    });
+    setup({
+      elements: elementWithTrigger(fullTrigger({ targetProcessId: 'Process_Supplier' })),
+      selectedElementId: 'Task_Approve',
+      onChangeTrigger,
+    });
+
+    fireEvent.change(targetField(), { target: { value: 'Process_Other' } });
+
+    expect(targetField().value).toBe('Process_Supplier');
+  });
+
+  it('откатывает незавершённый ввод, если поле покинуто без записи', () => {
+    const onChangeTrigger = jest.fn(() => false);
+    setup({
+      elements: elementWithTrigger(fullTrigger({ targetProcessId: 'Process_Supplier' })),
+      selectedElementId: 'Task_Approve',
+      onChangeTrigger,
+    });
+
+    fireEvent.change(payloadField(), { target: { value: 'orderNum' } });
+    fireEvent.blur(payloadField());
+
+    expect(payloadField().value).toBe('');
+  });
+
+  it('блокирует поля триггера на последовательном потоке', () => {
+    const flow = [{ id: 'Flow_1', name: '', type: 'bpmn:SequenceFlow' }];
+
+    setup({
+      elements: flow,
+      selectedElementId: 'Flow_1',
+      onChangeTrigger: jest.fn(() => true),
+    });
+
+    expect(targetField().disabled).toBe(true);
+    expect(screen.getByText(/Триггер запуска ставится только на узлы потока/)).toBeTruthy();
+
+    // У задачи поле снова доступно.
+    cleanup();
+    setup({ selectedElementId: 'Task_Approve', onChangeTrigger: jest.fn(() => true) });
+
+    expect(targetField().disabled).toBe(false);
+    expect(screen.queryByText(/Триггер запуска ставится только на узлы потока/)).toBeNull();
+  });
+
+  it('блокирует поля триггера без узла и без владельца записи', () => {
+    setup({ triggerTargets: ['Process_Supplier'] });
+    expect(targetField().disabled).toBe(true);
+
+    cleanup();
+    // Владелец не умеет писать триггер (`onChangeTrigger` не передан) —
+    // панель работает только на чтение.
+    setup({ selectedElementId: 'Task_Approve' });
+    expect(targetField().disabled).toBe(true);
+  });
+
+  it('resolveElementTrigger: приоритет у значения из реестра', () => {
+    const fromRegistry = fullTrigger({ targetProcessId: 'Process_Other' });
+
+    expect(
+      resolveElementTrigger({ id: 'Task_Approve', trigger: fromRegistry }, TRIGGER_XML)
+    ).toBe(fromRegistry);
+    expect(
+      resolveElementTrigger({ id: 'Task_Approve' }, TRIGGER_XML).targetProcessId
+    ).toBe('Process_SupplierSupply_v1');
+    expect(resolveElementTrigger({ id: 'Task_Gone' }, TRIGGER_XML)).toBeNull();
+    expect(resolveElementTrigger(null, TRIGGER_XML)).toBeNull();
+  });
+
+  it('triggerFieldError: проверяет поля теми же правилами, что и XML', () => {
+    expect(triggerFieldError('targetProcessId', 'Process_Supplier')).toBe('');
+    expect(triggerFieldError('targetProcessId', '')).toBe(TRIGGER_FIELD_ERRORS.targetProcessId);
+    expect(triggerFieldError('instancePrefix', 'inst-supp-')).toBe('');
+    expect(triggerFieldError('instancePrefix', 'inst supp')).toBe(
+      TRIGGER_FIELD_ERRORS.instancePrefix
+    );
+    expect(triggerFieldError('startElementId', '')).toBe('');
+    expect(triggerFieldError('startElementId', 'Task_Approve')).toBe('');
+    expect(triggerFieldError('startElementId', '1 Task')).toBe(TRIGGER_FIELD_ERRORS.startElementId);
+    expect(triggerFieldError('payloadKeys', 'orderNum, volume')).toBe('');
+    expect(triggerFieldError('payloadKeys', 'order num')).toBe(TRIGGER_FIELD_ERRORS.payloadKeys);
   });
 });

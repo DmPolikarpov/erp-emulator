@@ -6,9 +6,17 @@ import {
   POTENTIAL_OWNER_TYPE,
   isActivityType,
   isFlowElementType,
+  isTriggerHostType,
   isValidElementId,
   isValidRole,
+  isValidTrigger,
+  normalizeTrigger,
 } from '../xml/bpmnXml';
+import {
+  TRIGGER_FIELDS,
+  TRIGGER_MODELE_EXTENSIONS,
+  TRIGGER_TYPE,
+} from '../xml/triggerModdle';
 import { EnginePanel } from '../panels/EnginePanel';
 import '../styles/bpmn-sdk.css';
 
@@ -32,6 +40,37 @@ function roleOfBusinessObject(businessObject) {
 }
 
 /**
+ * Триггер кросс-процессного запуска из бизнес-объекта узла.
+ *
+ * Триггер — собственный тип (`trg:ProcessTrigger`), поэтому он читается из
+ * `extensionElements.values` только при зарегистрированном
+ * `TRIGGER_MODELE_EXTENSIONS`: без регистрации моделлер знает элемент лишь по
+ * имени тега (`$type` — `trg:processTrigger`, а не `trg:ProcessTrigger`),
+ * поэтому тип здесь не находится, а `moddle.create` в
+ * `handleChangeTrigger` бросает `unknown type`.
+ *
+ * @param {Object} businessObject бизнес-объект элемента из `elementRegistry`.
+ * @returns {Object|null} триггер ровно с полями `TRIGGER_FIELDS` либо `null`.
+ */
+function triggerOfBusinessObject(businessObject) {
+  const extensionElements = businessObject && businessObject.extensionElements;
+  const values = (extensionElements && extensionElements.values) || [];
+  const found = Array.isArray(values)
+    ? values.find((value) => value && value.$type === TRIGGER_TYPE)
+    : null;
+
+  if (!found) return null;
+
+  return TRIGGER_FIELDS.reduce(
+    (trigger, name) => ({
+      ...trigger,
+      [name]: found[name] == null ? '' : String(found[name]),
+    }),
+    {}
+  );
+}
+
+/**
  * Редактор BPMN-схемы с инспектором узлов.
  *
  * Отличия от прежнего `BpmnEditor`:
@@ -49,6 +88,8 @@ function roleOfBusinessObject(businessObject) {
  * @param {number|string} [props.height=420] высота холста.
  * @param {boolean} [props.showInspector=true] показывать инспектор узлов.
  * @param {string[]} [props.roleOptions=[]] роли для выбора в инспекторе.
+ * @param {string[]} [props.triggerTargets=[]] процессы, которые можно запускать
+ *   из узла (подсказки для поля `targetProcessId` инспектора).
  * @param {boolean} [props.fitOnImport=true] вписывать схему при импорте.
  * @param {string} [props.className] дополнительные CSS-классы.
  * @param {Object} [props.style] дополнительные inline-стили контейнера.
@@ -62,6 +103,7 @@ export function BpmnEditor({
   height = 420,
   showInspector = true,
   roleOptions = [],
+  triggerTargets = [],
   fitOnImport = true,
   className = '',
   style,
@@ -101,6 +143,7 @@ export function BpmnEditor({
             : '',
           type: element.type,
           role: roleOfBusinessObject(element.businessObject),
+          trigger: triggerOfBusinessObject(element.businessObject),
         }))
     );
   }, []);
@@ -139,7 +182,12 @@ export function BpmnEditor({
   useEffect(() => {
     if (!containerRef.current) return undefined;
 
-    const modeler = new Modeler({ container: containerRef.current });
+    const modeler = new Modeler({
+      container: containerRef.current,
+      // Без регистрации `trg:processTrigger` моделлер не знает собственный тип
+      // и теряет триггер при `saveXML` (та же ловушка, что и с `camunda:*`).
+      moddleExtensions: TRIGGER_MODELE_EXTENSIONS,
+    });
     modelerRef.current = modeler;
 
     const handleChanged = () => {
@@ -308,6 +356,63 @@ export function BpmnEditor({
     return true;
   }, []);
 
+  /**
+   * Запись/снятие триггера кросс-процессного запуска.
+   *
+   * Триггер живёт в `extensionElements` узла, а не в его бизнес-объекте, поэтому
+   * вся цепочка расширений пересобирается новым объектом (`bpmn:ExtensionElements`
+   * + `trg:ProcessTrigger`): `modeling.updateProperties` пишет свойство узла, а
+   * `UpdatePropertiesHandler` фиксирует правку по новому значению. Чужие
+   * расширения узла (`camunda:*` и прочее) при этом сохраняются.
+   *
+   * `null` снимает триггер. Триггер ставится только на узлы потока: движок
+   * активирует их токеном, а на `sequenceFlow` он никогда не сработает.
+   *
+   * @param {string} elementId идентификатор узла.
+   * @param {Object|null} trigger триггер (`TRIGGER_FIELDS`) либо `null`.
+   * @returns {boolean} правка принята (`false` => инспектор вернёт поля назад).
+   */
+  const handleChangeTrigger = useCallback((elementId, trigger) => {
+    const modeler = modelerRef.current;
+    if (!modeler) return false;
+    if (trigger && !isValidTrigger(trigger)) return false;
+
+    const element = modeler.get('elementRegistry').get(elementId);
+    if (!element) return false;
+    if (trigger && !isTriggerHostType(element.type)) return false;
+
+    const moddle = modeler.get('moddle');
+    const current =
+      (element.businessObject.extensionElements &&
+        element.businessObject.extensionElements.values) ||
+      [];
+    const kept = current.filter((value) => !value || value.$type !== TRIGGER_TYPE);
+
+    const values = [...kept];
+    if (trigger) {
+      try {
+        values.push(moddle.create(TRIGGER_TYPE, normalizeTrigger(trigger)));
+      } catch (e) {
+        return false;
+      }
+    }
+
+    const extensionElements =
+      values.length > 0
+        ? moddle.create('bpmn:ExtensionElements', { values })
+        : undefined;
+
+    try {
+      // `undefined`, а не пустой контейнер: иначе в схеме остаётся
+      // `<bpmn:extensionElements />` — след снятого триггера.
+      modeler.get('modeling').updateProperties(element, { extensionElements });
+    } catch (e) {
+      return false;
+    }
+
+    return true;
+  }, []);
+
   return (
     <div
       className={['bpmn-sdk-editor', className].filter(Boolean).join(' ')}
@@ -329,6 +434,8 @@ export function BpmnEditor({
           onChangeName={handleChangeName}
           roleOptions={roleOptions}
           onChangeRole={handleChangeRole}
+          triggerTargets={triggerTargets}
+          onChangeTrigger={handleChangeTrigger}
         />
       )}
     </div>

@@ -453,6 +453,26 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(screen.getByText(/Сырье доставлено/)).toBeTruthy();
   });
 
+  // Кросс-процессный триггер узла (`trg:processTrigger`) запускает процесс
+  // второй стороны, поэтому подсказки поля «Запускаемый процесс» инспектора
+  // берутся из схемы соседа: у Заказчика — процессы Поставщика и наоборот.
+  it('инспектор узла подсказывает процессы второй стороны для триггера', () => {
+    openAs('Руководитель Заказчика');
+    fireEvent.click(screen.getByText('Редактор схемы'));
+
+    expect(lastProps(mockEditorProps).triggerTargets).toEqual([
+      'Process_SupplierSupply_v1',
+    ]);
+
+    fireEvent.click(screen.getByText('Выход'));
+    fireEvent.click(screen.getByText('Руководитель Поставщика'));
+    fireEvent.click(screen.getByText('Редактор схемы'));
+
+    expect(lastProps(mockEditorProps).triggerTargets).toEqual([
+      'Process_MilkCustomer_v1',
+    ]);
+  });
+
   /* ------------------------------------------------------------------ *
    * Локальный кэш схем (`src/schemaStore.js`)
    * ------------------------------------------------------------------ */

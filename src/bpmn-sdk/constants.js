@@ -141,6 +141,28 @@ export const ELEMENT_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
  */
 export const ROLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 
+/**
+ * Допустимый префикс идентификатора экземпляра
+ * (`trg:processTrigger/@instancePrefix`).
+ *
+ * Пустая строка допустима: префикс — необязательное поле, без него движок
+ * собирает идентификатор сам (`inst-` + uuid). Ведущая буква не требуется:
+ * штатные префиксы SDK (`INSTANCE_PREFIX`) тоже начинаются со строчной.
+ */
+export const INSTANCE_PREFIX_PATTERN = /^[A-Za-z0-9_.-]*$/;
+
+/** Разделитель списка ключей payload (`trg:processTrigger/@payloadKeys`). */
+export const TRIGGER_PAYLOAD_KEYS_SEPARATOR = ',';
+
+/**
+ * Допустимый ключ payload (`trg:processTrigger/@payloadKeys`).
+ *
+ * Ключи — это имена полей JSON-контекста экземпляра (`orderNum`, `volume`,
+ * `bpmn_xml`), поэтому грамматика та же, что у `element_id`: значение
+ * уезжает в XML-атрибут и должно читаться однозначно.
+ */
+export const TRIGGER_PAYLOAD_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+
 /** Коды ошибок SDK. */
 export const ERROR_KINDS = {
   HTTP: 'http',
