@@ -92,7 +92,13 @@ export default function App() {
       logEvent(orgType, 'ALL', 'Схема задеплоена', `Руководитель задеплоил новую конфигурацию схемы ${orgType} в кластер.`);
       alert(`Схема ${orgType} успешно передана в оркестратор!`);
     } else {
-      alert(`Ошибка деплоя: ${result.error}`);
+      const details = result.details ? ` — ${result.details}` : '';
+      // 500 чаще всего означает, что запрос вообще не дошёл до шлюза:
+      // CRA dev-server отвечает 500, если проброс localhost:8080 не поднят.
+      const hint = result.status >= 500
+        ? '\nПроверьте доступность HTTP-шлюза: kubectl port-forward service/http-cluster-service 8080:8080'
+        : '';
+      alert(`Ошибка деплоя: ${result.error}${details}${hint}`);
     }
     setIsDeploying(false);
   };

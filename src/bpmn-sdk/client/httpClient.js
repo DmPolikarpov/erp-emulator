@@ -36,16 +36,57 @@ export function normalizeGatewayUrl(baseUrl) {
     : `${trimmed}/${EVENTS_SEGMENT}`;
 }
 
+/** Максимальная длина текстового «хвоста» не-JSON ответа в сообщении об ошибке. */
+const MAX_TEXT_DETAILS_LENGTH = 160;
+
+/**
+ * Сжимает не-JSON тело ответа в короткую однострочную подсказку.
+ *
+ * Ошибку отдаёт не только шлюз: CRA dev-server при мёртвом пробросе
+ * отвечает HTML-страницей «Error occurred while trying to proxy», а
+ * body-parser — HTML-страницей 413. Без этой подсказки пользователь
+ * видел лишь код статуса и не понимал, что именно чинить.
+ */
+async function readTextDetails(response) {
+  if (!response || typeof response.text !== 'function') return null;
+
+  try {
+    const text = String(await response.text())
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!text) return null;
+
+    return text.length > MAX_TEXT_DETAILS_LENGTH
+      ? `${text.slice(0, MAX_TEXT_DETAILS_LENGTH)}…`
+      : text;
+  } catch (e) {
+    return null;
+  }
+}
+
 /** Достаёт из ответа шлюза человекочитаемую причину отказа. */
 async function readErrorDetails(response) {
   try {
-    const payload = await response.json();
+    const payload = await response.json().catch(() => null);
+
+    // Тело не JSON: так отвечает не шлюз, а промежуточный слой
+    // (CRA-прокси на мёртвый port-forward, body-parser при 413).
+    // Показываем текстовую причину, если она есть в ответе.
+    if (!payload) return readTextDetails(response);
 
     if (Array.isArray(payload.details) && payload.details.length > 0) {
       const fields = payload.details
         .map((detail) => `${detail.field || 'body'}: ${detail.message}`)
         .join('; ');
       return `${payload.error || 'Ошибка валидации'} (${fields})`;
+    }
+
+    // Шлюз может отдать `details` строкой (текст ошибки NATS, подсказка
+    // про лимит тела запроса) — показываем её как есть.
+    if (typeof payload.details === 'string' && payload.details.trim() !== '') {
+      return `${payload.error || 'Ошибка шлюза'}: ${payload.details.trim()}`;
     }
 
     return payload.error || null;

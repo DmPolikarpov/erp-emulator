@@ -123,6 +123,50 @@ describe('httpClient: GatewayClient.sendEvent', () => {
     expect(result.details).toContain('must be string');
   });
 
+  it('показывает причину из не-JSON ответа промежуточного слоя', async () => {
+    // Так выглядит 500 от CRA dev-server, когда port-forward на HTTP-шлюз
+    // не поднят: тело — HTML-страница, а не JSON.
+    const fetchImpl = jest.fn(async () => ({
+      ok: false,
+      status: 500,
+      json: async () => {
+        throw new Error('Unexpected token < in JSON at position 0');
+      },
+      text: async () =>
+        '<html><head><title>Error</title></head><body><pre>Error occurred while ' +
+        'trying to proxy request /api/v1/process/instances/inst-deploy-customer/events ' +
+        'to http://localhost:8080 (ECONNREFUSED)</pre></body></html>',
+    }));
+    const client = new GatewayClient('/api/v1/process/instances', { fetchImpl });
+
+    const result = await client.sendEvent('inst-deploy-customer', 'DeploySchema');
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(500);
+    expect(result.error).toBe('Оркестратор вернул ошибку (500)');
+    expect(result.details).toContain('ECONNREFUSED');
+  });
+
+  it('показывает строковые details из JSON-ответа шлюза', async () => {
+    const fetchImpl = jest.fn(async () =>
+      createResponse({
+        ok: false,
+        status: 503,
+        body: {
+          error: 'NATS JetStream is not connected',
+          details: 'Шлюз не подключён к NATS: проверьте стрим INBOUND_EVENTS.',
+        },
+      })
+    );
+    const client = new GatewayClient('/api/v1/process/instances', { fetchImpl });
+
+    const result = await client.sendEvent('inst-cust-1', 'StartProcess');
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain('NATS JetStream is not connected');
+    expect(result.details).toContain('INBOUND_EVENTS');
+  });
+
   it('переживает ответ без JSON', async () => {
     const fetchImpl = jest.fn(async () => ({
       ok: false,
