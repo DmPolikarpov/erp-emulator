@@ -72,6 +72,15 @@
         background: #fff;
         font-size: 14px;
       }
+      .demo__button {
+        padding: 6px 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #fff;
+        color: #0f172a;
+        font-size: 14px;
+        cursor: pointer;
+      }
       .demo__grid {
         display: grid;
         grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
@@ -140,6 +149,15 @@
           sdk.TOKEN_STATES.TIMED_OUT,
         ];
 
+        /**
+         * Роли для выпадающего списка инспектора узлов.
+         *
+         * В бандл SDK словарь ролей не входит (это данные приложения: в
+         * `erp-simulator` он живёт в `src/roles.js`), поэтому демо-страница
+         * объявляет роли пользователей своего UI сама.
+         */
+        var ROLE_OPTIONS = ['MANAGER', 'SECURITY', 'QUALITY', 'SUPPLIER_MANAGER'];
+
         /** Карточка «что внутри бандла»: данные из BUILD_INFO.json. */
         function BuildInfo() {
           var state = React.useState(null);
@@ -183,8 +201,23 @@
           var state = React.useState(STATES[0]);
           var tokenState = state[0];
 
-          var elements = React.useMemo(function () {
-            return sdk.listFlowElements(XML);
+          // Схема — состояние демо: правки инспектора возвращаются в неё через
+          // `setElementRole`/`setElementTrigger` и сразу видны просмотрщику.
+          var schema = React.useState(XML);
+          var xml = schema[0];
+
+          var elements = React.useMemo(
+            function () {
+              return sdk.listFlowElements(xml);
+            },
+            [xml]
+          );
+
+          // Подсказки поля «Запускаемый процесс» — идентификаторы процессов
+          // второй стороны: в демо у заказчика это процессы поставщика (в
+          // приложении схема соседа подставляется так же — `getProcessIds`).
+          var triggerTargets = React.useMemo(function () {
+            return sdk.getProcessIds(sdk.DEFAULT_SUPPLIER_BPMN_XML);
           }, []);
 
           var tokens = React.useMemo(
@@ -198,6 +231,37 @@
 
           var highlight = sdk.useTokenHighlight(tokens, {});
 
+          /**
+           * Правка схемы демо.
+           *
+           * Инспектор считает правку применённой, если обработчик вернул не
+           * `false` (иначе он вернёт поля к фактическим значениям), поэтому
+           * исключения SDK (`setElementRole` бросает на событии или шлюзе,
+           * `setElementTrigger` — на последовательном потоке) гасятся здесь и
+           * печатаются в консоль.
+           */
+          function applySchema(update) {
+            try {
+              schema[1](update(xml));
+              return true;
+            } catch (error) {
+              console.error('Правка схемы:', error);
+              return false;
+            }
+          }
+
+          function changeRole(id, role) {
+            return applySchema(function (current) {
+              return sdk.setElementRole(current, id, role);
+            });
+          }
+
+          function changeTrigger(id, trigger) {
+            return applySchema(function (current) {
+              return sdk.setElementTrigger(current, id, trigger);
+            });
+          }
+
           return h(
             'div',
             { className: 'demo' },
@@ -206,7 +270,11 @@
               'p',
               { className: 'demo__hint' },
               'Бандл самодостаточен: bpmn-js, стили холста и шрифт уже внутри; React ' +
-                'подключается отдельно и используется всеми компонентами SDK.'
+                'подключается отдельно и используется всеми компонентами SDK. ' +
+                'Инспектор пишет правки прямо в схему демо: роль — через ' +
+                'setElementRole, запуск второго процесса (trg:processTrigger) — через ' +
+                'setElementTrigger, а подсказки процессов берутся из второй демо-схемы ' +
+                'функцией getProcessIds.'
             ),
             h(
               'div',
@@ -248,13 +316,24 @@
                     return h('option', { key: value, value: value }, value);
                   })
                 )
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'demo__button',
+                  onClick: function () {
+                    schema[1](XML);
+                  },
+                },
+                'Вернуть демо-схему'
               )
             ),
             h(
               'div',
               { className: 'demo__grid' },
               h(sdk.BpmnViewer, {
-                xml: XML,
+                xml: xml,
                 tokens: highlight.tokenMap,
                 activeElementId: highlight.activeElementId,
                 height: 560,
@@ -266,11 +345,16 @@
                 'div',
                 { className: 'demo__card' },
                 h(sdk.EnginePanel, {
+                  xml: xml,
                   elements: elements,
                   selectedElementId: elementId,
                   onSelect: function (id) {
                     element[1](id || elementId);
                   },
+                  roleOptions: ROLE_OPTIONS,
+                  onChangeRole: changeRole,
+                  triggerTargets: triggerTargets,
+                  onChangeTrigger: changeTrigger,
                   title: 'Инспектор узлов',
                 })
               )
