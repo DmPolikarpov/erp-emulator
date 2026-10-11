@@ -7,30 +7,99 @@ import {
   DEFAULT_SUPPLIER_BPMN_XML,
   INSTANCE_PREFIX,
   SOCKET_EVENTS,
+  TOKEN_STATES,
   createUuid,
+  getElementRole,
   isDeployInstanceId,
   useBpmnEngine,
   useProcessTokens,
 } from './vendor/bpmn-sdk';
 import { 
-  Factory, Truck, ShieldCheck, ClipboardCheck, FileText, Upload, Send, 
-  LogOut, History, KeyRound, Layers, PlusCircle, Crown, Building2, BarChart2,
-  PackageCheck, Clock, CheckCircle2, Loader2, AlertCircle, Pencil
+  Truck, ShieldCheck, ClipboardCheck, FileText, Upload, Send, 
+  LogOut, History, KeyRound, Layers, PlusCircle, BarChart2,
+  PackageCheck, Clock, CheckCircle2, Loader2, AlertCircle, Pencil,
+  Save, RotateCcw
 } from 'lucide-react';
+import { ROLE_CODES, USERS } from './roles';
+import {
+  clearSchema,
+  formatSavedAt,
+  loadSchema,
+  saveSchema,
+} from './schemaStore';
 
 // Базовый URL API Gateway: `REACT_APP_GATEWAY_URL` (см. `.env`) либо
 // относительный путь — тогда запросы идут через CRA-прокси (`package.json`).
 const API_BASE_URL = DEFAULT_GATEWAY_URL;
 
-const USERS = [
-  { username: 'executive', pass: '123', name: 'Алексей Директоров', role: 'EXECUTIVE', org: 'CUSTOMER', orgName: 'Молочный Завод', roleName: 'Руководитель Заказчика', icon: Crown },
-  { username: 'supplier_exec', pass: '123', name: 'Виктор Поставщиков', role: 'SUPPLIER_EXECUTIVE', org: 'SUPPLIER', orgName: 'ООО «Альпийские Луга»', roleName: 'Руководитель Поставщика', icon: Building2 },
-  { username: 'production', pass: '123', name: 'Михаил Цехов', role: 'PRODUCTION', org: 'CUSTOMER', orgName: 'Молочный Завод', roleName: 'Мастер производства', icon: PackageCheck },
-  { username: 'manager', pass: '123', name: 'Иван Менеджеров', role: 'MANAGER', org: 'CUSTOMER', orgName: 'Молочный Завод', roleName: 'Менеджер закупок', icon: Factory },
-  { username: 'security', pass: '123', name: 'Сергей Охранов', role: 'SECURITY', org: 'CUSTOMER', orgName: 'Молочный Завод', roleName: 'Охрана КПП', icon: ShieldCheck },
-  { username: 'quality', pass: '123', name: 'Елена Лаборантова', role: 'QUALITY', org: 'CUSTOMER', orgName: 'Молочный Завод', roleName: 'Специалист ОТК', icon: ClipboardCheck },
-  { username: 'supplier_mgr', pass: '123', name: 'Петр Отгрузчиков', role: 'SUPPLIER_MANAGER', org: 'SUPPLIER', orgName: 'ООО «Альпийские Луга»', roleName: 'Менеджер Поставщика', icon: Truck },
-];
+/** Демо-схемы SDK по организациям — точка отсчёта правок в редакторе. */
+const DEFAULT_SCHEMA_BY_ORG = {
+  CUSTOMER: DEFAULT_CUSTOMER_BPMN_XML,
+  SUPPLIER: DEFAULT_SUPPLIER_BPMN_XML,
+};
+
+/**
+ * Стартовое событие процесса — узел, который называет событие `StartProcess`.
+ *
+ * В его `payload` уходит `bpmn_xml`: по нему движок компилирует определение,
+ * поэтому схему нельзя перенести на другое событие старта.
+ */
+const START_EVENT_BY_ORG = {
+  CUSTOMER: 'StartEvent_Customer',
+  SUPPLIER: 'StartEvent_Supplier',
+};
+
+/**
+ * Первый шаг каждой схемы — узел сразу после стартового события.
+ *
+ * Движок не делает переходов сам: событие называет узел, который станет
+ * `ACTIVE`, а прежний активный узел закрывается как `COMPLETED`. Поэтому старт
+ * процесса — это два события (см. `startProcess`): `StartProcess` ставит токен
+ * на стартовое событие, а второе событие переносит его на первый шаг. Без
+ * второго события «текущий шаг» интерфейса (`customerActiveElementId` /
+ * `supplierActiveElementId` — в них пишется первый блок) существует только в
+ * браузере: движок закроет как `COMPLETED` стартовое событие, а первый блок в
+ * его состоянии вообще не появится — после выполнения он не покрасится.
+ */
+const FIRST_STEP_BY_ORG = {
+  CUSTOMER: {
+    event: 'StartPurchaseOrder',
+    elementId: 'Task_CreatePurchaseOrder',
+  },
+  SUPPLIER: {
+    event: 'StartSupplierDocs',
+    elementId: 'Task_SupplierCreateDocs',
+  },
+};
+
+/**
+ * Схема организации на старте приложения.
+ *
+ * Приоритет у копии, сохранённой в браузере (`src/schemaStore.js`): правки
+ * редактора переживают перезагрузку страницы. Если копии нет — демо-схема SDK.
+ * Читаем кэш лениво (`useState(() => ...)`), то есть ровно один раз при
+ * монтировании, а не на каждый рендер.
+ */
+const initialSchemaXml = (org) => loadSchema(org)?.xml || DEFAULT_SCHEMA_BY_ORG[org];
+
+/**
+ * Двигал ли токен «текущий шаг» процесса.
+ *
+ * Движок держит на экземпляр ровно один `ACTIVE`-токен: активируя новый узел,
+ * он закрывает прежний (`COMPLETED`). Поэтому «текущий шаг» — это только
+ * `ACTIVE`, а `COMPLETED` не должен ни откатывать шаг назад, ни закрывать
+ * карточку заказа.
+ */
+const isTokenActive = (state) => state === TOKEN_STATES.ACTIVE;
+
+/**
+ * Статус стороны по событию токена.
+ *
+ * `COMPLETED` в статус не переносим: так движок закрывает прежний узел, и
+ * заказ помечался бы завершённым после первого же шага (см. `isOrderCompleted`).
+ */
+const nextProcessState = (currentState, state) =>
+  state === TOKEN_STATES.COMPLETED ? currentState : state || currentState;
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
@@ -38,8 +107,16 @@ export default function App() {
   const [passwordInput, setPasswordInput] = useState('123');
   const [authError, setAuthError] = useState('');
 
-  const [customerBpmnXml, setCustomerBpmnXml] = useState(DEFAULT_CUSTOMER_BPMN_XML);
-  const [supplierBpmnXml, setSupplierBpmnXml] = useState(DEFAULT_SUPPLIER_BPMN_XML);
+  // Схема стороны: копия из браузера (если редактор её сохранял) либо демо-схема.
+  const [customerBpmnXml, setCustomerBpmnXml] = useState(() => initialSchemaXml('CUSTOMER'));
+  const [supplierBpmnXml, setSupplierBpmnXml] = useState(() => initialSchemaXml('SUPPLIER'));
+
+  // Сохранённые в браузере копии схем по организациям: из них складывается
+  // бейдж «Сохранено в …» и индикатор несохранённых правок.
+  const [savedSchemas, setSavedSchemas] = useState(() => ({
+    CUSTOMER: loadSchema('CUSTOMER'),
+    SUPPLIER: loadSchema('SUPPLIER'),
+  }));
   
   // SDK: HTTP-клиент API Gateway и WS-подписка на токены процесса
   // (реконнект, парсинг кадров и жизненный цикл соединения — внутри SDK).
@@ -47,6 +124,77 @@ export default function App() {
 
   // Токены по всем экземплярам процесса — источник подсветки узлов на схеме.
   const { tokensFor } = useProcessTokens(socket, []);
+
+  /** Схема стороны (`CUSTOMER`/`SUPPLIER`) — источник назначений ролей. */
+  const schemaXml = useCallback(
+    (org) => (org === 'SUPPLIER' ? supplierBpmnXml : customerBpmnXml),
+    [supplierBpmnXml, customerBpmnXml]
+  );
+
+  /** Роль исполнителя узла по схеме (`''` — роль не назначена). */
+  const roleOf = useCallback(
+    (org, elementId) => getElementRole(schemaXml(org), elementId),
+    [schemaXml]
+  );
+
+  /**
+   * Может ли текущий пользователь вести хотя бы один из перечисленных шагов.
+   *
+   * Роли живут в схеме (`bpmn:potentialOwner`), а не в коде: перераспределить
+   * шаг между ролями можно в редакторе схемы, и интерфейс поедет за ней.
+   * Организация берётся из её собственной схемы: у Заказчика и Поставщика
+   * свои процессы и свои назначения.
+   */
+  const canWork = useCallback(
+    (org, elementIds) => {
+      if (!currentUser) return false;
+
+      return elementIds.some((elementId) => roleOf(org, elementId) === currentUser.role);
+    },
+    [currentUser, roleOf]
+  );
+
+  /**
+   * Запускает экземпляр процесса и ставит токен на его первый шаг.
+   *
+   * Событий два, а не одно: `StartProcess` называет стартовое событие (и несёт
+   * `bpmn_xml` — по нему движок компилирует определение), а событие первого
+   * шага переводит токен со стартового события на первый блок схемы. Иначе
+   * подсветка первого шага живёт только в интерфейсе, и после его выполнения
+   * зелёным станет стартовое событие, а сам блок — нет (см. `FIRST_STEP_BY_ORG`).
+   *
+   * @param {'CUSTOMER'|'SUPPLIER'} org чья схема запускает процесс.
+   * @param {string} instanceId идентификатор нового экземпляра процесса.
+   * @param {string} bpmnXml схема стороны (`bpmn_xml` для движка).
+   * @param {Object} [payload] выходные данные запуска: уходят в оба события,
+   *   поэтому во втором схему передавать не нужно.
+   * @returns {Promise<{start: Object, step: Object|null}>} ответы шлюза;
+   *   `step === null`, если экземпляр процесса не создан.
+   */
+  const startProcess = useCallback(
+    async (org, instanceId, bpmnXml, payload = {}) => {
+      const firstStep = FIRST_STEP_BY_ORG[org];
+
+      const start = await client.sendEvent(
+        instanceId,
+        'StartProcess',
+        START_EVENT_BY_ORG[org],
+        { bpmn_xml: bpmnXml, ...payload }
+      );
+
+      if (!start.ok) return { start, step: null };
+
+      const step = await client.sendEvent(
+        instanceId,
+        firstStep.event,
+        firstStep.elementId,
+        payload
+      );
+
+      return { start, step };
+    },
+    [client]
+  );
 
   const [schemaMode, setSchemaMode] = useState('view');
   const [isDeploying, setIsDeploying] = useState(false);
@@ -83,12 +231,28 @@ export default function App() {
     setNotifications(prev => [...newEntries, ...prev]);
   }, []);
 
+  /**
+   * Пишет схему организации в кэш браузера (`localStorage`).
+   *
+   * Возвращает запись либо `null`: хранилище может быть недоступно
+   * (приватный режим, переполненная квота) — тогда правки остаются только в
+   * состоянии React, и текущая сессия работает как раньше.
+   */
+  const cacheBpmnSchema = (orgType, xmlData) => {
+    const record = saveSchema(orgType, xmlData);
+    if (record) setSavedSchemas((prev) => ({ ...prev, [orgType]: record }));
+    return record;
+  };
+
   // Деплой схемы: SDK сам формирует служебный экземпляр `inst-deploy-<org>`,
   // имя события `DeploySchema` и `element_id` = `Process_Deployment`.
   const deployBpmnSchema = async (orgType, xmlData) => {
     setIsDeploying(true);
     const result = await client.deploySchema(orgType, xmlData);
     if (result.ok) {
+      // Деплой обновляет и копию в браузере: определение процесса в кластере и
+      // схема, которую показывает кабинет, не должны расходиться после F5.
+      cacheBpmnSchema(orgType, xmlData);
       logEvent(orgType, 'ALL', 'Схема задеплоена', `Руководитель задеплоил новую конфигурацию схемы ${orgType} в кластер.`);
       alert(`Схема ${orgType} успешно передана в оркестратор!`);
     } else {
@@ -121,6 +285,10 @@ export default function App() {
       const payloadData = token.payload || {};
       const targetOrderNum = payloadData.orderNum;
 
+      // «Текущий шаг» — только активация узла: прежний узел движок закрывает
+      // событием `COMPLETED` в момент активации следующего (см. `isTokenActive`).
+      const isActive = isTokenActive(state);
+
       setOrders(prevOrders => {
         const orderIndex = prevOrders.findIndex(
           o => o.customerInstanceId === instanceId ||
@@ -139,10 +307,12 @@ export default function App() {
             return {
               ...order,
               supplierInstanceId: isSupplier ? instanceId : order.supplierInstanceId,
-              customerActiveElementId: isCustomer ? (elementId || order.customerActiveElementId) : order.customerActiveElementId,
-              customerProcessState: isCustomer ? (state || order.customerProcessState) : order.customerProcessState,
-              supplierActiveElementId: isSupplier ? (elementId || order.supplierActiveElementId) : order.supplierActiveElementId,
-              supplierProcessState: isSupplier ? (state || order.supplierProcessState) : order.supplierProcessState,
+              // Активный узел двигает только ACTIVE: COMPLETED прежнего узла
+              // иначе откатил бы «текущий шаг» назад.
+              customerActiveElementId: isCustomer && isActive ? (elementId || order.customerActiveElementId) : order.customerActiveElementId,
+              customerProcessState: isCustomer ? nextProcessState(order.customerProcessState, state) : order.customerProcessState,
+              supplierActiveElementId: isSupplier && isActive ? (elementId || order.supplierActiveElementId) : order.supplierActiveElementId,
+              supplierProcessState: isSupplier ? nextProcessState(order.supplierProcessState, state) : order.supplierProcessState,
               ...payloadData
             };
           });
@@ -152,6 +322,13 @@ export default function App() {
             setActionLoading(prev => ({ ...prev, [updatedOrder.id]: null }));
           }
           return updatedOrders;
+        }
+
+        // Заказ заводим только по активации узла: `COMPLETED` приходит и для
+        // экземпляров, которые этот клиент не начинал (например, страница
+        // открыта посреди процесса) — «заказ-призрак» из него не нужен.
+        if (!isActive) {
+          return prevOrders;
         }
 
         if (instanceId.startsWith(INSTANCE_PREFIX.SUPPLIER)) {
@@ -187,25 +364,45 @@ export default function App() {
     setActionLoading(prev => ({ ...prev, [orderNum]: 'Создание заказа в оркестраторе...' }));
     setActionErrors(prev => ({ ...prev, [orderNum]: null }));
 
-    const res = await client.sendEvent(
-      custInstId, 'StartProcess', 'StartEvent_Customer', 
-      { bpmn_xml: customerBpmnXml, orderNum, volume: '100 Л', initiator: 'PRODUCTION' }
-    );
+    // Запуск процесса: `StartProcess` ставит токен на стартовое событие, второе
+    // событие переносит его на первый шаг — `Task_CreatePurchaseOrder`.
+    const { start, step } = await startProcess('CUSTOMER', custInstId, customerBpmnXml, {
+      orderNum, volume: '100 Л', initiator: 'PRODUCTION'
+    });
 
-    if (res.ok) {
+    if (start.ok) {
       const pendingOrder = {
         id: orderNum,
         createdAt: new Date().toLocaleTimeString('ru-RU'),
         volume: '100 Л',
         customerInstanceId: custInstId,
-        customerActiveElementId: 'Task_CreatePurchaseOrder',
+        // Первый шаг процесса (`FIRST_STEP_BY_ORG`): `startProcess` уже поставил
+        // на этот узел токен в движке, поэтому подсветка и «текущий шаг» сходятся.
+        customerActiveElementId: FIRST_STEP_BY_ORG.CUSTOMER.elementId,
         customerProcessState: 'ACTIVE',
         supplierInstanceId: null,
         documents: null, passData: null, shippedAt: null, entryTime: null, checkedAt: null
       };
       setOrders(prev => [pendingOrder, ...prev]);
       setSelectedOrderId(orderNum);
-      logEvent('CUSTOMER', ['PRODUCTION', 'MANAGER'], 'Заявка производства сформирована', `Запущен процесс для ${orderNum}`, orderNum);
+
+      // Кого уведомлять — тоже решает схема: роль первого шага процесса
+      // (`FIRST_STEP_BY_ORG.CUSTOMER`) плюс роль того, кто действие выполнил.
+      // Если роли в схеме не назначены, уведомление никому не адресуется.
+      const notifyRoles = [
+        currentUser ? currentUser.role : '',
+        roleOf('CUSTOMER', FIRST_STEP_BY_ORG.CUSTOMER.elementId),
+      ].filter(Boolean);
+
+      logEvent('CUSTOMER', notifyRoles, 'Заявка производства сформирована', `Запущен процесс для ${orderNum}`, orderNum);
+
+      // Экземпляр создан, а токен остался на стартовом событии: заказ в списке
+      // есть, но подсветки первого шага на схеме не будет — движок о таком шаге
+      // не знает. Пишем это в журнал: молчаливая потеря подсветки — это та же
+      // ошибка, только без объяснения (см. `startProcess`).
+      if (step && !step.ok) {
+        logEvent('SYSTEM', notifyRoles, 'Токен не встал на первый шаг', `Узел ${FIRST_STEP_BY_ORG.CUSTOMER.elementId} остался без подсветки: движок держит токен на ${START_EVENT_BY_ORG.CUSTOMER}`, orderNum);
+      }
     } else {
       setActionLoading(prev => ({ ...prev, [orderNum]: null }));
       setActionErrors(prev => ({ ...prev, [orderNum]: 'Произошла ошибка при запуске заказа. Попробуйте еще раз.' }));
@@ -228,14 +425,17 @@ export default function App() {
     );
 
     if (resCust.ok) {
-      const resSupp = await client.sendEvent(
-        suppInstId, 'StartProcess', 'StartEvent_Supplier', 
-        { bpmn_xml: supplierBpmnXml, orderNum: orderId }
+      // Процесс Поставщика стартует так же — стартовое событие плюс постановка
+      // токена на первый шаг (`Task_SupplierCreateDocs`), см. `startProcess`.
+      const { start: resSupp, step: resSuppStep } = await startProcess(
+        'SUPPLIER', suppInstId, supplierBpmnXml, { orderNum: orderId }
       );
 
       if (!resSupp.ok) {
         setActionLoading(prev => ({ ...prev, [orderId]: null }));
         setActionErrors(prev => ({ ...prev, [orderId]: 'Ошибка создания процесса у Поставщика. Попробуйте еще раз.' }));
+      } else if (resSuppStep && !resSuppStep.ok) {
+        logEvent('SYSTEM', 'ALL', 'Токен не встал на первый шаг Поставщика', `Узел ${FIRST_STEP_BY_ORG.SUPPLIER.elementId} остался без подсветки: движок держит токен на ${START_EVENT_BY_ORG.SUPPLIER}`, orderId);
       }
     } else {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
@@ -452,6 +652,50 @@ export default function App() {
   const UserIcon = currentUser.icon;
   const currentOrder = orders.find(o => o.id === selectedOrderId) || orders[0] || null;
 
+  /* ------------------------------ *
+   * Локальный кэш схемы в браузере
+   * ------------------------------ */
+
+  const currentOrg = currentUser.org;
+  const currentSchemaXml = schemaXml(currentOrg);
+  const savedSchema = savedSchemas[currentOrg];
+  // Правки расходятся с сохранённой копией, а если копии ещё нет — с демо-схемой.
+  const isSchemaUnsaved =
+    (savedSchema ? savedSchema.xml : DEFAULT_SCHEMA_BY_ORG[currentOrg]) !== currentSchemaXml;
+
+  /** Подпись бейджа: несохранённые правки / копия в браузере / демо-схема. */
+  const schemaSaveLabel = () => {
+    if (isSchemaUnsaved) return '⚠ Есть несохранённые изменения';
+    if (!savedSchema) return 'Схема по умолчанию';
+
+    const savedAt = formatSavedAt(savedSchema.savedAt);
+    return savedAt ? `✅ Сохранено в ${savedAt}` : '✅ Сохранено в браузере';
+  };
+
+  /** Кнопка «Сохранить схему»: правки переживут перезагрузку страницы. */
+  const handleSaveSchema = () => {
+    const record = cacheBpmnSchema(currentOrg, currentSchemaXml);
+
+    if (!record) {
+      logEvent(currentOrg, 'ALL', 'Схема не сохранена', 'Браузер не дал сохранить схему локально (приватный режим или переполнено хранилище).');
+      return;
+    }
+
+    logEvent(currentOrg, 'ALL', 'Схема сохранена', `Схема сохранена в браузере в ${formatSavedAt(record.savedAt)} — правки подхватятся при следующем открытии приложения.`);
+  };
+
+  /** Кнопка «Демо-схема»: забывает копию в браузере и возвращает схему из SDK. */
+  const handleResetSchema = () => {
+    clearSchema(currentOrg);
+    setSavedSchemas((prev) => ({ ...prev, [currentOrg]: null }));
+
+    const defaultXml = DEFAULT_SCHEMA_BY_ORG[currentOrg];
+    if (currentOrg === 'SUPPLIER') setSupplierBpmnXml(defaultXml);
+    else setCustomerBpmnXml(defaultXml);
+
+    logEvent(currentOrg, 'ALL', 'Схема сброшена', `Восстановлена демо-схема ${currentOrg}, сохранённая копия удалена.`);
+  };
+
   const isOrderCompleted = (order) => {
     return order && (order.checkedAt || order.customerProcessState === 'COMPLETED' || order.customerActiveElementId === 'EndEvent_Customer');
   };
@@ -569,6 +813,9 @@ export default function App() {
           </div>
         </div>
 
+        {/* Старт процесса: `bpmn:potentialOwner` по спецификации есть только у
+            Activity, поэтому у `StartEvent_Customer` роли в схеме быть не может —
+            инициатора запуска клиент знает сам (см. README, «Роль исполнителя»). */}
         {currentUser.role === 'PRODUCTION' && (
           <button onClick={handleProductionCreateOrder} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}>
             <PlusCircle size={16} /> Сформировать заказ на 100 л сырого молока
@@ -585,7 +832,8 @@ export default function App() {
                <UserIcon size={20} color="#2563eb"/> Кабинет: {currentUser.roleName} {currentOrder ? `(Заказ ${currentOrder.id})` : ''}
             </h2>
 
-            {/* 1. РОЛЬ: ПРОИЗВОДСТВО */}
+            {/* 1. РОЛЬ: ПРОИЗВОДСТВО. Запуск процесса — не шаг схемы: у событий
+                нет `resourceRole`, поэтому инициатор задан ролью пользователя. */}
             {currentUser.role === 'PRODUCTION' && (
               <div>
                 <div style={{ padding: '16px', backgroundColor: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', marginBottom: '16px' }}>
@@ -677,8 +925,9 @@ export default function App() {
               </div>
             )}
 
-            {/* 3. РОЛЬ: МЕНЕДЖЕР ЗАКУПОК ЗАКАЗЧИКА */}
-            {currentUser.role === 'MANAGER' && currentOrder && (
+            {/* 3. РОЛЬ: МЕНЕДЖЕР ЗАКУПОК ЗАКАЗЧИКА (`Task_CreatePurchaseOrder`,
+                `Task_ReceiveDocsAndIssuePass` в схеме) */}
+            {canWork('CUSTOMER', ['Task_CreatePurchaseOrder', 'Task_ReceiveDocsAndIssuePass']) && currentOrder && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 {actionLoading[currentOrder.id] ? (
                   <RenderActionStatus orderId={currentOrder.id} />
@@ -728,8 +977,9 @@ export default function App() {
               </div>
             )}
 
-            {/* 4. РОЛЬ: МЕНЕДЖЕР ПОСТАВЩИКА */}
-            {currentUser.role === 'SUPPLIER_MANAGER' && currentOrder && (
+            {/* 4. РОЛЬ: МЕНЕДЖЕР ПОСТАВЩИКА (`Task_SupplierCreateDocs`,
+                `Task_SupplierShipment` в схеме Поставщика) */}
+            {canWork('SUPPLIER', ['Task_SupplierCreateDocs', 'Task_SupplierShipment']) && currentOrder && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 {actionLoading[currentOrder.id] ? (
                   <RenderActionStatus orderId={currentOrder.id} />
@@ -760,8 +1010,8 @@ export default function App() {
               </div>
             )}
 
-            {/* 5. РОЛЬ: ОХРАНА КПП ЗАКАЗЧИКА */}
-            {currentUser.role === 'SECURITY' && currentOrder && (
+            {/* 5. РОЛЬ: ОХРАНА КПП ЗАКАЗЧИКА (`Task_SecurityCheck` в схеме) */}
+            {canWork('CUSTOMER', ['Task_SecurityCheck']) && currentOrder && (
               <div>
                 {actionLoading[currentOrder.id] ? (
                   <RenderActionStatus orderId={currentOrder.id} />
@@ -792,8 +1042,8 @@ export default function App() {
               </div>
             )}
 
-            {/* 6. РОЛЬ: СПЕЦИАЛИСТ ОТК ЗАКАЗЧИКА */}
-            {currentUser.role === 'QUALITY' && currentOrder && (
+            {/* 6. РОЛЬ: СПЕЦИАЛИСТ ОТК ЗАКАЗЧИКА (`Task_QualityControl` в схеме) */}
+            {canWork('CUSTOMER', ['Task_QualityControl']) && currentOrder && (
               <div>
                 {actionLoading[currentOrder.id] ? (
                   <RenderActionStatus orderId={currentOrder.id} />
@@ -825,10 +1075,36 @@ export default function App() {
              
              {isExecutive ? (
                <div>
-                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '12px' }}>
                    <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b' }}>
                      BPMN Схема: {currentUser.org === 'CUSTOMER' ? 'Заказчика' : 'Поставщика'} {currentOrder ? `[Заказ ${currentOrder.id}]` : ''}
                    </h3>
+
+                   {/* Кэш схемы в браузере: сохранение и подпись состояния копии */}
+                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginLeft: 'auto' }}>
+                     <span
+                       data-testid="schema-save-state"
+                       style={{ fontSize: '12px', fontWeight: '600', color: isSchemaUnsaved ? '#b45309' : '#15803d' }}
+                     >
+                       {schemaSaveLabel()}
+                     </span>
+
+                     <button
+                       onClick={handleSaveSchema}
+                       title="Сохранить схему в браузере: правки подхватятся при следующем открытии приложения"
+                       style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', backgroundColor: '#15803d', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '12px' }}
+                     >
+                       <Save size={14} /> Сохранить схему
+                     </button>
+
+                     <button
+                       onClick={handleResetSchema}
+                       title="Вернуть демо-схему из SDK и удалить сохранённую в браузере копию"
+                       style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', backgroundColor: '#fff', color: '#475569', border: '1px solid #cbd5e1', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '12px' }}
+                     >
+                       <RotateCcw size={14} /> Демо-схема
+                     </button>
+                   </div>
 
                    <button 
                      onClick={() => deployBpmnSchema(currentUser.org, currentUser.org === 'CUSTOMER' ? customerBpmnXml : supplierBpmnXml)} 
@@ -870,6 +1146,7 @@ export default function App() {
                      <BpmnEditor
                        xml={customerBpmnXml}
                        onChange={setCustomerBpmnXml}
+                       roleOptions={ROLE_CODES}
                        height={520}
                      />
                    ) : (
@@ -885,6 +1162,7 @@ export default function App() {
                      <BpmnEditor
                        xml={supplierBpmnXml}
                        onChange={setSupplierBpmnXml}
+                       roleOptions={ROLE_CODES}
                        height={520}
                      />
                    ) : (
