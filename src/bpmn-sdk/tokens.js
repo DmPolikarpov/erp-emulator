@@ -9,6 +9,7 @@
  */
 
 import {
+  BPMN_TOKEN_BASE_CLASS,
   BPMN_TOKEN_CLASS,
   INSTANCE_PREFIX,
   TOKEN_STATE_LIST,
@@ -78,27 +79,52 @@ export function parseTokenMessage(raw) {
 }
 
 /**
+ * CSS-классы подсветки узла для состояния токена.
+ *
+ * diagram-js навешивает маркеры по одному классу за вызов
+ * (`Canvas#addMarker` → `svgClasses(gfx).add(marker)`), а правила
+ * `bpmn-sdk.css` написаны парой «базовый класс + модификатор состояния»:
+ * `.bpmn-sdk-token` объявляет переменные и применяет `fill`/`stroke`,
+ * `.bpmn-sdk-token--active` выбирает цвет состояния и анимацию. Без базового
+ * класса заливка и обводка узла не применялись: от подсветки оставалась
+ * только анимация `ACTIVE`, а `COMPLETED`/`FAILED`/`TIMED_OUT` не были видны
+ * совсем — на схеме «не подсвечивался активный блок».
+ *
+ * @param {string} state состояние токена (`TOKEN_STATES`).
+ * @returns {string[]} классы для `canvas.addMarker` (`[]`, если состояния нет).
+ */
+export function tokenMarkerClasses(state) {
+  const modifier = BPMN_TOKEN_CLASS[state];
+
+  return modifier ? [BPMN_TOKEN_BASE_CLASS, modifier] : [];
+}
+
+/**
  * Сводит карту токенов и устаревший проп `activeElementId` в карту
- * «идентификатор элемента -> CSS-класс подсветки».
+ * «идентификатор элемента -> CSS-классы подсветки».
+ *
+ * Классов на элемент несколько (базовый + модификатор состояния), потому что
+ * `canvas.addMarker` навешивает ровно один класс за вызов: см.
+ * `tokenMarkerClasses`.
  *
  * @param {Object<string, string>} [tokens] карта `element_id -> состояние`
  * @param {string|null} [activeElementId] идентификатор активного узла (legacy)
- * @returns {Object<string, string>}
+ * @returns {Object<string, string[]>} карта `element_id -> классы`
  */
 export function resolveTokenMap(tokens, activeElementId) {
   const map = {};
 
   if (tokens && typeof tokens === 'object') {
     Object.keys(tokens).forEach((elementId) => {
-      const className = BPMN_TOKEN_CLASS[tokens[elementId]];
-      if (elementId && className) map[elementId] = className;
+      const classNames = tokenMarkerClasses(tokens[elementId]);
+      if (elementId && classNames.length > 0) map[elementId] = classNames;
     });
   }
 
   // Обратная совместимость: раньше просмотрщик принимал только один
   // активный узел и всегда подсвечивал его как ACTIVE.
   if (activeElementId && !map[activeElementId]) {
-    map[activeElementId] = BPMN_TOKEN_CLASS[TOKEN_STATES.ACTIVE];
+    map[activeElementId] = tokenMarkerClasses(TOKEN_STATES.ACTIVE);
   }
 
   return map;

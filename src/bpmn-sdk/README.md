@@ -49,13 +49,82 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
 - транспорт: `GatewayClient`, `StatusSocket`, `createUuid`, `normalizeGatewayUrl`;
 - константы: `DEFAULT_GATEWAY_URL`, `DEFAULT_WS_URL`, `DEFAULT_CUSTOMER_BPMN_XML`,
   `DEFAULT_SUPPLIER_BPMN_XML`, `INSTANCE_PREFIX`, `ENGINE_EVENTS`, `ENGINE_ELEMENTS`,
-  `SOCKET_EVENTS`, `SOCKET_STATUS`, `TOKEN_STATES`, `ERROR_KINDS`;
+  `SOCKET_EVENTS`, `SOCKET_STATUS`, `TOKEN_STATES`, `ERROR_KINDS`,
+  `BPMN_TOKEN_BASE_CLASS`, `BPMN_TOKEN_CLASS`;
 - логика токенов: `parseTokenMessage`, `resolveTokenMap`, `applyTokenUpdate`,
-  `collectActiveElementIds`, `isDeployInstanceId`, `deployInstanceId`;
+  `collectActiveElementIds`, `tokenMarkerClasses`, `isDeployInstanceId`,
+  `deployInstanceId`;
 - логика XML: `listFlowElements`, `getProcessIds`, `getElementIds`, `isValidXml`,
-  `isValidElementId`, `isElementIdAvailable`, `renameElementId`, `parseXml`, `getLocalName`.
+  `isValidElementId`, `isElementIdAvailable`, `renameElementId`, `parseXml`, `getLocalName`;
+- роль исполнителя узла (`bpmn:potentialOwner`): `getElementRole`, `getRoleAssignments`,
+  `setElementRole`, `isValidRole`, `isActivityType`, `isActivityElement`,
+  `POTENTIAL_OWNER_TYPE`, `POTENTIAL_OWNER_LOCAL_NAME`.
 
 Состав API проверяется тестом [`src/vendor/bpmnSdkBundle.test.js`](../vendor/bpmnSdkBundle.test.js).
+
+### Роль исполнителя узла
+
+Роль хранится в самой схеме — в `bpmn:potentialOwner` (`Activity#resources` из
+BPMN 2.0; тип уже описан в `bpmn-moddle`, поэтому `moddleExtensions` не нужен):
+
+```xml
+<bpmn:userTask id="Task_QualityControl" name="Контроль качества ОТК">
+  <bpmn:potentialOwner name="QUALITY" />
+</bpmn:userTask>
+```
+
+| Экспорт | Назначение |
+| --- | --- |
+| `getElementRole(xml, elementId)` | роль узла (`''`, если не назначена) |
+| `getRoleAssignments(xml)` | карта `{element_id: роль}` по всей схеме |
+| `setElementRole(xml, elementId, role)` | правка роли текстом (как `renameElementId`); `''` снимает роль |
+| `isValidRole(role)` | проверка роли (грамматика как у `element_id`) |
+| `isActivityType(type)` / `isActivityElement(node)` | узел — Activity, т.е. роль ему применима |
+
+Правила, которые SDK соблюдает и проверяет тестами:
+
+- роль записывается **только в Activity** (`*Task`, `subProcess`, `callActivity`,
+  `transaction`): у событий и шлюзов нет `resourceRole`, `bpmn-moddle` не признаёт
+  там `potentialOwner` (`unparsable content`) и теряет его при сохранении схемы.
+  `setElementRole` бросает ошибку, `EnginePanel`/`BpmnEditor` блокируют поле;
+- роль пишется без `id`: `renameElementId` переименовывает все `id` схемы, и роль
+  уехала бы вместе с переименованным узлом;
+- читается и «длинная» запись по спецификации
+  (`resourceAssignmentExpression` → `formalExpression`/`expression`), пишется
+  всегда короткая (`name`);
+- правка идёт текстом, поэтому остальная схема (включая `bpmndi:BPMNShape`) не
+  переформатируется.
+
+Инспектор узлов (`EnginePanel`) отдаёт роль полем «Роль исполнителя»: набор ролей
+приходит пропом `roleOptions`, изменение наружу — пропом `onChangeRole(id, role)`
+(`BpmnEditor` прокидывает оба и пишет роль через `modeling.updateProperties`, то
+есть правка попадает в `commandStack` и в `onChange`). Роль — разметка
+маршрутизации в UI, а не авторизация: движок её не читает и не проверяет.
+
+### Подсветка токенов процесса
+
+`BpmnViewer` помечает узлы схемой `{element_id: состояние}`
+(`props.tokens`) и устаревшим пропом `activeElementId` (только `ACTIVE`).
+CSS-классы собирает `resolveTokenMap`, а пару «базовый класс + состояние» —
+`tokenMarkerClasses`:
+
+```js
+resolveTokenMap({ Task_1: 'ACTIVE' });
+// { Task_1: ['bpmn-sdk-token', 'bpmn-sdk-token--active'] }
+
+tokenMarkerClasses(TOKEN_STATES.COMPLETED);
+// ['bpmn-sdk-token', 'bpmn-sdk-token--completed']
+```
+
+Классов именно два, потому что `canvas.addMarker` в diagram-js навешивает один
+класс за вызов, а правила [`styles/bpmn-sdk.css`](styles/bpmn-sdk.css) написаны
+парой: `.bpmn-sdk-token` объявляет переменные и применяет `fill`/`stroke`,
+`.bpmn-sdk-token--active|--completed|--failed|--timed-out` выбирает цвет и
+анимацию (пульсация — только у `ACTIVE`). Без базового класса заливка и обводка
+не применяются: от подсветки оставалась одна анимация `ACTIVE`, а
+`COMPLETED`/`FAILED`/`TIMED_OUT` не были видны совсем. Узел, которого нет в
+схеме, подсветить нечем: `BpmnViewer` молча пропускает чужой `element_id`
+(проверка через `elementRegistry` перед `canvas.addMarker`).
 
 ## Как подключать
 
@@ -98,7 +167,11 @@ import '@erp/bpmn-client-sdk/dist/bpmn-sdk.css';
   ESM. Стили холста `diagram-js`/`bpmn-js` и правила иконок `bpmn-font`
   (`bpmn-codes.css`) подключаются из `index.js`, чтобы потребитель не забывал
   про них; шрифт берётся только в `woff2` — остальные форматы добавляли
-  ~390 KB base64 (см. [`styles/bpmnFont.css`](styles/bpmnFont.css)).
+  ~390 KB base64 (см. [`styles/bpmnFont.css`](styles/bpmnFont.css)). Там же
+  лежит привязка глифов к семейству (`[class^="bpmn-icon-"]:before`): в
+  `bpmn-codes.css` есть только `content`, и без этой привязки иконки палитры
+  редактора рисуются квадратиками (проверяется в `tools/verify.mjs` и
+  `src/vendor/bpmnSdkBundle.test.js`).
 
 ## Особенности и ограничения
 
@@ -114,4 +187,8 @@ import '@erp/bpmn-client-sdk/dist/bpmn-sdk.css';
   без CSS. Точки входа артефактов указаны в этом README и в `BUILD_INFO.json`.
 - `dist` не коммитится, а `BUILD_INFO.json` хранит `sourceHash` исходников:
   `sdk:sync` и Jest-тест падают, если SDK изменили, но не пересобрали.
+- Холст `bpmn-js` в jsdom не поднимается (нет SVG-геометрии: `getBBox`,
+  `createSVGTransform`), поэтому «схема переживает импорт и экспорт» проверяется
+  не через редактор, а на том же `bpmn-moddle`, который упакован в бандл —
+  [`src/vendor/bpmnModdleRole.test.js`](../vendor/bpmnModdleRole.test.js).
 

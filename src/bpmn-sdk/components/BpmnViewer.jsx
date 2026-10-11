@@ -51,40 +51,54 @@ export function BpmnViewer({
     callbacksRef.current = { onReady, onLoading, onError };
   }, [onReady, onLoading, onError]);
 
-  const tokenMap = useMemo(
+  // Карта «узел -> CSS-классы подсветки»: базовый класс и состояние токена
+  // (`tokenMarkerClasses` в `tokens.js`).
+  const markerClasses = useMemo(
     () => resolveTokenMap(tokens, activeElementId),
     [tokens, activeElementId]
   );
 
   /** Снимает прежнюю подсветку и навешивает новую. */
-  const applyMarkers = useCallback((markers) => {
+  const applyMarkers = useCallback((nextMarkers) => {
     const viewer = viewerRef.current;
     if (!viewer) return;
 
     const canvas = viewer.get('canvas');
     const elementRegistry = viewer.get('elementRegistry');
 
-    marksRef.current.forEach((className, elementId) => {
+    // Снимаем ровно те классы, которые навесили сами: `canvas.addMarker`
+    // работает с одним классом за вызов, поэтому у узла их может быть
+    // несколько (базовый + модификатор состояния).
+    marksRef.current.forEach((classNames, elementId) => {
       if (!elementRegistry.get(elementId)) return;
-      try {
-        canvas.removeMarker(elementId, className);
-      } catch (e) {
-        // Узел мог исчезнуть вместе с предыдущей версией схемы.
-      }
+
+      classNames.forEach((className) => {
+        try {
+          canvas.removeMarker(elementId, className);
+        } catch (e) {
+          // Узел мог исчезнуть вместе с предыдущей версией схемы.
+        }
+      });
     });
     marksRef.current.clear();
 
-    Object.keys(markers).forEach((elementId) => {
+    Object.keys(nextMarkers).forEach((elementId) => {
       // diagram-js бросает TypeError для неизвестного идентификатора
       // (Canvas#_updateMarker не проверяет результат elementRegistry.get).
       if (!elementRegistry.get(elementId)) return;
 
-      try {
-        canvas.addMarker(elementId, markers[elementId]);
-        marksRef.current.set(elementId, markers[elementId]);
-      } catch (e) {
-        // Защита от гонок при перерисовке холста.
-      }
+      const applied = [];
+
+      [].concat(nextMarkers[elementId] || []).filter(Boolean).forEach((className) => {
+        try {
+          canvas.addMarker(elementId, className);
+          applied.push(className);
+        } catch (e) {
+          // Защита от гонок при перерисовке холста.
+        }
+      });
+
+      if (applied.length > 0) marksRef.current.set(elementId, applied);
     });
   }, []);
 
@@ -113,7 +127,7 @@ export function BpmnViewer({
     if (!viewer) return undefined;
 
     if (!xml || xml === importedXmlRef.current) {
-      applyMarkers(tokenMap);
+      applyMarkers(markerClasses);
       return undefined;
     }
 
@@ -134,7 +148,7 @@ export function BpmnViewer({
         if (fitOnImport) viewer.get('canvas').zoom('fit-viewport');
 
         marksRef.current.clear();
-        applyMarkers(tokenMap);
+        applyMarkers(markerClasses);
 
         if (typeof callbacksRef.current.onLoading === 'function') {
           callbacksRef.current.onLoading(false);
@@ -156,7 +170,7 @@ export function BpmnViewer({
     return () => {
       cancelled = true;
     };
-  }, [xml, tokenMap, fitOnImport, applyMarkers]);
+  }, [xml, markerClasses, fitOnImport, applyMarkers]);
 
   return (
     <div

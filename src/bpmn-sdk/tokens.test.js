@@ -5,6 +5,7 @@ import {
   isKnownTokenState,
   parseTokenMessage,
   resolveTokenMap,
+  tokenMarkerClasses,
 } from './tokens';
 
 describe('tokens: isKnownTokenState', () => {
@@ -29,6 +30,35 @@ describe('tokens: isDeployInstanceId', () => {
   });
 });
 
+describe('tokens: tokenMarkerClasses', () => {
+  it('возвращает базовый класс и модификатор состояния', () => {
+    // Базовый класс обязателен: правила `bpmn-sdk.css` применяют `fill` и
+    // `stroke` именно к `.bpmn-sdk-token`, а модификатор выбирает цвет.
+    expect(tokenMarkerClasses('ACTIVE')).toEqual([
+      'bpmn-sdk-token',
+      'bpmn-sdk-token--active',
+    ]);
+    expect(tokenMarkerClasses('COMPLETED')).toEqual([
+      'bpmn-sdk-token',
+      'bpmn-sdk-token--completed',
+    ]);
+    expect(tokenMarkerClasses('FAILED')).toEqual([
+      'bpmn-sdk-token',
+      'bpmn-sdk-token--failed',
+    ]);
+    expect(tokenMarkerClasses('TIMED_OUT')).toEqual([
+      'bpmn-sdk-token',
+      'bpmn-sdk-token--timed-out',
+    ]);
+  });
+
+  it('возвращает пустой список для неизвестного состояния', () => {
+    expect(tokenMarkerClasses('PENDING')).toEqual([]);
+    expect(tokenMarkerClasses(undefined)).toEqual([]);
+    expect(tokenMarkerClasses('')).toEqual([]);
+  });
+});
+
 describe('tokens: resolveTokenMap', () => {
   it('сопоставляет состояния токенов CSS-классам', () => {
     expect(
@@ -42,10 +72,10 @@ describe('tokens: resolveTokenMap', () => {
         null
       )
     ).toEqual({
-      Task_1: 'bpmn-sdk-token--active',
-      Task_2: 'bpmn-sdk-token--completed',
-      Task_3: 'bpmn-sdk-token--failed',
-      Task_4: 'bpmn-sdk-token--timed-out',
+      Task_1: ['bpmn-sdk-token', 'bpmn-sdk-token--active'],
+      Task_2: ['bpmn-sdk-token', 'bpmn-sdk-token--completed'],
+      Task_3: ['bpmn-sdk-token', 'bpmn-sdk-token--failed'],
+      Task_4: ['bpmn-sdk-token', 'bpmn-sdk-token--timed-out'],
     });
   });
 
@@ -57,13 +87,13 @@ describe('tokens: resolveTokenMap', () => {
 
   it('подсвечивает legacy-проп activeElementId как ACTIVE', () => {
     expect(resolveTokenMap({}, 'Task_Legacy')).toEqual({
-      Task_Legacy: 'bpmn-sdk-token--active',
+      Task_Legacy: ['bpmn-sdk-token', 'bpmn-sdk-token--active'],
     });
   });
 
   it('не перекрывает явное состояние токена legacy-пропом', () => {
     expect(resolveTokenMap({ Task_1: 'COMPLETED' }, 'Task_1')).toEqual({
-      Task_1: 'bpmn-sdk-token--completed',
+      Task_1: ['bpmn-sdk-token', 'bpmn-sdk-token--completed'],
     });
   });
 

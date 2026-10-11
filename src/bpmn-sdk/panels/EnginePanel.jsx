@@ -1,7 +1,13 @@
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { Settings } from 'lucide-react';
 
-import { isIdAvailableAmong, isValidElementId, listFlowElements } from '../xml/bpmnXml';
+import {
+  getElementRole,
+  isActivityType,
+  isIdAvailableAmong,
+  isValidElementId,
+  listFlowElements,
+} from '../xml/bpmnXml';
 import '../styles/bpmn-sdk.css';
 
 /** Подсказка о допустимых идентификаторах (совпадает с `ELEMENT_ID_PATTERN`). */
@@ -10,6 +16,27 @@ export const ELEMENT_ID_HINT =
 
 /** Текст ошибки для недопустимого идентификатора. */
 export const ELEMENT_ID_FORMAT_ERROR = `Недопустимый идентификатор. ${ELEMENT_ID_HINT}`;
+
+/** Значение выпадающего списка «роль не назначена». */
+export const NO_ROLE_OPTION = '';
+
+/**
+ * Роль исполнителя узла.
+ *
+ * Приоритет у значения из `elements` (живой реестр редактора: он знает
+ * про правки, ещё не отданные наружу). Если поля нет — роль читается из
+ * самого XML (`bpmn:potentialOwner`).
+ *
+ * @param {Object} element узел списка (`{id, name, type, role?}`).
+ * @param {string} [xml] схема-источник, если роль не пришла из реестра.
+ * @returns {string} роль либо `''`.
+ */
+export function resolveElementRole(element, xml) {
+  if (!element) return '';
+  if (typeof element.role === 'string') return element.role;
+
+  return getElementRole(xml, element.id);
+}
 
 /**
  * Инспектор узлов схемы: выбор узла и правка его идентификатора/названия.
@@ -31,6 +58,9 @@ export const ELEMENT_ID_FORMAT_ERROR = `Недопустимый идентиф�
  * @param {(oldId: string, newId: string) => (boolean|void)} [props.onChangeId]
  *   применение нового идентификатора; `false` или исключение => откат.
  * @param {(id: string, name: string) => void} [props.onChangeName] новое название.
+ * @param {string[]} [props.roleOptions=[]] роли для выбора (`USERS[].role`).
+ * @param {(id: string, role: string) => (boolean|void)} [props.onChangeRole]
+ *   назначение роли исполнителя; `false` или исключение => откат.
  * @param {boolean} [props.disabled=false] только чтение.
  * @param {string} [props.title] заголовок панели.
  * @param {string} [props.className] дополнительные CSS-классы.
@@ -42,6 +72,8 @@ export function EnginePanel({
   onSelect,
   onChangeId,
   onChangeName,
+  roleOptions = [],
+  onChangeRole,
   disabled = false,
   title = 'Инспектор узла (GUI настройки идентификатора и параметров)',
   className = '',
@@ -60,7 +92,19 @@ export function EnginePanel({
 
   const [draftId, setDraftId] = useState('');
   const [draftName, setDraftName] = useState('');
+  const [draftRole, setDraftRole] = useState(NO_ROLE_OPTION);
   const [errorMessage, setErrorMessage] = useState('');
+
+  /** Фактическая роль узла (источник правды для поля роли). */
+  const actualRole = resolveElementRole(selectedElement, xml);
+
+  // Роли для выпадающего списка: переданный набор плюс роль из схемы, если её
+  // в наборе нет (в XML могла попасть роль, которой нет среди пользователей).
+  const roleChoices = useMemo(() => {
+    const options = (Array.isArray(roleOptions) ? roleOptions : []).filter(Boolean);
+
+    return actualRole && !options.includes(actualRole) ? [...options, actualRole] : options;
+  }, [roleOptions, actualRole]);
 
   // Синхронизация черновиков с источником правды. Именно этот эффект
   // выполняет откат: после неудачного переименования либо внешней замены
@@ -70,6 +114,12 @@ export function EnginePanel({
     setDraftName(selectedElement ? selectedElement.name : '');
     setErrorMessage('');
   }, [selectedElement]);
+
+  // Роль меняется и через внешний источник (правка схемы в другом месте),
+  // поэтому поле роли синхронизируется отдельно — по самому значению роли.
+  useEffect(() => {
+    setDraftRole(actualRole);
+  }, [actualRole]);
 
   // Узел исчез из схемы (например, загружена другая версия) — снимаем выбор.
   useEffect(() => {
@@ -138,8 +188,37 @@ export function EnginePanel({
     if (typeof onChangeName === 'function') onChangeName(selectedElement.id, value);
   };
 
+  /**
+   * Назначение роли исполнителя.
+   *
+   * Откат как у идентификатора: если владелец схемы не применил правку
+   * (`false` или исключение), поле возвращается к роли из схемы.
+   */
+  const handleRoleChange = (value) => {
+    setDraftRole(value);
+    if (!selectedElement || typeof onChangeRole !== 'function') return;
+
+    let applied = true;
+    try {
+      applied = onChangeRole(selectedElement.id, value) !== false;
+    } catch (e) {
+      applied = false;
+    }
+
+    if (!applied) setDraftRole(actualRole);
+  };
+
   const idInvalid = Boolean(errorMessage);
   const idFieldDisabled = disabled || !selectedElement;
+
+  // Роль по спецификации BPMN 2.0 есть только у Activity (`resourceRole`):
+  // у события или шлюза `bpmn:potentialOwner` молча потеряется при сохранении
+  // схемы в редакторе, поэтому поле роли там заблокировано.
+  const roleSupported = Boolean(selectedElement && isActivityType(selectedElement.type));
+
+  // Список ролей пуст (панель используют без набора ролей) и назначения нет —
+  // выбирать нечего, поле показываем только для чтения.
+  const roleFieldDisabled = idFieldDisabled || roleChoices.length === 0 || !roleSupported;
 
   return (
     <div className={['bpmn-sdk-panel', className].filter(Boolean).join(' ')}>
@@ -208,6 +287,32 @@ export function EnginePanel({
             className="bpmn-sdk-panel__control"
           />
         </div>
+
+        <div className="bpmn-sdk-panel__field">
+          <label className="bpmn-sdk-panel__label" htmlFor={`${baseId}-role`}>
+            Роль исполнителя (potentialOwner):
+          </label>
+          <select
+            id={`${baseId}-role`}
+            className="bpmn-sdk-panel__control"
+            disabled={roleFieldDisabled}
+            value={draftRole}
+            onChange={(event) => handleRoleChange(event.target.value)}
+          >
+            <option value={NO_ROLE_OPTION}>-- Роль не назначена --</option>
+            {roleChoices.map((role) => (
+              <option key={role} value={role}>
+                {role}
+              </option>
+            ))}
+          </select>
+          {selectedElement && !roleSupported ? (
+            <span className="bpmn-sdk-panel__hint">
+              Роль назначается только задачам и подпроцессам: у событий и шлюзов нет
+              <code>resourceRole</code> в BPMN 2.0.
+            </span>
+          ) : null}
+        </div>
       </div>
 
       {errorMessage ? (
@@ -215,7 +320,9 @@ export function EnginePanel({
       ) : (
         <p className="bpmn-sdk-panel__hint">
           Идентификаторы узлов используются движком как <code>element_id</code> в событиях
-          токенов и в авторизации шагов.
+          токенов и в авторизации шагов. Роль исполнителя хранится в самой схеме
+          (<code>bpmn:potentialOwner</code>) и определяет, какой пользователь видит шаг
+          в интерфейсе.
         </p>
       )}
     </div>

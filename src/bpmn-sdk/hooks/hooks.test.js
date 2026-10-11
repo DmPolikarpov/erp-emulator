@@ -193,9 +193,9 @@ describe('useTokenHighlight', () => {
     const { result } = renderHook(() => useTokenHighlight(tokens));
 
     expect(result.current.tokenMap).toEqual({
-      Task_Approve: 'bpmn-sdk-token--active',
-      Task_Ship: 'bpmn-sdk-token--completed',
-      Task_Timeout: 'bpmn-sdk-token--timed-out',
+      Task_Approve: ['bpmn-sdk-token', 'bpmn-sdk-token--active'],
+      Task_Ship: ['bpmn-sdk-token', 'bpmn-sdk-token--completed'],
+      Task_Timeout: ['bpmn-sdk-token', 'bpmn-sdk-token--timed-out'],
     });
     expect(result.current.activeElementIds).toEqual(['Task_Approve']);
     expect(result.current.activeElementId).toBe('Task_Approve');
@@ -207,7 +207,7 @@ describe('useTokenHighlight', () => {
     );
 
     expect(result.current.tokenMap).toEqual({
-      StartEvent_Customer: 'bpmn-sdk-token--active',
+      StartEvent_Customer: ['bpmn-sdk-token', 'bpmn-sdk-token--active'],
     });
     expect(result.current.activeElementId).toBe('StartEvent_Customer');
   });

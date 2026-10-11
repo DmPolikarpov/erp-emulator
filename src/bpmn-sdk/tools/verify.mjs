@@ -44,6 +44,24 @@ const {
 /** Результаты проверок. */
 const results = [];
 
+/**
+ * Правило, привязывающее глифы иконок к шрифту `bpmn`.
+ *
+ * `bpmn-codes.css` задаёт иконкам только `content` (`\e8xx`), семейство
+ * шрифта приходит из `styles/bpmnFont.css` через селекторы
+ * `[class^="bpmn-icon-"]`. Без этой привязки приватные глифы рисуются
+ * fallback-шрифтом — в браузере это «квадратики» вместо иконок палитры.
+ *
+ * Набор кавычек в UMD экранирован (`class^=\"bpmn-icon-\"`), в вынесенном
+ * CSS — нет, поэтому шаблон допускает экранирование и любой вид кавычек.
+ */
+const ICON_FONT_BINDING = /class\^=.{0,2}bpmn-icon-.{0,2}\]:before[^{}]*\{[^{}]*font-family\s*:\s*.{0,2}bpmn/;
+
+/** Проверяет, что в артефакте есть привязка иконок к шрифту `bpmn`. */
+function hasIconFontBinding(text) {
+  return ICON_FONT_BINDING.test(text);
+}
+
 /** Регистрирует проверку. */
 function check(name, ok, detail = '') {
   results.push({ name, ok: Boolean(ok), detail });
@@ -125,6 +143,9 @@ function checkUmd() {
     'UMD: шрифт bpmn-font инлайн',
     umd.includes('@font-face') && umd.includes('font-family') && umd.includes('.bpmn-icon-')
   );
+  // Глифы иконок — приватная область (`\e8xx`): без привязки к семейству
+  // `bpmn` палитра редактора рисуется квадратиками (`styles/bpmnFont.css`).
+  check('UMD: глифы иконок привязаны к шрифту bpmn', hasIconFontBinding(umd));
 }
 
 function checkEsm() {
@@ -152,6 +173,7 @@ function checkCss() {
     'CSS: шрифт bpmn-font',
     css.includes('@font-face') && css.includes('.bpmn-icon-') && css.includes('woff2')
   );
+  check('CSS: глифы иконок привязаны к шрифту bpmn', hasIconFontBinding(css));
   // Legacy-форматы шрифта вырезаны намеренно: иначе CSS весит ~430 KB.
   check(
     'CSS: без legacy-форматов шрифта',

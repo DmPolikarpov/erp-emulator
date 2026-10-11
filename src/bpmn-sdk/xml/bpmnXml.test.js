@@ -1,17 +1,21 @@
 import {
   escapeRegExp,
   getElementIds,
+  getElementRole,
   getLocalName,
   getProcessIds,
+  getRoleAssignments,
   isElementIdAvailable,
   isFlowElement,
   isFlowElementType,
   isIdAvailableAmong,
   isValidElementId,
+  isValidRole,
   isValidXml,
   listFlowElements,
   parseXml,
   renameElementId,
+  setElementRole,
 } from './bpmnXml';
 
 const SIMPLE_BPMN = `<?xml version="1.0" encoding="UTF-8"?>
@@ -244,5 +248,183 @@ describe('bpmnXml: renameElementId', () => {
 
   it('бросает ошибку на пустой схеме', () => {
     expect(() => renameElementId('', 'Task_Approve', 'Task_New')).toThrow(/Пустая BPMN-схема/);
+  });
+});
+
+describe('bpmnXml: роли исполнителя (bpmn:potentialOwner)', () => {
+  /** Схема с самозакрывающимся узлом: правка обязана развернуть его в парный тег. */
+  const SELF_CLOSING_BPMN = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_Self" targetNamespace="http://bpmn.io/schema/bpmn">
+  <bpmn:process id="Process_Self" isExecutable="true">
+    <bpmn:userTask id="Task_Solo" />
+  </bpmn:process>
+</bpmn:definitions>`;
+
+  it('валидирует роль той же грамматикой, что и `element_id`', () => {
+    expect(isValidRole('QUALITY')).toBe(true);
+    expect(isValidRole('SUPPLIER_MANAGER')).toBe(true);
+    expect(isValidRole('quality')).toBe(true);
+    expect(isValidRole('ОТК')).toBe(false);
+    expect(isValidRole('QUALITY MANAGER')).toBe(false);
+    expect(isValidRole('1QUALITY')).toBe(false);
+    expect(isValidRole('')).toBe(false);
+    expect(isValidRole(null)).toBe(false);
+  });
+
+  it('назначает роль внутрь целевого узла, сохраняя его содержимое', () => {
+    const xml = setElementRole(SIMPLE_BPMN, 'Task_Approve', 'QUALITY');
+
+    expect(xml).toContain('<bpmn:potentialOwner name="QUALITY" />');
+    expect(xml).toContain('<bpmn:incoming>Flow_1</bpmn:incoming>');
+    expect(xml).toContain('<bpmn:outgoing>Flow_2</bpmn:outgoing>');
+
+    // Роль стоит именно в `Task_Approve`, а не в соседнем узле.
+    expect(xml.indexOf('potentialOwner')).toBeGreaterThan(xml.indexOf('id="Task_Approve"'));
+    expect(xml.indexOf('potentialOwner')).toBeLessThan(xml.indexOf('</bpmn:userTask>'));
+
+    // Схема не переформатирована: снятие роли возвращает исходный текст.
+    expect(setElementRole(xml, 'Task_Approve', '')).toBe(SIMPLE_BPMN);
+  });
+
+  it('читает роль узла и все назначения схемы', () => {
+    const twoTasks =
+      '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_Two">' +
+      '<bpmn:process id="Process_Two" isExecutable="true">' +
+      '<bpmn:userTask id="Task_First" />' +
+      '<bpmn:serviceTask id="Task_Second" />' +
+      '</bpmn:process></bpmn:definitions>';
+
+    const xml = setElementRole(
+      setElementRole(twoTasks, 'Task_First', 'QUALITY'),
+      'Task_Second',
+      'SECURITY'
+    );
+
+    expect(getElementRole(xml, 'Task_First')).toBe('QUALITY');
+    expect(getElementRole(xml, 'Task_Second')).toBe('SECURITY');
+    expect(getElementRole(SIMPLE_BPMN, 'Task_Approve')).toBe('');
+    expect(getElementRole(xml, 'Task_Missing')).toBe('');
+    expect(getRoleAssignments(xml)).toEqual({ Task_First: 'QUALITY', Task_Second: 'SECURITY' });
+  });
+
+  it('элемент роли не попадает в список узлов и не занимает `id`', () => {
+    const xml = setElementRole(SIMPLE_BPMN, 'Task_Approve', 'QUALITY');
+
+    // `potentialOwner` не заканчивается на Task/Event/Gateway, поэтому в
+    // список узлов (его видит инспектор и подсветка токенов) не попадает.
+    expect(listFlowElements(xml).map((element) => element.id)).toEqual([
+      'StartEvent_1',
+      'Task_Approve',
+      'Gateway_1',
+      'EndEvent_1',
+    ]);
+    expect(getElementIds(xml)).toEqual(getElementIds(SIMPLE_BPMN));
+  });
+
+  it('не путает узлы с общим префиксом идентификатора', () => {
+    const xml =
+      '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D">' +
+      '<bpmn:process id="P"><bpmn:userTask id="Task_1" /><bpmn:userTask id="Task_10" /></bpmn:process>' +
+      '</bpmn:definitions>';
+
+    const withRole = setElementRole(xml, 'Task_1', 'QUALITY');
+
+    expect(getRoleAssignments(withRole)).toEqual({ Task_1: 'QUALITY' });
+    expect(withRole).toContain('id="Task_10"');
+  });
+
+  it('идемпотентен: повторное назначение той же роли схему не меняет', () => {
+    const once = setElementRole(SIMPLE_BPMN, 'Task_Approve', 'QUALITY');
+
+    expect(setElementRole(once, 'Task_Approve', 'QUALITY')).toBe(once);
+    expect(setElementRole(SIMPLE_BPMN, 'Task_Approve', '')).toBe(SIMPLE_BPMN);
+  });
+
+  it('меняет и снимает роль', () => {
+    const assigned = setElementRole(SIMPLE_BPMN, 'Task_Approve', 'QUALITY');
+    const changed = setElementRole(assigned, 'Task_Approve', 'MANAGER');
+
+    expect(getRoleAssignments(changed)).toEqual({ Task_Approve: 'MANAGER' });
+    expect(changed).not.toContain('QUALITY');
+    expect(changed.split('potentialOwner')).toHaveLength(2); // ровно один тег роли
+    expect(setElementRole(changed, 'Task_Approve', '')).toBe(SIMPLE_BPMN);
+  });
+
+  it('пишет роль без `id`, поэтому переименование узла её не теряет', () => {
+    const xml = setElementRole(SIMPLE_BPMN, 'Task_Approve', 'QUALITY');
+
+    expect(xml).not.toMatch(/potentialOwner[^>]*\sid=/);
+    expect(
+      getElementRole(renameElementId(xml, 'Task_Approve', 'Task_Review'), 'Task_Review')
+    ).toBe('QUALITY');
+  });
+
+  it('разворачивает самозакрывающийся узел в парный тег', () => {
+    const xml = setElementRole(SELF_CLOSING_BPMN, 'Task_Solo', 'QUALITY');
+
+    expect(isValidXml(xml)).toBe(true);
+    expect(xml).toContain(
+      '<bpmn:userTask id="Task_Solo"><bpmn:potentialOwner name="QUALITY" /></bpmn:userTask>'
+    );
+    expect(getElementRole(xml, 'Task_Solo')).toBe('QUALITY');
+  });
+
+  it('читает и перезаписывает каноническую (по спецификации) форму роли', () => {
+    const canonical =
+      '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D">' +
+      '<bpmn:process id="P"><bpmn:userTask id="Task_A"><bpmn:potentialOwner>' +
+      '<bpmn:resourceAssignmentExpression><bpmn:formalExpression>QUALITY</bpmn:formalExpression>' +
+      '</bpmn:resourceAssignmentExpression></bpmn:potentialOwner></bpmn:userTask></bpmn:process>' +
+      '</bpmn:definitions>';
+
+    expect(getElementRole(canonical, 'Task_A')).toBe('QUALITY');
+
+    // Своя же запись перезаписывается каноничной формой SDK (атрибут `name`).
+    const rewritten = setElementRole(canonical, 'Task_A', 'SECURITY');
+
+    expect(rewritten).toContain('<bpmn:potentialOwner name="SECURITY" />');
+    expect(rewritten).not.toContain('resourceAssignmentExpression');
+    expect(getElementRole(rewritten, 'Task_A')).toBe('SECURITY');
+  });
+
+  it('отклоняет недопустимую роль, неизвестный узел и пустую схему', () => {
+    expect(() => setElementRole(SIMPLE_BPMN, 'Task_Approve', 'ОТК')).toThrow(
+      /Недопустимая роль исполнителя/
+    );
+    expect(() => setElementRole(SIMPLE_BPMN, 'Task_Missing', 'QUALITY')).toThrow(/не найден/);
+    expect(() => setElementRole('', 'Task_Approve', 'QUALITY')).toThrow(/Пустая BPMN-схема/);
+    expect(() => setElementRole(null, 'Task_Approve', 'QUALITY')).toThrow(/Пустая BPMN-схема/);
+  });
+
+  it('отказывается писать роль в событие, шлюз или связь', () => {
+    // `resourceRole` по спецификации BPMN 2.0 есть только у Activity: у события
+    // `bpmn-js` не признаёт `bpmn:potentialOwner` и теряет его при сохранении.
+    ['StartEvent_1', 'EndEvent_1', 'Gateway_1', 'Flow_1'].forEach((elementId) => {
+      expect(() => setElementRole(SIMPLE_BPMN, elementId, 'QUALITY')).toThrow(/только Activity/);
+    });
+
+    expect(() => setElementRole(SIMPLE_BPMN, 'StartEvent_1', '')).not.toThrow();
+  });
+
+  it('не показывает роль, записанную в событие вручную', () => {
+    const xml =
+      '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D">' +
+      '<bpmn:process id="P"><bpmn:startEvent id="StartEvent_1">' +
+      '<bpmn:potentialOwner name="PRODUCTION" /></bpmn:startEvent></bpmn:process>' +
+      '</bpmn:definitions>';
+
+    expect(getRoleAssignments(xml)).toEqual({});
+  });
+
+  it('без DOM чтение ролей возвращает пустую карту (как `listFlowElements`)', () => {
+    const originalDomParser = global.DOMParser;
+    delete global.DOMParser;
+
+    try {
+      expect(getRoleAssignments(SIMPLE_BPMN)).toEqual({});
+      expect(getElementRole(SIMPLE_BPMN, 'Task_Approve')).toBe('');
+    } finally {
+      global.DOMParser = originalDomParser;
+    }
   });
 });

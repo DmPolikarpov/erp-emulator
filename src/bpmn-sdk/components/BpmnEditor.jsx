@@ -2,9 +2,34 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Modeler from 'bpmn-js/lib/Modeler';
 
 import { XML_CHANGE_DEBOUNCE_MS } from '../constants';
-import { isFlowElementType, isValidElementId } from '../xml/bpmnXml';
+import {
+  POTENTIAL_OWNER_TYPE,
+  isActivityType,
+  isFlowElementType,
+  isValidElementId,
+  isValidRole,
+} from '../xml/bpmnXml';
 import { EnginePanel } from '../panels/EnginePanel';
 import '../styles/bpmn-sdk.css';
+
+/**
+ * Роль исполнителя из бизнес-объекта узла.
+ *
+ * Роль хранится в `bpmn:potentialOwner` — это штатное свойство
+ * `bpmn:Activity#resources` из спецификации BPMN 2.0, оно уже описано в
+ * `bpmn-moddle` внутри `bpmn-js`. Поэтому роль переживает импорт и экспорт
+ * схемы, хотя моделлер создаётся без `moddleExtensions` (собственные типы
+ * вроде `camunda:*` в такой конфигурации молча теряются).
+ *
+ * @param {Object} businessObject бизнес-объект элемента из `elementRegistry`.
+ * @returns {string} роль либо `''`, если роль не назначена.
+ */
+function roleOfBusinessObject(businessObject) {
+  const resources = (businessObject && businessObject.resources) || [];
+  const owner = Array.isArray(resources) ? resources[0] : null;
+
+  return owner && owner.name ? owner.name : '';
+}
 
 /**
  * Редактор BPMN-схемы с инспектором узлов.
@@ -23,6 +48,7 @@ import '../styles/bpmn-sdk.css';
  * @param {(xml: string) => void} [props.onChange] схема изменилась.
  * @param {number|string} [props.height=420] высота холста.
  * @param {boolean} [props.showInspector=true] показывать инспектор узлов.
+ * @param {string[]} [props.roleOptions=[]] роли для выбора в инспекторе.
  * @param {boolean} [props.fitOnImport=true] вписывать схему при импорте.
  * @param {string} [props.className] дополнительные CSS-классы.
  * @param {Object} [props.style] дополнительные inline-стили контейнера.
@@ -35,6 +61,7 @@ export function BpmnEditor({
   onChange,
   height = 420,
   showInspector = true,
+  roleOptions = [],
   fitOnImport = true,
   className = '',
   style,
@@ -73,6 +100,7 @@ export function BpmnEditor({
             ? element.businessObject.name
             : '',
           type: element.type,
+          role: roleOfBusinessObject(element.businessObject),
         }))
     );
   }, []);
@@ -123,8 +151,11 @@ export function BpmnEditor({
       scheduleEmit();
     };
 
-    const commandStack = modeler.get('commandStack');
-    commandStack.on('changed', handleChanged);
+    // `CommandStack` не является `EventBus` (diagram-js >= 14), у него нет
+    // `on`/`off`: свои события он отправляет шине диаграммы как
+    // `commandStack.changed` (см. `CommandStack.prototype._fire`).
+    const eventBus = modeler.get('eventBus');
+    eventBus.on('commandStack.changed', handleChanged);
 
     if (typeof callbacksRef.current.onReady === 'function') {
       callbacksRef.current.onReady(modeler);
@@ -136,7 +167,7 @@ export function BpmnEditor({
         saveTimerRef.current = null;
       }
 
-      commandStack.off('changed', handleChanged);
+      eventBus.off('commandStack.changed', handleChanged);
       canvasXmlRef.current = null;
       emittedXmlRef.current = null;
       modelerRef.current = null;
@@ -242,6 +273,41 @@ export function BpmnEditor({
     return true;
   }, []);
 
+  /**
+   * Назначение роли исполнителя: `bpmn:potentialOwner` в `Activity#resources`.
+   *
+   * Пустая роль снимает назначение (`resources: []`). Элемент роли создаётся
+   * без `id`: `renameElementId` переименовывает в схеме все `id`, и роль
+   * «уехала» бы вместе с переименованным узлом.
+   *
+   * Правка идёт через `modeling.updateProperties`, поэтому попадает в
+   * `commandStack`, транслируется наружу (дебаунс `XML_CHANGE_DEBOUNCE_MS`)
+   * и переживает `saveXML` — то же, что и правки на холсте.
+   */
+  const handleChangeRole = useCallback((elementId, role) => {
+    const modeler = modelerRef.current;
+    if (!modeler) return false;
+    if (role !== '' && !isValidRole(role)) return false;
+
+    const element = modeler.get('elementRegistry').get(elementId);
+    if (!element) return false;
+    // `resourceRole` есть только у Activity: у события или шлюза моддл
+    // не признаёт `bpmn:potentialOwner` и потеряет его при `saveXML`.
+    if (!isActivityType(element.type)) return false;
+
+    try {
+      const resources = role
+        ? [modeler.get('moddle').create(POTENTIAL_OWNER_TYPE, { name: role })]
+        : [];
+
+      modeler.get('modeling').updateProperties(element, { resources });
+    } catch (e) {
+      return false;
+    }
+
+    return true;
+  }, []);
+
   return (
     <div
       className={['bpmn-sdk-editor', className].filter(Boolean).join(' ')}
@@ -261,6 +327,8 @@ export function BpmnEditor({
           onSelect={setSelectedElementId}
           onChangeId={handleChangeId}
           onChangeName={handleChangeName}
+          roleOptions={roleOptions}
+          onChangeRole={handleChangeRole}
         />
       )}
     </div>

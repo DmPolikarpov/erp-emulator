@@ -15,29 +15,40 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
     <bpmn:userTask id="Task_CreatePurchaseOrder" name="Сформировать заказ у поставщика">
       <bpmn:incoming>Flow_C1</bpmn:incoming>
       <bpmn:outgoing>Flow_C2</bpmn:outgoing>
+      <bpmn:potentialOwner name="MANAGER" />
     </bpmn:userTask>
     
-    <bpmn:sequenceFlow id="Flow_C2" sourceRef="Task_CreatePurchaseOrder" targetRef="Task_ReceiveDocsAndIssuePass" />
-    <bpmn:userTask id="Task_ReceiveDocsAndIssuePass" name="Принять документы и выписать пропуск">
+    <bpmn:sequenceFlow id="Flow_C2" sourceRef="Task_CreatePurchaseOrder" targetRef="Task_WaitForSupplierShipment" />
+    <bpmn:userTask id="Task_WaitForSupplierShipment" name="Ожидание отгрузки поставщиком">
       <bpmn:incoming>Flow_C2</bpmn:incoming>
       <bpmn:outgoing>Flow_C3</bpmn:outgoing>
+      <bpmn:potentialOwner name="MANAGER" />
     </bpmn:userTask>
     
-    <bpmn:sequenceFlow id="Flow_C3" sourceRef="Task_ReceiveDocsAndIssuePass" targetRef="Task_SecurityCheck" />
-    <bpmn:userTask id="Task_SecurityCheck" name="Проверка пропуска на КПП">
+    <bpmn:sequenceFlow id="Flow_C3" sourceRef="Task_WaitForSupplierShipment" targetRef="Task_ReceiveDocsAndIssuePass" />
+    <bpmn:userTask id="Task_ReceiveDocsAndIssuePass" name="Принять документы и выписать пропуск">
       <bpmn:incoming>Flow_C3</bpmn:incoming>
       <bpmn:outgoing>Flow_C4</bpmn:outgoing>
+      <bpmn:potentialOwner name="MANAGER" />
     </bpmn:userTask>
     
-    <bpmn:sequenceFlow id="Flow_C4" sourceRef="Task_SecurityCheck" targetRef="Task_QualityControl" />
-    <bpmn:userTask id="Task_QualityControl" name="Контроль качества ОТК">
+    <bpmn:sequenceFlow id="Flow_C4" sourceRef="Task_ReceiveDocsAndIssuePass" targetRef="Task_SecurityCheck" />
+    <bpmn:userTask id="Task_SecurityCheck" name="Проверка пропуска на КПП">
       <bpmn:incoming>Flow_C4</bpmn:incoming>
       <bpmn:outgoing>Flow_C5</bpmn:outgoing>
+      <bpmn:potentialOwner name="SECURITY" />
     </bpmn:userTask>
     
-    <bpmn:sequenceFlow id="Flow_C5" sourceRef="Task_QualityControl" targetRef="EndEvent_Customer" />
-    <bpmn:endEvent id="EndEvent_Customer" name="Молоко сдано в производство">
+    <bpmn:sequenceFlow id="Flow_C5" sourceRef="Task_SecurityCheck" targetRef="Task_QualityControl" />
+    <bpmn:userTask id="Task_QualityControl" name="Контроль качества ОТК">
       <bpmn:incoming>Flow_C5</bpmn:incoming>
+      <bpmn:outgoing>Flow_C6</bpmn:outgoing>
+      <bpmn:potentialOwner name="QUALITY" />
+    </bpmn:userTask>
+    
+    <bpmn:sequenceFlow id="Flow_C6" sourceRef="Task_QualityControl" targetRef="EndEvent_Customer" />
+    <bpmn:endEvent id="EndEvent_Customer" name="Молоко сдано в производство">
+      <bpmn:incoming>Flow_C6</bpmn:incoming>
     </bpmn:endEvent>
   </bpmn:process>
 
@@ -49,23 +60,27 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmndi:BPMNShape id="Task_CreatePurchaseOrder_di" bpmnElement="Task_CreatePurchaseOrder">
         <dc:Bounds x="250" y="78" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Task_ReceiveDocsAndIssuePass_di" bpmnElement="Task_ReceiveDocsAndIssuePass">
+      <bpmndi:BPMNShape id="Task_WaitForSupplierShipment_di" bpmnElement="Task_WaitForSupplierShipment">
         <dc:Bounds x="400" y="78" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Task_SecurityCheck_di" bpmnElement="Task_SecurityCheck">
+      <bpmndi:BPMNShape id="Task_ReceiveDocsAndIssuePass_di" bpmnElement="Task_ReceiveDocsAndIssuePass">
         <dc:Bounds x="550" y="78" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Task_QualityControl_di" bpmnElement="Task_QualityControl">
+      <bpmndi:BPMNShape id="Task_SecurityCheck_di" bpmnElement="Task_SecurityCheck">
         <dc:Bounds x="700" y="78" width="100" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_QualityControl_di" bpmnElement="Task_QualityControl">
+        <dc:Bounds x="850" y="78" width="100" height="80" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="EndEvent_Customer_di" bpmnElement="EndEvent_Customer">
-        <dc:Bounds x="850" y="100" width="36" height="36" />
+        <dc:Bounds x="1000" y="100" width="36" height="36" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="Flow_C1_di" bpmnElement="Flow_C1"><di:waypoint x="196" y="118" /><di:waypoint x="250" y="118" /></bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="Flow_C2_di" bpmnElement="Flow_C2"><di:waypoint x="350" y="118" /><di:waypoint x="400" y="118" /></bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="Flow_C3_di" bpmnElement="Flow_C3"><di:waypoint x="500" y="118" /><di:waypoint x="550" y="118" /></bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="Flow_C4_di" bpmnElement="Flow_C4"><di:waypoint x="650" y="118" /><di:waypoint x="700" y="118" /></bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="Flow_C5_di" bpmnElement="Flow_C5"><di:waypoint x="800" y="118" /><di:waypoint x="850" y="118" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_C6_di" bpmnElement="Flow_C6"><di:waypoint x="950" y="118" /><di:waypoint x="1000" y="118" /></bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
 </bpmn:definitions>`;
@@ -87,12 +102,14 @@ export const DEFAULT_SUPPLIER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
     <bpmn:userTask id="Task_SupplierCreateDocs" name="Сформировать документы (УПД/ТТН)">
       <bpmn:incoming>Flow_S1</bpmn:incoming>
       <bpmn:outgoing>Flow_S2</bpmn:outgoing>
+      <bpmn:potentialOwner name="SUPPLIER_MANAGER" />
     </bpmn:userTask>
     
     <bpmn:sequenceFlow id="Flow_S2" sourceRef="Task_SupplierCreateDocs" targetRef="Task_SupplierShipment" />
     <bpmn:userTask id="Task_SupplierShipment" name="Отгрузить и отправить автоцистерну">
       <bpmn:incoming>Flow_S2</bpmn:incoming>
       <bpmn:outgoing>Flow_S3</bpmn:outgoing>
+      <bpmn:potentialOwner name="SUPPLIER_MANAGER" />
     </bpmn:userTask>
     
     <bpmn:sequenceFlow id="Flow_S3" sourceRef="Task_SupplierShipment" targetRef="EndEvent_Supplier" />

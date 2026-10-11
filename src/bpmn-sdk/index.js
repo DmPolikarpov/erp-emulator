@@ -20,6 +20,9 @@
 import 'bpmn-js/dist/assets/diagram-js.css';
 import 'bpmn-js/dist/assets/bpmn-js.css';
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-codes.css';
+// `bpmn-codes.css` выше задаёт иконкам только `content` (`\e8xx`), поэтому
+// семейство шрифта к `.bpmn-icon-*` привязывает `bpmnFont.css` (там же и
+// `@font-face`) — иначе глифы палитры рисуются fallback-шрифтом.
 import './styles/bpmnFont.css';
 import './styles/bpmn-sdk.css';
 

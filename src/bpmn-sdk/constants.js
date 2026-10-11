@@ -132,6 +132,15 @@ export const XML_CHANGE_DEBOUNCE_MS = 400;
 /** Допустимый идентификатор элемента (он же `element_id` для движка). */
 export const ELEMENT_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 
+/**
+ * Допустимая роль исполнителя (`bpmn:potentialOwner/@name`).
+ *
+ * Грамматика совпадает с `element_id`: роль попадает в XML-атрибут, и её
+ * приходится сравнивать с ролями пользователей (`USERS[].role`) без
+ * нормализации регистра.
+ */
+export const ROLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+
 /** Коды ошибок SDK. */
 export const ERROR_KINDS = {
   HTTP: 'http',
