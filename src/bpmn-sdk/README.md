@@ -58,7 +58,12 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
   `isValidElementId`, `isElementIdAvailable`, `renameElementId`, `parseXml`, `getLocalName`;
 - роль исполнителя узла (`bpmn:potentialOwner`): `getElementRole`, `getRoleAssignments`,
   `setElementRole`, `isValidRole`, `isActivityType`, `isActivityElement`,
-  `POTENTIAL_OWNER_TYPE`, `POTENTIAL_OWNER_LOCAL_NAME`.
+  `POTENTIAL_OWNER_TYPE`, `POTENTIAL_OWNER_LOCAL_NAME`;
+- триггер запуска второго процесса (`trg:processTrigger`): `getElementTrigger`,
+  `getTriggerAssignments`, `listTriggers`, `setElementTrigger`, `isValidTrigger`,
+  `isValidInstancePrefix`, `isValidPayloadKeys`, `isTriggerHostType`,
+  `TRIGGER_NAMESPACE`, `TRIGGER_TYPE`, `TRIGGER_FIELDS`, `EMPTY_TRIGGER`,
+  `TRIGGER_MODELE_EXTENSIONS`.
 
 Состав API проверяется тестом [`src/vendor/bpmnSdkBundle.test.js`](../vendor/bpmnSdkBundle.test.js).
 
@@ -100,6 +105,57 @@ BPMN 2.0; тип уже описан в `bpmn-moddle`, поэтому `moddleExt
 (`BpmnEditor` прокидывает оба и пишет роль через `modeling.updateProperties`, то
 есть правка попадает в `commandStack` и в `onChange`). Роль — разметка
 маршрутизации в UI, а не авторизация: движок её не читает и не проверяет.
+
+### Триггер запуска второго процесса
+
+BPMN 2.0 не знает «запустить другой процесс», поэтому привязка живёт расширением
+в собственном namespace `trg` (для `bpmn-js` тип объявляет
+`TRIGGER_MODELE_EXTENSIONS` — `moddleExtensions` редактора):
+
+```xml
+<bpmn:serviceTask id="Task_WaitForSupplierShipment" name="Ожидание отгрузки">
+  <bpmn:extensionElements>
+    <trg:processTrigger targetProcessId="Process_SupplierSupply_v1"
+                        instancePrefix="inst-supp-"
+                        startElementId="Task_WaitForSupplierShipment"
+                        firstElementId="Task_SupplierCreateDocs"
+                        payloadKeys="orderNum,volume" />
+  </bpmn:extensionElements>
+</bpmn:serviceTask>
+```
+
+| Экспорт | Назначение |
+| --- | --- |
+| `getElementTrigger(xml, elementId)` | триггер узла (`null`, если не назначен) |
+| `getTriggerAssignments(xml)` | карта `{element_id: триггер}` по всей схеме |
+| `listTriggers(xml)` | `[{elementId, trigger}]` в порядке появления в схеме |
+| `setElementTrigger(xml, elementId, trigger)` | правка триггера текстом; `null` (или пустой `targetProcessId`) снимает его |
+| `isValidTrigger(trigger)` / `isValidInstancePrefix(value)` / `isValidPayloadKeys(value)` | проверки полей до записи (панель подсвечивает недопустимое поле) |
+| `isTriggerHostType(type)` | узел может быть источником триггера (задача, событие, шлюз, подпроцесс) |
+| `TRIGGER_FIELDS`, `EMPTY_TRIGGER`, `TRIGGER_TYPE`, `TRIGGER_NAMESPACE`, `TRIGGER_MODELE_EXTENSIONS` | состав полей, пустой триггер, тип моддла, namespace и расширения редактора |
+
+Правила:
+
+- **источник — только узел потока**: `sequenceFlow` движок токеном не активирует,
+  `setElementTrigger` на нём бросает ошибку, `EnginePanel` блокирует поля;
+- **`payloadKeys` — упорядоченный список без повторов**: «грязная» запись
+  канонизируется (`' volume , orderNum ,, volume '` → `'volume,orderNum'`),
+  поэтому повторное применение того же триггера схему не меняет;
+- **namespace `xmlns:trg` объявляется в корне** вместе с первым триггером: без
+  объявления схема некорректна и `bpmn-js` не прочитает элемент;
+- **чужие расширения узла сохраняются**: тег дописывается в существующий
+  `bpmn:extensionElements`, а контейнер создаётся только если его не было;
+- **правка идёт текстом** (как `renameElementId` и `setElementRole`): остальная
+  схема, включая `bpmndi:BPMNShape`, не переформатируется.
+
+Инспектор узлов отдаёт триггер блоком «Запуск другого процесса при активации
+узла»: подсказки поля «Запускаемый процесс» приходят пропом `triggerTargets`
+(идентификаторы процессов второй стороны: `getProcessIds` от её схемы), правка
+наружу — пропом `onChangeTrigger(id, trigger)` (`null` — снять).
+
+> Движок триггер пока не читает: запуск второго процесса делает клиент отдельным
+> `sendEvent`, а расширение фиксирует пару «источник → цель», точку входа и
+> состав передаваемого payload.
 
 ### Подсветка токенов процесса
 
