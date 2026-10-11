@@ -1,8 +1,8 @@
 {
   "package": "@erp/bpmn-client-sdk",
   "version": "0.1.0",
-  "builtAt": "2026-10-11T21:54:37.478Z",
-  "sourceHash": "97c9e5287da94108b90a927999b632aa517e218672ceacbf59c630dff85bb6fd",
+  "builtAt": "2026-10-11T22:02:38.626Z",
+  "sourceHash": "c4eb55d1563c65c06d4ec1984bb14af996e4175caa9f9399458b4c21c5b8243f",
   "sourceFileCount": 18,
   "toolchain": {
     "webpack": "5.111.1",
@@ -28,17 +28,17 @@
     "bpmn-sdk.umd.js.map": {
       "bytes": 2796098,
       "size": "2.67 MB",
-      "sha256": "02aec0473bce5b34ec52f4dccd2ec290c650f483215ae1f2d4b19ff2e38a4b09"
+      "sha256": "99ab10f5b57239e3bab7c416c7dccad469f60d5dd44b6877b0c0842a38f7af89"
     },
     "bpmn-sdk.esm.js": {
-      "bytes": 160488,
+      "bytes": 160489,
       "size": "156.7 KB",
-      "sha256": "e5b217d555a22669979be0df47c5da791c8425b37482bd6454ae922f2f7abcbe"
+      "sha256": "8c06b90487565d12a37b21be76b315b22fb3fb31ae4e8ef9228168cb79bd7616"
     },
     "bpmn-sdk.esm.js.map": {
-      "bytes": 252991,
+      "bytes": 252992,
       "size": "247.1 KB",
-      "sha256": "d69271d23b7eae532de30b65599454e0670d3514a5387c8d94c684bb61a76c3e"
+      "sha256": "5e7b58b40949204c5d491bd4d5f727e1a05124b094bf168b6d4f1c853ac9da62"
     },
     "bpmn-sdk.css": {
       "bytes": 56998,

@@ -78,6 +78,7 @@ export const TRIGGER_FIELDS = [
   'firstElementId',
   'payloadKeys',
 ];
+
 /**
  * Пустой триггер: «триггера нет».
  *
@@ -89,7 +90,6 @@ export const TRIGGER_FIELDS = [
 export const EMPTY_TRIGGER = Object.freeze(
   TRIGGER_FIELDS.reduce((trigger, name) => ({ ...trigger, [name]: '' }), {})
 );
-
 
 /** Дескриптор пакета для `moddleExtensions`. */
 export const TRIGGER_DESCRIPTOR = {
