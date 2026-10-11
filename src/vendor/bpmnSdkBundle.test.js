@@ -62,6 +62,21 @@ const PUBLIC_API = [
   'getRoleAssignments',
   'setElementRole',
   'isValidRole',
+  // кросс-процессный триггер узла (trg:processTrigger)
+  'getElementTrigger',
+  'getTriggerAssignments',
+  'setElementTrigger',
+  'listTriggers',
+  'isValidTrigger',
+  'isValidInstancePrefix',
+  'isValidPayloadKeys',
+  'isTriggerHostType',
+  'getProcessIds',
+  'TRIGGER_NAMESPACE',
+  'TRIGGER_TYPE',
+  'TRIGGER_FIELDS',
+  'EMPTY_TRIGGER',
+  'TRIGGER_MODELE_EXTENSIONS',
 ];
 
 /**
@@ -269,6 +284,74 @@ describe('вендорный бандл BPMN Client SDK', () => {
       'Task_SupplierShipment',
       'EndEvent_Supplier',
     ]);
+  });
+
+  it('пишет триггер запуска второго процесса тем же API, что и редактор', () => {
+    // Подсказки поля «Запускаемый процесс» (демо-страница SDK и `App.jsx`) —
+    // идентификаторы процессов второй стороны: у заказчика это поставщик.
+    expect(sdk.getProcessIds(sdk.DEFAULT_SUPPLIER_BPMN_XML)).toEqual([
+      'Process_SupplierSupply_v1',
+    ]);
+    expect(sdk.getProcessIds(sdk.DEFAULT_CUSTOMER_BPMN_XML)).toEqual([
+      'Process_MilkCustomer_v1',
+    ]);
+
+    const xml = sdk.setElementTrigger(
+      sdk.DEFAULT_CUSTOMER_BPMN_XML,
+      'Task_WaitForSupplierShipment',
+      {
+        targetProcessId: 'Process_SupplierSupply_v1',
+        instancePrefix: sdk.INSTANCE_PREFIX.SUPPLIER,
+        startElementId: 'Task_WaitForSupplierShipment',
+        firstElementId: 'Task_SupplierCreateDocs',
+        payloadKeys: 'orderNum, volume',
+      }
+    );
+
+    expect(sdk.getElementTrigger(xml, 'Task_WaitForSupplierShipment')).toEqual({
+      targetProcessId: 'Process_SupplierSupply_v1',
+      instancePrefix: 'inst-supp-',
+      startElementId: 'Task_WaitForSupplierShipment',
+      firstElementId: 'Task_SupplierCreateDocs',
+      payloadKeys: 'orderNum,volume',
+    });
+    expect(sdk.getTriggerAssignments(xml)).toEqual({
+      Task_WaitForSupplierShipment: sdk.getElementTrigger(xml, 'Task_WaitForSupplierShipment'),
+    });
+
+    // Правка текстовая: namespace объявлен в корне, состав узлов не изменился,
+    // а снятие триггера убирает элемент из схемы.
+    expect(xml).toContain(' xmlns:trg="' + sdk.TRIGGER_NAMESPACE + '"');
+    expect(sdk.listFlowElements(xml)).toEqual(
+      sdk.listFlowElements(sdk.DEFAULT_CUSTOMER_BPMN_XML)
+    );
+    expect(
+      sdk.listTriggers(sdk.setElementTrigger(xml, 'Task_WaitForSupplierShipment', null))
+    ).toEqual([]);
+
+    // Инспектор узлов читает триггер из XML, когда реестр его не отдал:
+    // демо-страница SDK передаёт `listFlowElements` (там только id/name/type),
+    // а схему — пропом `xml`.
+    render(
+      <sdk.EnginePanel
+        xml={xml}
+        elements={sdk.listFlowElements(xml)}
+        selectedElementId="Task_WaitForSupplierShipment"
+        roleOptions={['MANAGER']}
+        triggerTargets={sdk.getProcessIds(sdk.DEFAULT_SUPPLIER_BPMN_XML)}
+      />
+    );
+
+    expect(screen.getByDisplayValue('Process_SupplierSupply_v1')).toBeTruthy();
+    expect(screen.getByDisplayValue('orderNum,volume')).toBeTruthy();
+
+    // Триггер ставится только на узел потока: последовательный поток движок
+    // токеном не активирует.
+    expect(() =>
+      sdk.setElementTrigger(sdk.DEFAULT_CUSTOMER_BPMN_XML, 'Flow_C1', {
+        targetProcessId: 'Process_SupplierSupply_v1',
+      })
+    ).toThrow(/только узлам потока/);
   });
 
   it('рендерит компонент бандла на том же React, что и приложение', () => {
