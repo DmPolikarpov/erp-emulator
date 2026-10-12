@@ -1,0 +1,9 @@
+# Вендорные артефакты SDK хранятся байт-в-байт: при core.autocrlf=true git
+# иначе переписал бы переводы строк, и sha256 в BUILD_INFO.json (проверяется
+# тестом src/vendor/bpmnSdkBundle.test.js) перестал бы совпадать.
+src/vendor/bpmn-sdk/bpmn-sdk.umd.js -text -diff
+src/vendor/bpmn-sdk/bpmn-sdk.umd.js.map -text -diff
+src/vendor/bpmn-sdk/BUILD_INFO.json -text -diff
+
+# Карты сборки — тоже байтовые файлы.
+src/bpmn-sdk/dist/*.map -text -diff

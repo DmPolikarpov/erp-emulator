@@ -1,0 +1,36 @@
+{
+  "name": "@erp/bpmn-client-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Клиентский SDK BPMN-оркестратора: компоненты редактора и просмотрщика схем, клиент HTTP-шлюза и WebSocket-подписка на токены процесса.",
+  "main": "index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "sync": "node tools/sync.mjs",
+    "verify": "node tools/verify.mjs",
+    "refresh": "npm run build && npm run sync && npm run verify"
+  },
+  "sideEffects": [
+    "*.css"
+  ],
+  "peerDependencies": {
+    "bpmn-js": "^17.11.1",
+    "lucide-react": ">=0.344.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "bpmn-js-properties-panel": {
+      "optional": true
+    },
+    "@bpmn-io/properties-panel": {
+      "optional": true
+    },
+    "camunda-bpmn-moddle": {
+      "optional": true
+    }
+  }
+}

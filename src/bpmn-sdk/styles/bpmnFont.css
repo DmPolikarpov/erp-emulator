@@ -1,0 +1,47 @@
+/**
+ * Шрифт иконок `bpmn-font` (иконки палитры, задач, шлюзов bpmn-js).
+ *
+ * Этот файл заменяет `bpmn-js/dist/assets/bpmn-font/css/bpmn.css`, делая
+ * то же самое, но двумя частями и без лишних форматов шрифта:
+ *
+ *  1. `@font-face` — только `woff2` (~13 KB) вместо eot/svg/ttf/woff,
+ *     которые после base64 дают ~390 KB (91 % веса CSS) и попадают в
+ *     JS-бандл клиента. `bpmn-js@17` и так требует современный браузер,
+ *     где `woff2` поддерживается.
+ *  2. Привязка глифов к семейству: правила `content` живут в
+ *     `bpmn-codes.css` (`index.js`), но семейства шрифта там нет — это
+ *     делает `[class^="bpmn-icon-"]:before` из `bpmn.css`. Без привязки
+ *     приватные глифы `\e8xx` рисуются fallback-шрифтом, и панель
+ *     инструментов редактора выглядит квадратиками.
+ *
+ * Порядок подключения (`index.js`: `diagram-js.css` → `bpmn-js.css` →
+ * `bpmn-codes.css` → этот файл → `bpmn-sdk.css`) совпадает с upstream,
+ * поэтому специфичность селекторов не меняется.
+ */
+
+@font-face {
+  font-family: 'bpmn';
+  src: url('bpmn-js/dist/assets/bpmn-font/font/bpmn.woff2') format('woff2');
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* Копия `[class^="bpmn-icon-"]:before` из `bpmn-font/css/bpmn.css`. */
+[class^="bpmn-icon-"]:before,
+[class*=" bpmn-icon-"]:before {
+  font-family: 'bpmn';
+  font-style: normal;
+  font-weight: normal;
+  font-variant: normal;
+  speak: never;
+
+  display: inline-block;
+  width: 1em;
+  text-decoration: inherit;
+  text-align: center;
+  text-transform: none;
+
+  line-height: 1em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

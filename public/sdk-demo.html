@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BPMN Client SDK — подключение через &lt;script&gt;</title>
+
+    <!--
+      Демонстрация самодостаточного UMD-артефакта SDK.
+
+      Ассетов в репозитории нет: их кладёт `npm run sdk:demo`
+      (каталог `public/vendor`; он же копируется в production-сборку CRA,
+      поэтому чистить его умеет `npm run sdk:demo:clean`).
+
+      Порядок подключения обязателен: React UMD -> бандл SDK. React здесь
+      тот же экземпляр, что использует SDK (в бандле он external), поэтому
+      хуки работают и «Invalid hook call» не возникает.
+    -->
+    <script src="/vendor/react/react.development.js"></script>
+    <script src="/vendor/react/react-dom.development.js"></script>
+    <script src="/vendor/bpmn-sdk/bpmn-sdk.umd.js"></script>
+
+    <style>
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #f1f5f9;
+        color: #0f172a;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      }
+      .demo {
+        max-width: 1080px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .demo h1 {
+        margin: 0;
+        font-size: 24px;
+      }
+      .demo__hint {
+        margin: 0;
+        color: #475569;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .demo__card {
+        padding: 16px;
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+      }
+      .demo__controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: flex-end;
+      }
+      .demo__field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 13px;
+        color: #475569;
+      }
+      .demo__field select {
+        min-width: 260px;
+        padding: 6px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #fff;
+        font-size: 14px;
+      }
+      .demo__button {
+        padding: 6px 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #fff;
+        color: #0f172a;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .demo__grid {
+        display: grid;
+        grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+        gap: 16px;
+      }
+      .demo__info {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.7;
+        word-break: break-all;
+      }
+      .demo__error {
+        padding: 16px;
+        background: #fef2f2;
+        border: 1px solid #fecaca;
+        border-radius: 12px;
+        color: #991b1b;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      .demo__error code {
+        padding: 1px 6px;
+        background: #fee2e2;
+        border-radius: 4px;
+      }
+      @media (max-width: 900px) {
+        .demo__grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="root"></div>
+
+    <script>
+      (function () {
+        var root = document.getElementById('root');
+
+        /** Ассетов в репозитории нет: их готовит `npm run sdk:demo`. */
+        function showMissingAssets() {
+          root.innerHTML =
+            '<div class="demo">' +
+            '<h1>BPMN Client SDK: демонстрация</h1>' +
+            '<div class="demo__error">' +
+            'Не найден бандл SDK или React UMD. Выполните <code>npm run sdk:demo</code> ' +
+            '(перед этим — <code>npm run sdk:refresh</code>), затем обновите страницу. ' +
+            'Каталог <code>public/vendor</code> в git не хранится.' +
+            '</div></div>';
+        }
+
+        if (!window.React || !window.ReactDOM || !window.BpmnSdk) {
+          showMissingAssets();
+          return;
+        }
+
+        var h = React.createElement;
+        var sdk = window.BpmnSdk;
+        var XML = sdk.DEFAULT_CUSTOMER_BPMN_XML;
+        var ELEMENT_ID = 'Task_CreatePurchaseOrder';
+        var STATES = [
+          sdk.TOKEN_STATES.ACTIVE,
+          sdk.TOKEN_STATES.COMPLETED,
+          sdk.TOKEN_STATES.FAILED,
+          sdk.TOKEN_STATES.TIMED_OUT,
+        ];
+
+        /**
+         * Роли для выпадающего списка инспектора узлов.
+         *
+         * В бандл SDK словарь ролей не входит (это данные приложения: в
+         * `erp-simulator` он живёт в `src/roles.js`), поэтому демо-страница
+         * объявляет роли пользователей своего UI сама.
+         */
+        var ROLE_OPTIONS = ['MANAGER', 'SECURITY', 'QUALITY', 'SUPPLIER_MANAGER'];
+
+        /** Карточка «что внутри бандла»: данные из BUILD_INFO.json. */
+        function BuildInfo() {
+          var state = React.useState(null);
+          var info = state[0];
+
+          React.useEffect(function () {
+            fetch('/vendor/bpmn-sdk/BUILD_INFO.json')
+              .then(function (response) {
+                return response.ok ? response.json() : null;
+              })
+              .then(state[1])
+              .catch(function () {
+                state[1](null);
+              });
+          }, []);
+
+          if (!info) return h('p', { className: 'demo__hint' }, 'BUILD_INFO.json недоступен.');
+
+          var umd = info.artifacts['bpmn-sdk.umd.js'];
+
+          return h(
+            'p',
+            { className: 'demo__info' },
+            h('strong', null, info.package + '@' + info.version),
+            h('br'),
+            'сборка: ' + info.builtAt,
+            h('br'),
+            'исходники: ' + info.sourceHash.slice(0, 12) + '… (' + info.sourceFileCount + ' файлов)',
+            h('br'),
+            'bpmn-js ' + info.toolchain['bpmn-js'] + ', webpack ' + info.toolchain.webpack,
+            h('br'),
+            'UMD: ' + umd.size + ' (sha256 ' + umd.sha256.slice(0, 12) + '…)'
+          );
+        }
+
+        /** Витрина: просмотрщик с подсветкой токена + инспектор узлов схемы. */
+        function Demo() {
+          var element = React.useState(ELEMENT_ID);
+          var elementId = element[0];
+
+          var state = React.useState(STATES[0]);
+          var tokenState = state[0];
+
+          // Схема — состояние демо: правки инспектора возвращаются в неё через
+          // `setElementRole`/`setElementTrigger` и сразу видны просмотрщику.
+          var schema = React.useState(XML);
+          var xml = schema[0];
+
+          var elements = React.useMemo(
+            function () {
+              return sdk.listFlowElements(xml);
+            },
+            [xml]
+          );
+
+          // Подсказки поля «Запускаемый процесс» — идентификаторы процессов
+          // второй стороны: в демо у заказчика это процессы поставщика (в
+          // приложении схема соседа подставляется так же — `getProcessIds`).
+          var triggerTargets = React.useMemo(function () {
+            return sdk.getProcessIds(sdk.DEFAULT_SUPPLIER_BPMN_XML);
+          }, []);
+
+          var tokens = React.useMemo(
+            function () {
+              var map = {};
+              if (elementId) map[elementId] = tokenState;
+              return map;
+            },
+            [elementId, tokenState]
+          );
+
+          var highlight = sdk.useTokenHighlight(tokens, {});
+
+          /**
+           * Правка схемы демо.
+           *
+           * Инспектор считает правку применённой, если обработчик вернул не
+           * `false` (иначе он вернёт поля к фактическим значениям), поэтому
+           * исключения SDK (`setElementRole` бросает на событии или шлюзе,
+           * `setElementTrigger` — на последовательном потоке) гасятся здесь и
+           * печатаются в консоль.
+           */
+          function applySchema(update) {
+            try {
+              schema[1](update(xml));
+              return true;
+            } catch (error) {
+              console.error('Правка схемы:', error);
+              return false;
+            }
+          }
+
+          function changeRole(id, role) {
+            return applySchema(function (current) {
+              return sdk.setElementRole(current, id, role);
+            });
+          }
+
+          function changeTrigger(id, trigger) {
+            return applySchema(function (current) {
+              return sdk.setElementTrigger(current, id, trigger);
+            });
+          }
+
+          function changeActions(id, actions) {
+            return applySchema(function (current) {
+              return sdk.setElementActions(current, id, actions);
+            });
+          }
+
+          return h(
+            'div',
+            { className: 'demo' },
+            h('h1', null, 'BPMN Client SDK: подключение через <script>'),
+            h(
+              'p',
+              { className: 'demo__hint' },
+              'Бандл самодостаточен: bpmn-js, стили холста и шрифт уже внутри; React ' +
+                'подключается отдельно и используется всеми компонентами SDK. ' +
+                'Инспектор пишет правки прямо в схему демо: роль — через ' +
+                'setElementRole, запуск второго процесса (trg:processTrigger) — через ' +
+                'setElementTrigger, кнопки участников (act:userAction) — через ' +
+                'setElementActions, а подсказки процессов берутся из второй демо-схемы ' +
+                'функцией getProcessIds. У кнопки можно оставить «Событие» и «Узел» ' +
+                'пустыми: схема сама подставит CompleteBlock и следующий блок по ' +
+                'единственной исходящей связи (getNextElementId).'
+            ),
+            h(
+              'div',
+              { className: 'demo__card demo__controls' },
+              h(
+                'label',
+                { className: 'demo__field' },
+                'Узел схемы',
+                h(
+                  'select',
+                  {
+                    value: elementId,
+                    onChange: function (event) {
+                      element[1](event.target.value);
+                    },
+                  },
+                  elements.map(function (node) {
+                    return h(
+                      'option',
+                      { key: node.id, value: node.id },
+                      node.name + ' [' + node.id + ']'
+                    );
+                  })
+                )
+              ),
+              h(
+                'label',
+                { className: 'demo__field' },
+                'Состояние токена',
+                h(
+                  'select',
+                  {
+                    value: tokenState,
+                    onChange: function (event) {
+                      state[1](event.target.value);
+                    },
+                  },
+                  STATES.map(function (value) {
+                    return h('option', { key: value, value: value }, value);
+                  })
+                )
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'demo__button',
+                  onClick: function () {
+                    schema[1](XML);
+                  },
+                },
+                'Вернуть демо-схему'
+              )
+            ),
+            h(
+              'div',
+              { className: 'demo__grid' },
+              h(sdk.BpmnViewer, {
+                xml: xml,
+                tokens: highlight.tokenMap,
+                activeElementId: highlight.activeElementId,
+                height: 560,
+                onError: function (error) {
+                  console.error('BpmnViewer:', error);
+                },
+              }),
+              h(
+                'div',
+                { className: 'demo__card' },
+                h(sdk.EnginePanel, {
+                  xml: xml,
+                  elements: elements,
+                  selectedElementId: elementId,
+                  onSelect: function (id) {
+                    element[1](id || elementId);
+                  },
+                  roleOptions: ROLE_OPTIONS,
+                  onChangeRole: changeRole,
+                  triggerTargets: triggerTargets,
+                  onChangeTrigger: changeTrigger,
+                  onChangeActions: changeActions,
+                  title: 'Инспектор узлов',
+                })
+              )
+            ),
+            h('div', { className: 'demo__card' }, h(BuildInfo, null))
+          );
+        }
+
+        ReactDOM.createRoot(root).render(h(Demo, null));
+      })();
+    </script>
+  </body>
+</html>
+

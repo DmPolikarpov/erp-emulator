@@ -21,3 +21,9 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# BPMN Client SDK: артефакты сборки (в клиент попадает только src/vendor/bpmn-sdk)
+/src/bpmn-sdk/dist
+
+# Ассеты демо-страницы SDK (генерируются `npm run sdk:demo`)
+/public/vendor

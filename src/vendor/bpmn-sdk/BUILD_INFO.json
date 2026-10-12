@@ -1,0 +1,49 @@
+{
+  "package": "@erp/bpmn-client-sdk",
+  "version": "0.1.0",
+  "builtAt": "2026-10-12T00:15:10.356Z",
+  "sourceHash": "5e4e18cdcd60fbfd7d60dcda471d2f06787c1094583e7cc8ec86d442464a317f",
+  "sourceFileCount": 20,
+  "toolchain": {
+    "webpack": "5.111.1",
+    "babel-loader": "8.4.1",
+    "css-loader": "6.11.0",
+    "style-loader": "3.3.4",
+    "mini-css-extract-plugin": "2.10.2",
+    "terser-webpack-plugin": "5.6.1",
+    "@babel/core": "7.29.7",
+    "@babel/preset-env": "7.29.7",
+    "@babel/preset-react": "7.29.7",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "bpmn-js": "17.11.1",
+    "lucide-react": "0.344.0"
+  },
+  "artifacts": {
+    "bpmn-sdk.umd.js": {
+      "bytes": 676573,
+      "size": "660.7 KB",
+      "sha256": "2d0920a3002141f8949f589f247a8ae55ec93766baad461b915a07ee2226986c"
+    },
+    "bpmn-sdk.umd.js.map": {
+      "bytes": 2913890,
+      "size": "2.78 MB",
+      "sha256": "ab50f6d9ae3e96853e0407b15879ff6ffcbb848b004b7dafa89af2cf8e28e8e5"
+    },
+    "bpmn-sdk.esm.js": {
+      "bytes": 248280,
+      "size": "242.5 KB",
+      "sha256": "b9edf1788d200830cb4b43077e37211dbc445c8a1aa41acaade427fb2b8f20b1"
+    },
+    "bpmn-sdk.esm.js.map": {
+      "bytes": 387941,
+      "size": "378.8 KB",
+      "sha256": "d087c538ab3eeaf035585900eb5a4a0a347ee48f9ffb7a1e554db91ba552da60"
+    },
+    "bpmn-sdk.css": {
+      "bytes": 57740,
+      "size": "56.4 KB",
+      "sha256": "ff49ab08867fb02d4ca77e0085cd5a6ec818eb17308f61eb9edf84ec00cea023"
+    }
+  }
+}

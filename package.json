@@ -15,7 +15,15 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "build": "react-scripts build"
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "test:ci": "react-scripts test --watchAll=false",
+    "sdk:build": "node src/bpmn-sdk/tools/build.mjs",
+    "sdk:sync": "node src/bpmn-sdk/tools/sync.mjs",
+    "sdk:verify": "node src/bpmn-sdk/tools/verify.mjs",
+    "sdk:refresh": "npm run sdk:build && npm run sdk:sync && npm run sdk:verify",
+    "sdk:demo": "node src/bpmn-sdk/tools/sync.mjs --demo",
+    "sdk:demo:clean": "node src/bpmn-sdk/tools/sync.mjs --clean-demo"
   },
   "browserslist": {
     "production": [
@@ -28,5 +36,9 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3"
   }
 }
