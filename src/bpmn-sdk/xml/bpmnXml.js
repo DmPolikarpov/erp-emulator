@@ -12,6 +12,7 @@
 
 import {
   ELEMENT_ID_PATTERN,
+  ENGINE_EVENTS,
   INSTANCE_PREFIX_PATTERN,
   ROLE_PATTERN,
   TRIGGER_PAYLOAD_KEYS_SEPARATOR,
@@ -23,6 +24,12 @@ import {
   TRIGGER_NAMESPACE,
   TRIGGER_NAMESPACE_PREFIX,
 } from './triggerModdle';
+import {
+  ACTION_FIELDS,
+  ACTION_LOCAL_NAME,
+  ACTION_NAMESPACE,
+  ACTION_NAMESPACE_PREFIX,
+} from './actionModdle';
 
 /** Суффиксы локальных имён, которые считаются узлами потока управления. */
 export const FLOW_ELEMENT_SUFFIXES = ['Task', 'Event', 'Gateway'];
@@ -528,7 +535,7 @@ export function getElementTrigger(xml, elementId) {
 
   const node = Array.from(doc.getElementsByTagName('*'))
     .filter((candidate) => getLocalName(candidate) === TRIGGER_LOCAL_NAME)
-    .find((candidate) => triggerOwnerId(candidate) === elementId);
+    .find((candidate) => extensionOwnerId(candidate) === elementId);
 
   return node ? triggerFromNode(node) : null;
 }
@@ -547,7 +554,7 @@ export function listTriggers(xml) {
 
   return Array.from(doc.getElementsByTagName('*'))
     .filter((node) => getLocalName(node) === TRIGGER_LOCAL_NAME)
-    .map((node) => ({ elementId: triggerOwnerId(node), trigger: triggerFromNode(node) }))
+    .map((node) => ({ elementId: extensionOwnerId(node), trigger: triggerFromNode(node) }))
     .filter((item) => item.elementId !== '');
 }
 
@@ -634,6 +641,450 @@ export function setElementTrigger(xml, elementId, trigger = null) {
     : insertExtensionElements(xml, range, triggerTag);
 
   return ensureTriggerNamespace(patched);
+}
+
+/* ------------------------------------------------------------------ *
+ * Кнопки участников: `act:userAction`
+ * ------------------------------------
+ * Кнопка описывает шаг участника: надпись, роль, событие и узел, который
+ * станет `ACTIVE`. Событие и узел необязательны — их выводят из схемы
+ * `resolveActionEvent`/`resolveActionTarget` (умолчания `DEFAULT_ACTION_EVENT` и
+ * `getNextElementId`), а значение, записанное в XML явно, всегда важнее
+ * умолчания.
+ * ------------------------------------------------------------------ */
+
+/** Полное имя элемента кнопки в XML (`act:userAction`). */
+export const ACTION_TAG_NAME = ACTION_NAMESPACE_PREFIX + ':' + ACTION_LOCAL_NAME;
+
+/**
+ * Допустимое имя иконки кнопки (`icon="Truck"`).
+ *
+ * Схема хранит не картинку, а имя иконки из набора клиента: определение кнопки
+ * остаётся данными, а оформление — делом кабинета. Незнакомое имя рисуется
+ * иконкой по умолчанию, поэтому «чужая» схема интерфейс не ломает.
+ */
+export const ACTION_ICON_PATTERN = /^[A-Za-z][A-Za-z0-9]*$/;
+
+/**
+ * Проверяет, что узел может быть хостом кнопки участника.
+ *
+ * Кнопка описывает шаг, который ведёт участник, поэтому хостом может быть
+ * только узел, который движок активирует токеном: задача, событие, шлюз,
+ * подпроцесс или вызов активности. На `sequenceFlow` шаг не активируется —
+ * кнопки там быть не может (та же причина, что и у триггера).
+ *
+ * @param {string} type Тип узла (`bpmn:userTask`, `UserTask` или `userTask`).
+ * @returns {boolean}
+ */
+export function isActionHostType(type) {
+  return isTriggerHostType(type);
+}
+
+/**
+ * Событие кнопки по умолчанию: «блок выполнен, шаг закрыт».
+ *
+ * Движок имя события не разбирает: оно уходит в subject NATS
+ * (`mes.in.v1.event.erp.${event_name}`, см. `bpmn-gateways/http-cluster`) и в
+ * журнал как метка операции, а токен двигает `element_id`
+ * (см. `bpmn-engine/src/main.rs`). Поэтому кнопке достаточно знать, **куда**
+ * шаг переводит токен, а «что произошло» можно не писать: пустое
+ * `act:userAction/@event` — это как раз «завершить блок».
+ */
+export const DEFAULT_ACTION_EVENT = ENGINE_EVENTS.COMPLETE_BLOCK;
+
+/**
+ * Целевые узлы исходящих связей узла (`sequenceFlow/@targetRef`).
+ *
+ * Порядок — как в схеме; повторы (две связи в один узел) схлопываются.
+ *
+ * @param {string} xml BPMN-схема.
+ * @param {string} elementId идентификатор узла (`element_id`).
+ * @returns {string[]} идентификаторы узлов-приёмников (возможно, пусто).
+ */
+export function getOutgoingTargetIds(xml, elementId) {
+  if (typeof xml !== 'string' || !elementId) return [];
+
+  const doc = parseXml(xml);
+  if (!doc) return [];
+
+  const targets = [];
+
+  Array.from(doc.getElementsByTagName('*'))
+    .filter((node) => getLocalName(node) === 'sequenceFlow')
+    .forEach((node) => {
+      if ((node.getAttribute('sourceRef') || '') !== elementId) return;
+
+      const target = node.getAttribute('targetRef') || '';
+      if (target !== '' && targets.indexOf(target) === -1) targets.push(target);
+    });
+
+  return targets;
+}
+
+/**
+ * Узел, на который движок переведёт токен после завершения блока.
+ *
+ * Это умолчание для пустого `act:userAction/@elementId`. Ответ даётся только
+ * когда он однозначен: у развилки (шлюз, параллельное ветвление) исходящих
+ * связей несколько, и «следующий шаг» из схемы не выводится — там `''`, а узел
+ * кнопка обязана назвать сама.
+ *
+ * @param {string} xml BPMN-схема.
+ * @param {string} elementId идентификатор узла (`element_id`).
+ * @returns {string} идентификатор узла либо `''`.
+ */
+export function getNextElementId(xml, elementId) {
+  const targets = getOutgoingTargetIds(xml, elementId);
+
+  return targets.length === 1 ? targets[0] : '';
+}
+
+/**
+ * Событие кнопки: её собственное (`event`) либо `DEFAULT_ACTION_EVENT`.
+ *
+ * @param {object} action Кнопка (`ACTION_FIELDS`).
+ * @returns {string} `event_name` для `sendEvent` (непустой).
+ */
+export function resolveActionEvent(action) {
+  return String((action && action.event) || '').trim() || DEFAULT_ACTION_EVENT;
+}
+
+/**
+ * Узел кнопки: её собственный (`elementId`) либо следующий блок по схеме.
+ *
+ * Хост (узел, на котором кнопка объявлена) в событие не уходит — уходит его
+ * приёмник, поэтому пустое поле читается как «шаг выполнен»: токен встаёт на
+ * узел за единственной исходящей связью (`getNextElementId`).
+ *
+ * @param {string} xml BPMN-схема узла-хоста.
+ * @param {string} elementId идентификатор узла-хоста (поле `elementId` записи
+ *   `listActions`).
+ * @param {object} action Кнопка (`ACTION_FIELDS`).
+ * @returns {string} `element_id` для `sendEvent` (возможно, `''`).
+ */
+export function resolveActionTarget(xml, elementId, action) {
+  const target = String((action && action.elementId) || '').trim();
+
+  return target !== '' ? target : getNextElementId(xml, elementId);
+}
+
+/**
+ * Пара «событие + узел» кнопки, разрешённая по схеме.
+ *
+ * Движку нужны ровно они (`event_name` и `element_id` события), а в схеме оба
+ * поля необязательны: пустое `event` даёт `CompleteBlock`, пустой `elementId` —
+ * следующий блок по связи. Явно записанное значение всегда важнее умолчания,
+ * поэтому схемы, где пара указана руками, читаются как раньше.
+ *
+ * @param {string} xml BPMN-схема узла-хоста.
+ * @param {string} elementId идентификатор узла-хоста.
+ * @param {object} action Кнопка (`ACTION_FIELDS`).
+ * @returns {{event: string, elementId: string}} аргументы `GatewayClient.sendEvent`.
+ */
+export function resolveAction(xml, elementId, action) {
+  return {
+    event: resolveActionEvent(action),
+    elementId: resolveActionTarget(xml, elementId, action),
+  };
+}
+
+/**
+ * Приводит описание кнопки к канонической форме и проверяет поля.
+ *
+ * Обязательны только те поля, которые из схемы не выводятся: `id` (ключ кнопки)
+ * и `label` (надпись). Пустые `event` и `elementId` допустимы и означают
+ * умолчания схемы — «шаг выполнен» (`DEFAULT_ACTION_EVENT`) и следующий блок по
+ * единственной исходящей связи (`getNextElementId`); их подставляет
+ * `resolveAction` там, где событие собирается. Необязательные: `role`, `icon`,
+ * `counterpartEvent`, `counterpartElementId`, `startsProcess`. Неизвестные поля
+ * отбрасываются: в XML попадают только поля из `ACTION_FIELDS` (иначе их не
+ * прочитает ни моделлер, ни клиент).
+ *
+ * Заполненные поля проверяются по формату даже там, где пустые допустимы:
+ * опечатка в `elementId` увела бы токен в никуда, и увидеть её лучше в
+ * инспекторе, а не в проде.
+ *
+ * @param {object} action Кнопка (`{ id, label, event?, elementId?, ... }`).
+ * @returns {object} Новый объект ровно с полями `ACTION_FIELDS`.
+ * @throws {Error} кнопка не объект, нет/недопустим `id`, пустая надпись,
+ *   недопустимы роль, иконка, событие, узлы, имя процесса второй стороны либо
+ *   задано только одно из полей второй стороны.
+ */
+export function normalizeAction(action) {
+  if (!action || typeof action !== 'object' || Array.isArray(action)) {
+    throw new Error('Кнопка участника — это объект с полем id.');
+  }
+
+  const normalized = {};
+  ACTION_FIELDS.forEach((name) => {
+    normalized[name] = action[name] == null ? '' : String(action[name]).trim();
+  });
+
+  if (!isValidElementId(normalized.id)) {
+    throw new Error('Недопустимый идентификатор кнопки: "' + normalized.id + '"');
+  }
+  if (normalized.label === '') {
+    throw new Error('У кнопки "' + normalized.id + '" нет надписи (label).');
+  }
+  // Пустые значения — не ошибка: их место занимают умолчания схемы
+  // (`resolveAction`). Недопустимый формат непустого значения — ошибка:
+  // событие уходит в subject NATS, а узел — в `element_id` события.
+  if (normalized.event !== '' && !isValidElementId(normalized.event)) {
+    throw new Error(
+      'Недопустимое событие кнопки "' + normalized.id + '": "' + normalized.event + '"'
+    );
+  }
+  if (normalized.elementId !== '' && !isValidElementId(normalized.elementId)) {
+    throw new Error(
+      'Недопустимый узел кнопки "' + normalized.id + '": "' + normalized.elementId + '"'
+    );
+  }
+  if (normalized.role !== '' && !isValidRole(normalized.role)) {
+    throw new Error('Недопустимая роль кнопки: "' + normalized.role + '"');
+  }
+  if (normalized.icon !== '' && !ACTION_ICON_PATTERN.test(normalized.icon)) {
+    throw new Error('Недопустимое имя иконки кнопки: "' + normalized.icon + '"');
+  }
+  if (
+    normalized.counterpartEvent !== '' &&
+    !isValidElementId(normalized.counterpartEvent)
+  ) {
+    throw new Error(
+      'Недопустимое событие второй стороны: "' + normalized.counterpartEvent + '"'
+    );
+  }
+  if (
+    normalized.counterpartElementId !== '' &&
+    !isValidElementId(normalized.counterpartElementId)
+  ) {
+    throw new Error(
+      'Недопустимый узел второй стороны: "' + normalized.counterpartElementId + '"'
+    );
+  }
+  if (normalized.startsProcess !== '' && !isValidElementId(normalized.startsProcess)) {
+    throw new Error(
+      'Недопустимый запускаемый процесс кнопки: "' + normalized.startsProcess + '"'
+    );
+  }
+  // Событие второй стороны без узла (и наоборот) — недописанная пара: событие
+  // адресуется конкретному узлу чужого экземпляра, без узла оно не сработает.
+  if (
+    (normalized.counterpartEvent === '') !==
+    (normalized.counterpartElementId === '')
+  ) {
+    throw new Error(
+      'Событие и узел второй стороны задаются вместе ("' +
+        normalized.counterpartEvent +
+        '" / "' +
+        normalized.counterpartElementId +
+        '").'
+    );
+  }
+
+  return normalized;
+}
+
+/**
+ * Проверяет кнопку, не выбрасывая исключение.
+ *
+ * @param {object} action Кнопка.
+ * @returns {boolean}
+ */
+export function isValidAction(action) {
+  try {
+    normalizeAction(action);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Собирает все кнопки схемы в порядке появления в XML.
+ *
+ * Чтение идёт по DOM: кнопка вложена в `bpmn:extensionElements` узла, а не
+ * лежит атрибутом на самом узле (как роль), поэтому «плоский» разбор по `id`
+ * здесь не работает.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {Array<{elementId: string, action: object}>} Кнопки с узлами-хостами.
+ */
+export function listActions(xml) {
+  if (typeof xml !== 'string') return [];
+
+  const doc = parseXml(xml);
+  if (!doc) return [];
+
+  return Array.from(doc.getElementsByTagName('*'))
+    .filter((node) => getLocalName(node) === ACTION_LOCAL_NAME)
+    .map((node) => ({ elementId: extensionOwnerId(node), action: actionFromNode(node) }))
+    .filter((item) => item.elementId !== '');
+}
+
+/**
+ * Кнопки узла из схемы.
+ *
+ * @param {string} xml BPMN-схема.
+ * @param {string} elementId Идентификатор узла (`element_id`).
+ * @returns {Array<object>} Кнопки с полями `ACTION_FIELDS` (возможно, пусто).
+ */
+export function getElementActions(xml, elementId) {
+  if (typeof xml !== 'string' || !elementId) return [];
+
+  return listActions(xml)
+    .filter((item) => item.elementId === elementId)
+    .map((item) => item.action);
+}
+
+/**
+ * Кнопка узла по её ключу (`id`).
+ *
+ * @param {string} xml BPMN-схема.
+ * @param {string} elementId Идентификатор узла.
+ * @param {string} actionId Ключ кнопки (`sendToSupplier`).
+ * @returns {object|null} Кнопка либо `null`.
+ */
+export function getElementAction(xml, elementId, actionId) {
+  if (!actionId) return null;
+
+  return (
+    getElementActions(xml, elementId).find((action) => action.id === actionId) || null
+  );
+}
+
+/**
+ * Возвращает карту кнопок схемы: `{ [element_id]: [кнопка, ...] }`.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {Object<string, Array<object>>} Кнопки по идентификаторам узлов.
+ */
+export function getActionAssignments(xml) {
+  const assignments = {};
+
+  listActions(xml).forEach((item) => {
+    assignments[item.elementId] = [...(assignments[item.elementId] || []), item.action];
+  });
+
+  return assignments;
+}
+
+/**
+ * Кнопка запуска процесса.
+ *
+ * Конвенция клиента: кнопка, объявленная на стартовом событии процесса,
+ * описывает **запуск** этого процесса — надпись кнопки инициатора, его роль
+ * (у события нет `resourceRole`, поэтому роль указана в самой кнопке), а также
+ * событие и узел первого шага: движок переводит токен двумя событиями
+ * (`StartProcess` на стартовое событие, затем событие первого шага).
+ *
+ * Пара «событие + узел» может быть и не записана: у стартового события ровно
+ * одна исходящая связь, поэтому её дополняет `resolveAction` (`CompleteBlock` и
+ * первый блок процесса).
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {{elementId: string, action: object}|null} Кнопка старта с
+ *   узлом-хостом (стартовым событием) либо `null`, если её нет.
+ */
+export function getStartAction(xml) {
+  if (typeof xml !== 'string') return null;
+
+  const doc = parseXml(xml);
+  if (!doc) return null;
+
+  const process = firstProcess(doc);
+  if (!process) return null;
+
+  const startIds = elementChildren(process)
+    .filter((child) => getLocalName(child) === 'startEvent')
+    .map((child) => child.getAttribute('id'))
+    .filter(Boolean);
+
+  if (startIds.length === 0) return null;
+
+  return listActions(xml).find((item) => startIds.indexOf(item.elementId) !== -1) || null;
+}
+
+/**
+ * Назначает (заменяет, снимает) кнопки узла в XML.
+ *
+ * Правка, как и у роли с триггером, выполняется текстом: схема пользователя
+ * должна отличаться от исходной ровно на добавленный (изменённый) фрагмент, а
+ * `DOMParser` + `XMLSerializer` переформатировали бы всю схему целиком. Кнопки
+ * пишутся канонической формой `<act:userAction ... />` внутри
+ * `bpmn:extensionElements` узла; контейнер создаётся при необходимости, а в
+ * `bpmn:definitions` добавляется объявление namespace `xmlns:act`. Чужие
+ * расширения узла (`trg:processTrigger`, `camunda:*`) сохраняются.
+ *
+ * Список кнопок заменяется целиком: кабинет и инспектор редактируют кнопки
+ * узла как список, поэтому «полуприменённое» состояние (часть старых, часть
+ * новых) в схему не попадает. Пустой список снимает все кнопки узла. Пустые
+ * `event`/`elementId` в XML не пишутся: их место занимают умолчания схемы, и
+ * кнопка «выполнить шаг» остаётся короткой строкой.
+ *
+ * @param {string} xml BPMN-схема.
+ * @param {string} elementId Идентификатор узла (`element_id`).
+ * @param {Array<object>} [actions=[]] Кнопки (`ACTION_FIELDS`) либо `[]`.
+ * @returns {string} Схема с изменёнными кнопками (та же строка, если менять нечего).
+ * @throws {Error} пустая схема, узел не найден, недопустимая кнопка, узел не
+ *   является узлом потока (последовательный поток не активируется).
+ */
+export function setElementActions(xml, elementId, actions = []) {
+  if (typeof xml !== 'string' || xml.trim() === '') {
+    throw new Error('Пустая BPMN-схема: настройка кнопок участников невозможна.');
+  }
+
+  const range = readElementRange(xml, elementId);
+  if (!range) {
+    throw new Error('Элемент с идентификатором "' + elementId + '" не найден в схеме.');
+  }
+
+  const list = (Array.isArray(actions) ? actions : [actions]).filter(
+    (action) => action && typeof action === 'object'
+  );
+
+  const extensionElements = findExtensionElementsTag(xml, range);
+  const existing = extensionElements ? findActions(xml, extensionElements) : [];
+
+  if (list.length === 0) {
+    // Снять кнопки можно у любого узла (например, чтобы починить схему, где их
+    // записали в `sequenceFlow` вручную), а назначить — только узлу потока.
+    if (existing.length === 0) return xml;
+
+    return removeActions(xml, existing);
+  }
+
+  if (!isActionHostType(range.name)) {
+    throw new Error(
+      'Кнопка участника назначается только узлам потока (задача, событие, шлюз, подпроцесс), а "' +
+        elementId +
+        '" — ' +
+        range.name +
+        '.'
+    );
+  }
+
+  const tags = list.map((action) =>
+    buildActionTag(ACTION_TAG_NAME, normalizeAction(action))
+  );
+
+  if (existing.length === 0) {
+    const patched = extensionElements
+      ? insertIntoExtensionElements(xml, extensionElements, tags)
+      : insertExtensionElements(xml, range, tags);
+
+    return ensureNamespace(patched, ACTION_NAMESPACE_PREFIX, ACTION_NAMESPACE);
+  }
+
+  // Прежние теги убираются первыми, а границы узла и контейнера пересчитываются
+  // на уже правленой строке: иначе смещения новых тегов разъехались бы.
+  const cleared = removeActions(xml, existing);
+  const clearedRange = readElementRange(cleared, elementId);
+  const clearedExtensionElements = findExtensionElementsTag(cleared, clearedRange);
+  const patched = clearedExtensionElements
+    ? insertIntoExtensionElements(cleared, clearedExtensionElements, tags)
+    : insertExtensionElements(cleared, clearedRange, tags);
+
+  return ensureNamespace(patched, ACTION_NAMESPACE_PREFIX, ACTION_NAMESPACE);
 }
 
 /* ------------------------------------------------------------------ *
@@ -759,8 +1210,17 @@ function buildOwnerTag(tag, role) {
   return '<' + tag + ' name="' + role + '" />';
 }
 
-/** Вставляет дочерний элемент в узел перед закрывающим тегом, сохраняя отступы. */
+/**
+ * Вставляет дочерние элементы в узел перед закрывающим тегом, сохраняя отступы.
+ *
+ * @param {string} xml схема.
+ * @param {Object} range границы узла (или контейнера расширений).
+ * @param {string|string[]} childTag каноническая запись одного или нескольких
+ *   дочерних элементов (несколько — у узла может быть несколько кнопок).
+ */
 function insertIntoElement(xml, range, childTag) {
+  const childTags = toTagList(childTag);
+
   if (range.selfClosing) {
     const head = range.openTag.slice(0, -2).replace(/\s+$/, '');
 
@@ -768,7 +1228,7 @@ function insertIntoElement(xml, range, childTag) {
       xml.slice(0, range.openStart) +
       head +
       '>' +
-      childTag +
+      childTags.join('') +
       '</' +
       range.name +
       '>' +
@@ -780,10 +1240,17 @@ function insertIntoElement(xml, range, childTag) {
   const indent = xml.slice(lineStart, range.closeStart);
 
   if (/^\s*$/.test(indent) && lineStart > range.bodyStart) {
-    return xml.slice(0, lineStart) + indent + '  ' + childTag + '\n' + xml.slice(lineStart);
+    return (
+      xml.slice(0, lineStart) +
+      indent +
+      '  ' +
+      childTags.join('\n' + indent + '  ') +
+      '\n' +
+      xml.slice(lineStart)
+    );
   }
 
-  return xml.slice(0, range.closeStart) + childTag + xml.slice(range.closeStart);
+  return xml.slice(0, range.closeStart) + childTags.join('') + xml.slice(range.closeStart);
 }
 
 /** Удаляет дочерний элемент вместе с «осиротевшим» переводом строки, если он остался. */
@@ -801,20 +1268,20 @@ function removeInlineElement(xml, existing) {
 }
 
 /* ------------------------------------------------------------------ *
- * Внутренние помощники триггера
+ * Внутренние помощники расширений узла
  * ------------------------------------------------------------------ */
 
 /**
- * Идентификатор узла-владельца триггера.
+ * Идентификатор узла-владельца расширения.
  *
- * Триггер всегда лежит внутри `bpmn:extensionElements` узла, то есть владелец
- * — «дед» элемента триггера. Если разметка неожиданная (триггер записан без
- * контейнера), поднимаемся к ближайшему предку с `id`.
+ * Триггер и кнопки лежат внутри `bpmn:extensionElements` узла, то есть
+ * владелец — «дед» элемента расширения. Если разметка неожиданная (элемент
+ * записан без контейнера), поднимаемся к ближайшему предку с `id`.
  *
- * @param {Node} node DOM-узел триггера.
+ * @param {Node} node DOM-узел расширения (`trg:processTrigger`, `act:userAction`).
  * @returns {string} Идентификатор узла-владельца либо `''`.
  */
-function triggerOwnerId(node) {
+function extensionOwnerId(node) {
   let current = node ? node.parentNode : null;
 
   while (current && typeof current.getAttribute === 'function') {
@@ -824,6 +1291,119 @@ function triggerOwnerId(node) {
   }
 
   return '';
+}
+
+/**
+ * Читает поля кнопки из DOM-узла `act:userAction`.
+ *
+ * @param {Node} node DOM-узел кнопки.
+ * @returns {object} Кнопка с полями `ACTION_FIELDS` (пустые — `''`).
+ */
+function actionFromNode(node) {
+  const action = {};
+
+  ACTION_FIELDS.forEach((name) => {
+    action[name] = String(node.getAttribute(name) || '');
+  });
+
+  return action;
+}
+
+/**
+ * Читает поля кнопки из строки атрибутов открывающего тега.
+ *
+ * @param {string} attributes Атрибуты тега (` id="..." label="..." `).
+ * @returns {object} Кнопка с полями `ACTION_FIELDS` (пустые — `''`).
+ */
+function actionFromAttributes(attributes) {
+  const action = {};
+
+  ACTION_FIELDS.forEach((name) => {
+    const hit = new RegExp('\\s' + name + '="([^"]*)"').exec(attributes || '');
+    action[name] = hit ? unescapeXmlAttribute(hit[1]) : '';
+  });
+
+  return action;
+}
+
+/**
+ * Каноническая запись кнопки: `<act:userAction field="..." />`.
+ *
+ * Записываются только непустые поля и в порядке `ACTION_FIELDS` — так схема
+ * пользователя остаётся предсказуемой, а сравнение «изменилось ли» сводится к
+ * сравнению разобранных полей.
+ */
+function buildActionTag(tag, action) {
+  const attributes = ACTION_FIELDS.filter((name) => action[name] !== '').map(
+    (name) => name + '="' + escapeXmlAttribute(action[name]) + '"'
+  );
+
+  return '<' + tag + (attributes.length ? ' ' + attributes.join(' ') : '') + ' />';
+}
+
+/**
+ * Границы всех кнопок внутри контейнера расширений.
+ *
+ * @param {string} xml схема.
+ * @param {Object} extensionElements границы контейнера из `findExtensionElementsTag`.
+ * @returns {Array<{start: number, end: number, tag: string, action: object}>}
+ *   Кнопки в порядке появления; пустой массив, если их нет.
+ */
+function findActions(xml, extensionElements) {
+  if (!extensionElements || extensionElements.selfClosing) return [];
+
+  const body = xml.slice(extensionElements.innerStart, extensionElements.innerEnd);
+  const pattern = new RegExp(
+    '<([A-Za-z_][\\w.-]*:)?' + ACTION_LOCAL_NAME + '(\\s[^>]*?)?(/?)>',
+    'g'
+  );
+  const found = [];
+  let match = pattern.exec(body);
+
+  while (match) {
+    const start = extensionElements.innerStart + match.index;
+    const tag = (match[1] || '') + ACTION_LOCAL_NAME;
+    let end = start + match[0].length;
+
+    if (match[3] !== '/') {
+      const closeStart = xml.indexOf('</' + tag + '>', end);
+      end = closeStart === -1 ? end : closeStart + tag.length + 3;
+    }
+
+    found.push({ start, end, tag, action: actionFromAttributes(match[2] || '') });
+    pattern.lastIndex = end - extensionElements.innerStart;
+    match = pattern.exec(body);
+  }
+
+  return found;
+}
+
+/**
+ * Удаляет перечисленные кнопки из схемы (с конца, чтобы смещения не съехали).
+ *
+ * @param {string} xml схема.
+ * @param {Array<{start: number, end: number}>} existing границы из `findActions`.
+ * @returns {string} схема без кнопок.
+ */
+function removeActions(xml, existing) {
+  let cleared = xml;
+
+  for (let index = existing.length - 1; index >= 0; index -= 1) {
+    cleared = removeInlineElement(cleared, existing[index]);
+  }
+
+  return cleared;
+}
+
+/**
+ * Приводит запись расширения к массиву тегов.
+ *
+ * Вставка расширений умеет писать сразу несколько тегов (у узла может быть
+ * несколько кнопок), а триггер передаёт один — нормализация здесь, чтобы
+ * вызывающий код не дублировал `Array.isArray`.
+ */
+function toTagList(tags) {
+  return Array.isArray(tags) ? tags : [tags];
 }
 
 /**
@@ -997,14 +1577,17 @@ function findTriggerTag(xml, extensionElements) {
 }
 
 /**
- * Вставляет триггер в существующий контейнер расширений узла.
+ * Вставляет элементы расширений в существующий контейнер узла.
  *
  * @param {string} xml схема.
  * @param {Object} extensionElements границы контейнера из `findExtensionElementsTag`.
- * @param {string} triggerTag каноническая запись триггера.
- * @returns {string} схема с добавленным триггером.
+ * @param {string|string[]} tags каноническая запись элементов расширения
+ *   (`trg:processTrigger`, `act:userAction`).
+ * @returns {string} схема с добавленными расширениями.
  */
-function insertIntoExtensionElements(xml, extensionElements, triggerTag) {
+function insertIntoExtensionElements(xml, extensionElements, tags) {
+  const list = toTagList(tags);
+
   if (extensionElements.selfClosing) {
     const indent = lineIndent(xml, extensionElements.start);
     const inner = indent + '  ';
@@ -1015,7 +1598,7 @@ function insertIntoExtensionElements(xml, extensionElements, triggerTag) {
       extensionElements.tag +
       '>\n' +
       inner +
-      triggerTag +
+      list.join('\n' + inner) +
       '\n' +
       indent +
       '</' +
@@ -1033,12 +1616,12 @@ function insertIntoExtensionElements(xml, extensionElements, triggerTag) {
       closeStart: extensionElements.innerEnd,
       selfClosing: false,
     },
-    triggerTag
+    list
   );
 }
 
 /**
- * Создаёт контейнер расширений узла вместе с триггером.
+ * Создаёт контейнер расширений узла вместе с элементами расширения.
  *
  * Контейнер пишется с тем же namespace-префиксом, что и сам узел
  * (`bpmn:extensionElements`), и с отступом на два пробела глубже узла — как
@@ -1046,10 +1629,11 @@ function insertIntoExtensionElements(xml, extensionElements, triggerTag) {
  *
  * @param {string} xml схема.
  * @param {Object} range границы узла из `readElementRange`.
- * @param {string} triggerTag каноническая запись триггера.
- * @returns {string} схема с созданным контейнером и триггером.
+ * @param {string|string[]} tags каноническая запись элементов расширения.
+ * @returns {string} схема с созданным контейнером и расширениями.
  */
-function insertExtensionElements(xml, range, triggerTag) {
+function insertExtensionElements(xml, range, tags) {
+  const list = toTagList(tags);
   const wrapper = prefixedTagName(range.name, EXTENSION_ELEMENTS_LOCAL_NAME);
   const open = '<' + wrapper + '>';
   const close = '</' + wrapper + '>';
@@ -1059,7 +1643,13 @@ function insertExtensionElements(xml, range, triggerTag) {
   if (!range.selfClosing && indent === '') {
     // Узел (и его содержимое) записаны одной строкой — расширения вставляются
     // компактно, чтобы не разрывать строку переводами.
-    return xml.slice(0, range.closeStart) + open + triggerTag + close + xml.slice(range.closeStart);
+    return (
+      xml.slice(0, range.closeStart) +
+      open +
+      list.join('') +
+      close +
+      xml.slice(range.closeStart)
+    );
   }
 
   if (range.selfClosing) {
@@ -1074,7 +1664,7 @@ function insertExtensionElements(xml, range, triggerTag) {
       '\n' +
       inner +
       '  ' +
-      triggerTag +
+      list.join('\n' + inner + '  ') +
       '\n' +
       inner +
       close +
@@ -1096,7 +1686,7 @@ function insertExtensionElements(xml, range, triggerTag) {
     '\n' +
     inner +
     '  ' +
-    triggerTag +
+    list.join('\n' + inner + '  ') +
     '\n' +
     inner +
     close +
@@ -1106,16 +1696,19 @@ function insertExtensionElements(xml, range, triggerTag) {
 }
 
 /**
- * Объявляет namespace триггера в корневом элементе схемы.
+ * Объявляет namespace расширения в корневом элементе схемы.
  *
- * Без `xmlns:trg` схема перестаёт быть корректной (`bpmn-js` не прочитает
- * элемент), поэтому объявление добавляется вместе с первым триггером.
+ * Без `xmlns:trg` / `xmlns:act` схема перестаёт быть корректной (`bpmn-js` не
+ * прочитает элемент), поэтому объявление добавляется вместе с первым
+ * элементом расширения.
  *
  * @param {string} xml схема.
+ * @param {string} prefix префикс namespace-а (`trg`, `act`).
+ * @param {string} uri URI namespace-а.
  * @returns {string} схема с объявленным namespace (та же строка, если он уже есть).
  */
-function ensureTriggerNamespace(xml) {
-  const declared = new RegExp('xmlns:' + TRIGGER_NAMESPACE_PREFIX + '\\s*=');
+function ensureNamespace(xml, prefix, uri) {
+  const declared = new RegExp('xmlns:' + prefix + '\\s*=');
   if (declared.test(xml)) return xml;
 
   const hit = /<(?!\?|!)([A-Za-z_][\w.:-]*)/.exec(xml);
@@ -1141,13 +1734,494 @@ function ensureTriggerNamespace(xml) {
   }
 
   return (
-    xml.slice(0, cursor) +
-    ' xmlns:' +
-    TRIGGER_NAMESPACE_PREFIX +
-    '="' +
-    TRIGGER_NAMESPACE +
-    '"' +
-    xml.slice(cursor)
+    xml.slice(0, cursor) + ' xmlns:' + prefix + '="' + uri + '"' + xml.slice(cursor)
   );
 }
+
+/**
+ * Объявляет namespace триггера в корневом элементе схемы.
+ *
+ * @param {string} xml схема.
+ * @returns {string} схема с объявленным `xmlns:trg`.
+ */
+function ensureTriggerNamespace(xml) {
+  return ensureNamespace(xml, TRIGGER_NAMESPACE_PREFIX, TRIGGER_NAMESPACE);
+}
+
+/* ------------------------------------------------------------------ *
+ * Совместимость схемы с движком оркестратора
+ * ------------------------------------------------------------------ */
+
+/**
+ * Локальные имена узлов потока, которые разбирает движок оркестратора.
+ *
+ * Движок (`bpm-engine-bpmn`) обходит **прямых детей** `<bpmn:process>` и знает
+ * ровно эти типы (плюс `sequenceFlow` — связи). Всё остальное он пропускает
+ * молча, без ошибки разбора: узел другого типа (`bpmn:task` из палитры
+ * редактора, `bpmn:scriptTask`, подпроцесс…) для движка не существует, а
+ * связи, которые в него ведут или из него выходят, становятся «висячими» —
+ * компилятор отвечает `SequenceFlowSourceNotFound` /
+ * `SequenceFlowTargetNotFound` и **не компилирует определение целиком**.
+ *
+ * Отсюда правило клиента: схему с таким узлом в оркестратор отправлять нельзя.
+ * Движок при этом отвечает `202 Accepted` (шлюз публикует событие в NATS, и на
+ * этом его работа заканчивается), поэтому отказ виден только в логе движка, а
+ * в интерфейсе выглядит как «ничего не произошло».
+ */
+export const ENGINE_FLOW_NODE_TYPES = [
+  'startEvent',
+  'endEvent',
+  'serviceTask',
+  'userTask',
+  'exclusiveGateway',
+  'parallelGateway',
+];
+
+/** Перечисление поддерживаемых типов — для сообщений пользователю. */
+const ENGINE_FLOW_NODE_LIST = ENGINE_FLOW_NODE_TYPES.join(', ');
+
+/**
+ * Коды проблем схемы.
+ *
+ * Совпадают с кодами компилятора движка (`ErrorCode`) там, где такое
+ * соответствие есть: отчёт клиента и отказ движка читаются одинаково.
+ * `UnsupportedElement` в движке объявлен, но не используется (неизвестные типы
+ * он просто пропускает) — клиент находит это первым, чтобы отказ был объяснён.
+ */
+export const SCHEMA_PROBLEM = {
+  INVALID_XML: 'InvalidXml',
+  NO_PROCESS: 'NoProcess',
+  MISSING_ID: 'MissingAttribute',
+  UNSUPPORTED_NODE: 'UnsupportedElement',
+  NO_START_EVENT: 'NoStartEvent',
+  MULTIPLE_START_EVENTS: 'MultipleStartEvents',
+  NO_END_EVENT: 'NoEndEvent',
+  FLOW_SOURCE_NOT_FOUND: 'SequenceFlowSourceNotFound',
+  FLOW_TARGET_NOT_FOUND: 'SequenceFlowTargetNotFound',
+  FLOW_SELF_LOOP: 'SequenceFlowSelfLoop',
+  ORPHAN_NODE: 'OrphanNode',
+  DEAD_END: 'DeadEnd',
+  EXCLUSIVE_GATEWAY_NO_DEFAULT: 'ExclusiveGatewayNoDefault',
+  PARALLEL_GATEWAY_INVALID_SHAPE: 'ParallelGatewayInvalidShape',
+};
+
+/**
+ * Запись отчёта о схеме.
+ *
+ * `order` — позиция узла/связи среди детей процесса: по ней отчёт сортируется
+ * в порядке схемы, а не в порядке проверок.
+ */
+function schemaProblem(code, message, extra = {}) {
+  return {
+    code,
+    message,
+    order: extra.order == null ? -1 : extra.order,
+    elementId: extra.elementId || '',
+    flowId: extra.flowId || '',
+    hint: extra.hint || '',
+  };
+}
+
+/** Дети элемента процесса (без текстовых узлов и комментариев). */
+function elementChildren(node) {
+  return Array.from((node && node.children) || []).filter(
+    (child) => child.nodeType === 1
+  );
+}
+
+/** Первый `<bpmn:process>` документа — ровно его и обходит движок. */
+function firstProcess(doc) {
+  return Array.from(doc.getElementsByTagName('*')).find(
+    (node) => getLocalName(node) === 'process'
+  );
+}
+
+/**
+ * Узел потока по локальному имени из XML.
+ *
+ * Отличие от `isFlowElementType`: здесь имя приходит из XML, где локальные
+ * имена в camelCase (`userTask`, `startEvent`, `subProcess`), а суффиксы —
+ * заглавными (`Task`, `Event`, `Gateway`). Сравнение без учёта регистра
+ * покрывает и типы, которых движок не знает (`task`, `scriptTask`,
+ * `subProcess`, `callActivity`, `transaction`) — про них и нужно рассказать
+ * пользователю.
+ *
+ * @param {string} localName локальное имя элемента.
+ * @returns {boolean} узел ли это потока управления.
+ */
+function isFlowNodeLocalName(localName) {
+  const name = String(localName || '').toLowerCase();
+
+  return (
+    name.endsWith('task') ||
+    name.endsWith('event') ||
+    name.endsWith('gateway') ||
+    name === 'subprocess' ||
+    name === 'adhocsubprocess' ||
+    name === 'callactivity' ||
+    name === 'transaction'
+  );
+}
+
+/**
+ * Читает связь (`sequenceFlow`).
+ *
+ * `name="default"` — второй способ пометить связь шлюза «по умолчанию»
+ * (первый — атрибут `default` у самого шлюза), движок понимает оба.
+ */
+function readFlowElement(node) {
+  return {
+    id: node.getAttribute('id') || '',
+    sourceRef: node.getAttribute('sourceRef') || '',
+    targetRef: node.getAttribute('targetRef') || '',
+    isDefault:
+      (node.getAttribute('name') || '').toLowerCase() === 'default',
+    hasCondition: elementChildren(node).some(
+      (child) => getLocalName(child) === 'conditionExpression'
+    ),
+  };
+}
+
+/**
+ * Проверяет схему на совместимость с движком оркестратора.
+ *
+ * Повторяет правила компилятора `bpm-engine-bpmn`: ровно один стартовый узел,
+ * хотя бы один `endEvent`, связи без «висячих» ссылок, соединённость узлов,
+ * достижимость до конца, форма шлюзов. Первым проверяется то, о чём движок
+ * молчит, — типы узлов, которые он не разбирает.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {{ok: boolean, problems: Array<{code: string, message: string,
+ *   elementId: string, flowId: string, hint: string}>}} отчёт: `ok === false`,
+ *   если определение в движке не скомпилируется.
+ */
+export function validateEngineSchema(xml) {
+  const doc = parseXml(xml);
+
+  if (!doc) {
+    return {
+      ok: false,
+      problems: [
+        schemaProblem(
+          SCHEMA_PROBLEM.INVALID_XML,
+          'Схему не удалось разобрать как XML — движок ответит ошибкой компиляции.'
+        ),
+      ],
+    };
+  }
+
+  const process = firstProcess(doc);
+
+  if (!process) {
+    return {
+      ok: false,
+      problems: [
+        schemaProblem(
+          SCHEMA_PROBLEM.NO_PROCESS,
+          'В схеме нет процесса (<bpmn:process>): компилировать нечего.'
+        ),
+      ],
+    };
+  }
+
+  const problems = [];
+  const nodes = new Map();
+  const unsupported = new Map();
+  const flows = [];
+
+  elementChildren(process).forEach((child, order) => {
+    const type = getLocalName(child);
+
+    if (type === 'sequenceFlow') {
+      flows.push({ ...readFlowElement(child), order });
+      return;
+    }
+
+    // Служебные узлы процесса (`documentation`, `extensionElements`,
+    // `laneSet`, `dataObject`, аннотации) движок тоже пропускает, но связей в
+    // них не бывает — это не ошибка.
+    if (!isFlowNodeLocalName(type)) return;
+
+    const id = child.getAttribute('id');
+
+    if (!id) {
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.MISSING_ID,
+          `Узел <bpmn:${type}> без идентификатора: движок адресует узлы по id.`,
+          { order }
+        )
+      );
+      return;
+    }
+
+    if (!ENGINE_FLOW_NODE_TYPES.includes(type)) {
+      unsupported.set(id, { id, type, order });
+      return;
+    }
+
+    nodes.set(id, {
+      id,
+      type,
+      order,
+      defaultFlowId: child.getAttribute('default') || '',
+      incoming: [],
+      outgoing: [],
+    });
+  });
+
+  unsupported.forEach(({ id, type, order }) => {
+    problems.push(
+      schemaProblem(
+        SCHEMA_PROBLEM.UNSUPPORTED_NODE,
+        `Узел ${id} типа <bpmn:${type}> движок не разбирает: поддерживаются ` +
+          `${ENGINE_FLOW_NODE_LIST}. Связи через него становятся висячими, и ` +
+          'определение не компилируется целиком.',
+        {
+          order,
+          elementId: id,
+          hint:
+            'Замените узел на User task (или Service task): базовый bpmn:task ' +
+            'движок молча пропускает.',
+        }
+      )
+    );
+  });
+
+  flows.forEach((flow) => {
+    const { id, sourceRef, targetRef, order } = flow;
+    const source = nodes.get(sourceRef);
+    const target = nodes.get(targetRef);
+
+    if (source) source.outgoing.push(flow);
+    else if (!unsupported.has(sourceRef)) {
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.FLOW_SOURCE_NOT_FOUND,
+          `Связь ${id} начинается в ${sourceRef || '(sourceRef не задан)'}, ` +
+            'которого нет среди узлов процесса.',
+          { order, flowId: id, elementId: sourceRef }
+        )
+      );
+    }
+
+    if (target) target.incoming.push(flow);
+    else if (!unsupported.has(targetRef)) {
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.FLOW_TARGET_NOT_FOUND,
+          `Связь ${id} ведёт в ${targetRef || '(targetRef не задан)'}, ` +
+            'которого нет среди узлов процесса.',
+          { order, flowId: id, elementId: targetRef }
+        )
+      );
+    }
+
+    if (sourceRef !== '' && sourceRef === targetRef) {
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.FLOW_SELF_LOOP,
+          `Связь ${id} замкнута сама на себя (${sourceRef}): ` +
+            'движок такие связи не поддерживает.',
+          { order, flowId: id, elementId: sourceRef }
+        )
+      );
+    }
+  });
+
+  const list = Array.from(nodes.values());
+  const starts = list.filter((node) => node.type === 'startEvent');
+  const ends = list.filter((node) => node.type === 'endEvent');
+
+  if (starts.length === 0) {
+    problems.push(
+      schemaProblem(
+        SCHEMA_PROBLEM.NO_START_EVENT,
+        'В процессе нет ни одного startEvent — движку не с чего начинать.'
+      )
+    );
+  } else if (starts.length > 1) {
+    starts.forEach((node) => {
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.MULTIPLE_START_EVENTS,
+          `В процессе ${starts.length} стартовых события (${node.id}): ` +
+            'движок поддерживает ровно одно.',
+          { order: node.order, elementId: node.id }
+        )
+      );
+    });
+  }
+
+  if (ends.length === 0) {
+    problems.push(
+      schemaProblem(
+        SCHEMA_PROBLEM.NO_END_EVENT,
+        'В процессе нет ни одного endEvent.'
+      )
+    );
+  }
+
+  const startId = starts.length > 0 ? starts[0].id : null;
+  const endIds = new Set(ends.map((node) => node.id));
+
+  // Соединённость: узел без входящей связи (кроме стартового) и узел без
+  // исходящей (кроме конечного) движок считает ошибкой `OrphanNode`.
+  list.forEach((node) => {
+    if (node.id !== startId && node.incoming.length === 0) {
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.ORPHAN_NODE,
+          `Узел ${node.id} не имеет входящей связи.`,
+          {
+            order: node.order,
+            elementId: node.id,
+            hint: 'Узел не соединён с маршрутом: добавьте sequence flow.',
+          }
+        )
+      );
+    }
+
+    if (!endIds.has(node.id) && node.outgoing.length === 0) {
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.ORPHAN_NODE,
+          `Узел ${node.id} не имеет исходящей связи.`,
+          {
+            order: node.order,
+            elementId: node.id,
+            hint: 'Узел не соединён с маршрутом: добавьте sequence flow.',
+          }
+        )
+      );
+    }
+  });
+
+  nodes.forEach((node) => {
+    if (node.type === 'exclusiveGateway') {
+      const outgoing = node.outgoing;
+      const defaults = outgoing.filter(
+        (flow) => flow.isDefault || flow.id === node.defaultFlowId
+      );
+
+      // Движок требует связь по умолчанию, если хотя бы одна исходящая связь
+      // шлюза не несёт условия (`conditionExpression`).
+      if (defaults.length > 1) {
+        problems.push(
+          schemaProblem(
+            SCHEMA_PROBLEM.EXCLUSIVE_GATEWAY_NO_DEFAULT,
+            `У шлюза ${node.id} отмечено связей по умолчанию: ${defaults.length}.`,
+            { order: node.order, elementId: node.id }
+          )
+        );
+      } else if (
+        defaults.length === 0 &&
+        outgoing.filter((flow) => flow.hasCondition).length < outgoing.length
+      ) {
+        problems.push(
+          schemaProblem(
+            SCHEMA_PROBLEM.EXCLUSIVE_GATEWAY_NO_DEFAULT,
+            `У шлюза ${node.id} есть связи без условия и не отмечена связь по умолчанию.`,
+            {
+              order: node.order,
+              elementId: node.id,
+              hint: 'Отметьте одну из связей шлюза как default.',
+            }
+          )
+        );
+      }
+    }
+
+    if (node.type === 'parallelGateway') {
+      const incoming = node.incoming.length;
+      const outgoing = node.outgoing.length;
+
+      if (incoming === 1 && outgoing < 2) {
+        problems.push(
+          schemaProblem(
+            SCHEMA_PROBLEM.PARALLEL_GATEWAY_INVALID_SHAPE,
+            `Параллельный шлюз ${node.id} открыт одной связью и не разветвляет ` +
+              'поток: нужно минимум 2 исходящих.',
+            { order: node.order, elementId: node.id }
+          )
+        );
+      } else if (incoming < 2 && outgoing === 1) {
+        problems.push(
+          schemaProblem(
+            SCHEMA_PROBLEM.PARALLEL_GATEWAY_INVALID_SHAPE,
+            `Параллельный шлюз ${node.id} закрыт одной связью и не собирает ` +
+              'поток: нужно минимум 2 входящих.',
+            { order: node.order, elementId: node.id }
+          )
+        );
+      } else if (incoming !== 1 && outgoing !== 1) {
+        problems.push(
+          schemaProblem(
+            SCHEMA_PROBLEM.PARALLEL_GATEWAY_INVALID_SHAPE,
+            `Параллельный шлюз ${node.id} разветвляет и собирает одновременно ` +
+              `(${incoming} входящих, ${outgoing} исходящих) — движок это не поддерживает.`,
+            {
+              order: node.order,
+              elementId: node.id,
+              hint: 'Разделите вилку и слияние на два шлюза.',
+            }
+          )
+        );
+      }
+    }
+  });
+
+  // Достижимость до конца: движок отвечает `DeadEnd` на узел, из которого
+  // `endEvent` не виден, — даже если формально узел соединён.
+  if (startId) {
+    const reachable = new Set();
+    const stack = [startId];
+
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (reachable.has(id)) continue;
+      reachable.add(id);
+
+      const node = nodes.get(id);
+      if (!node) continue;
+      node.outgoing.forEach((flow) => stack.push(flow.targetRef));
+    }
+
+    const canReachEnd = new Set(endIds);
+    let changed = true;
+
+    while (changed) {
+      changed = false;
+      flows.forEach(({ sourceRef, targetRef }) => {
+        if (
+          canReachEnd.has(targetRef) &&
+          reachable.has(sourceRef) &&
+          !canReachEnd.has(sourceRef)
+        ) {
+          canReachEnd.add(sourceRef);
+          changed = true;
+        }
+      });
+    }
+
+    reachable.forEach((id) => {
+      if (endIds.has(id) || canReachEnd.has(id)) return;
+
+      const node = nodes.get(id);
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.DEAD_END,
+          `Из узла ${id} нельзя дойти до endEvent.`,
+          { order: node ? node.order : -1, elementId: id }
+        )
+      );
+    });
+  }
+
+  // Отчёт — в порядке схемы, а не в порядке проверок: так его читает человек.
+  problems.sort((first, second) => first.order - second.order);
+
+  return { ok: problems.length === 0, problems };
+}
+
 

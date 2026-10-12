@@ -57,6 +57,10 @@ const PUBLIC_API = [
   'BPMN_TOKEN_BASE_CLASS',
   'listFlowElements',
   'isValidXml',
+  // совместимость схемы с движком оркестратора
+  'validateEngineSchema',
+  'ENGINE_FLOW_NODE_TYPES',
+  'SCHEMA_PROBLEM',
   // роль исполнителя узла (bpmn:potentialOwner)
   'getElementRole',
   'getRoleAssignments',
@@ -77,6 +81,30 @@ const PUBLIC_API = [
   'TRIGGER_FIELDS',
   'EMPTY_TRIGGER',
   'TRIGGER_MODELE_EXTENSIONS',
+  // кнопки участников узла (act:userAction)
+  'listActions',
+  'getElementActions',
+  'getElementAction',
+  'getActionAssignments',
+  'getStartAction',
+  'setElementActions',
+  'isValidAction',
+  'normalizeAction',
+  'isActionHostType',
+  // умолчания кнопки, выводимые из схемы (пустые event/elementId)
+  'DEFAULT_ACTION_EVENT',
+  'getNextElementId',
+  'getOutgoingTargetIds',
+  'resolveAction',
+  'resolveActionEvent',
+  'resolveActionTarget',
+  'ACTION_NAMESPACE',
+  'ACTION_TYPE',
+  'ACTION_FIELDS',
+  'EMPTY_ACTION',
+  'ACTION_MODELE_EXTENSIONS',
+  'ACTION_TAG_NAME',
+  'ACTION_ICON_PATTERN',
 ];
 
 /**
@@ -99,6 +127,20 @@ function countListeners(eventBus, event) {
   }
 
   return total;
+}
+
+/**
+ * Есть ли среди собранных предупреждений сообщение об устаревшем `getPad`.
+ *
+ * `diagram-js` передаёт его в `console.warn` объектом `Error` со стеком, а
+ * `console.warn` редактора вызывается ещё и по другим поводам, поэтому фильтр
+ * идёт по тексту конкретного сообщения.
+ *
+ * @param {string[]} warnings тексты перехваченных предупреждений.
+ * @returns {boolean} true, если сообщение об устаревшем вызове есть.
+ */
+function hasContextPadDeprecation(warnings) {
+  return warnings.some((message) => message.includes('ContextPad#getPad is deprecated'));
 }
 
 /**
@@ -354,6 +396,88 @@ describe('вендорный бандл BPMN Client SDK', () => {
     ).toThrow(/только узлам потока/);
   });
 
+  it('пишет кнопки участников тем же API, что и редактор', () => {
+    // Кнопки демо-схемы — то, что рисует кабинет (`ACTION_ID` в `App.jsx`).
+    expect(sdk.listActions(sdk.DEFAULT_CUSTOMER_BPMN_XML).map((item) => item.action.id)).toEqual([
+      'createOrder',
+      'sendToSupplier',
+      'issuePass',
+      'securityPass',
+      'qualityApprove',
+    ]);
+    // Как процесс стартует, описывает кнопка на стартовом событии. Пару «событие
+    // + узел» схема выводит сама: в кнопке записана только роль инициатора, а
+    // `resolveAction` доводит её до первого блока (`CompleteBlock` + цель связи).
+    const startDeclaration = sdk.getStartAction(sdk.DEFAULT_CUSTOMER_BPMN_XML);
+
+    expect(startDeclaration).toMatchObject({
+      elementId: 'StartEvent_Customer',
+      action: { event: '', elementId: '' },
+    });
+    expect(
+      sdk.resolveAction(
+        sdk.DEFAULT_CUSTOMER_BPMN_XML,
+        startDeclaration.elementId,
+        startDeclaration.action
+      )
+    ).toEqual({
+      event: 'CompleteBlock',
+      elementId: 'Task_CreatePurchaseOrder',
+    });
+
+    const xml = sdk.setElementActions(sdk.DEFAULT_CUSTOMER_BPMN_XML, 'Task_WaitForSupplierShipment', [
+      {
+        id: 'remind',
+        label: 'Напомнить поставщику',
+        icon: 'Send',
+        event: 'RemindSupplier',
+        elementId: 'Task_WaitForSupplierShipment',
+      },
+    ]);
+
+    // Правка текстовая: namespace объявлен в корне, состав узлов не изменился,
+    // чужие кнопки и роли задач остались на месте.
+    expect(xml).toContain(' xmlns:act="' + sdk.ACTION_NAMESPACE + '"');
+    expect(sdk.listFlowElements(xml)).toEqual(
+      sdk.listFlowElements(sdk.DEFAULT_CUSTOMER_BPMN_XML)
+    );
+    expect(sdk.getElementAction(xml, 'Task_WaitForSupplierShipment', 'remind')).toEqual({
+      id: 'remind',
+      label: 'Напомнить поставщику',
+      role: '',
+      icon: 'Send',
+      event: 'RemindSupplier',
+      elementId: 'Task_WaitForSupplierShipment',
+      counterpartEvent: '',
+      counterpartElementId: '',
+      startsProcess: '',
+    });
+    expect(sdk.getElementRole(xml, 'Task_WaitForSupplierShipment')).toBe('MANAGER');
+    expect(sdk.listActions(xml)).toHaveLength(6);
+
+    // Инспектор узлов читает кнопки из XML, когда реестр их не отдал.
+    render(
+      <sdk.EnginePanel
+        xml={xml}
+        elements={sdk.listFlowElements(xml)}
+        selectedElementId="Task_WaitForSupplierShipment"
+        roleOptions={['MANAGER']}
+        onChangeActions={() => true}
+      />
+    );
+
+    expect(screen.getByDisplayValue('Напомнить поставщику')).toBeTruthy();
+    expect(screen.getByDisplayValue('RemindSupplier')).toBeTruthy();
+
+    // Кнопка ставится только на узел потока: последовательный поток движок
+    // токеном не активирует.
+    expect(() =>
+      sdk.setElementActions(sdk.DEFAULT_CUSTOMER_BPMN_XML, 'Flow_C1', [
+        { id: 'x', label: 'X', event: 'E', elementId: 'Task_CreatePurchaseOrder' },
+      ])
+    ).toThrow(/только узлам потока/);
+  });
+
   it('рендерит компонент бандла на том же React, что и приложение', () => {
     render(
       <sdk.EnginePanel
@@ -399,6 +523,46 @@ describe('вендорный бандл BPMN Client SDK', () => {
     expect(countListeners(eventBus, 'commandStack.changed')).toBeLessThan(baseline + 1);
 
     fresh.destroy();
+  });
+
+  it('гасит устаревший вызов `diagram-js` из меню «Change element»', () => {
+    // Кнопка «Change element» (гаечный ключ на контекстной панели узла)
+    // открывает меню замены через `ContextPad#getPad`, а `diagram-js` объявил
+    // этот метод устаревшим: в консоль клиента летит
+    // `Error: ContextPad#getPad is deprecated ...` (`console.warn` со стеком)
+    // и читается как ошибка редактора, хотя меню открывается штатно. SDK гасит
+    // ровно это сообщение, а сам вызов к библиотеке оставляет.
+    const warned = [];
+    const warn = jest.spyOn(console, 'warn').mockImplementation((...args) => {
+      warned.push(args.map(String).join(' '));
+    });
+
+    const onReady = jest.fn();
+    const { unmount } = renderEditor({
+      xml: sdk.DEFAULT_CUSTOMER_BPMN_XML,
+      onReady,
+      showInspector: false,
+    });
+
+    const modeler = onReady.mock.calls[0][0];
+    const target = { id: 'Task_Any' };
+
+    // Контроль: на той же копии `diagram-js`, но без заплаты SDK
+    // предупреждение есть — значит тест поймает и её возврат.
+    const fresh = new modeler.constructor({ container: document.createElement('div') });
+
+    expect(fresh.get('contextPad').getPad(target).html).toBeTruthy();
+    expect(hasContextPadDeprecation(warned)).toBe(true);
+
+    warned.length = 0;
+
+    // Панель редактора пропатчена, но отдаёт ровно тот же объект пада.
+    expect(modeler.get('contextPad').getPad(target).html).toBeTruthy();
+    expect(hasContextPadDeprecation(warned)).toBe(false);
+
+    unmount();
+    fresh.destroy();
+    warn.mockRestore();
   });
 
   it('привязывает глифы иконок к шрифту `bpmn` (иначе палитра — квадратики)', () => {

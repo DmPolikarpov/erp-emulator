@@ -56,6 +56,8 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
   `deployInstanceId`;
 - логика XML: `listFlowElements`, `getProcessIds`, `getElementIds`, `isValidXml`,
   `isValidElementId`, `isElementIdAvailable`, `renameElementId`, `parseXml`, `getLocalName`;
+- совместимость схемы с движком: `validateEngineSchema`, `ENGINE_FLOW_NODE_TYPES`,
+  `SCHEMA_PROBLEM`;
 - роль исполнителя узла (`bpmn:potentialOwner`): `getElementRole`, `getRoleAssignments`,
   `setElementRole`, `isValidRole`, `isActivityType`, `isActivityElement`,
   `POTENTIAL_OWNER_TYPE`, `POTENTIAL_OWNER_LOCAL_NAME`;
@@ -63,7 +65,15 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
   `getTriggerAssignments`, `listTriggers`, `setElementTrigger`, `isValidTrigger`,
   `isValidInstancePrefix`, `isValidPayloadKeys`, `isTriggerHostType`,
   `TRIGGER_NAMESPACE`, `TRIGGER_TYPE`, `TRIGGER_FIELDS`, `EMPTY_TRIGGER`,
-  `TRIGGER_MODELE_EXTENSIONS`.
+  `TRIGGER_MODELE_EXTENSIONS`;
+- кнопки участника узла (`act:userAction`): `listActions`, `getElementActions`,
+  `getElementAction`, `getActionAssignments`, `getStartAction`, `setElementActions`,
+  `normalizeAction`, `isValidAction`, `isActionHostType`, `ACTION_FIELDS`,
+  `EMPTY_ACTION`, `ACTION_TYPE`, `ACTION_NAMESPACE`, `ACTION_MODELE_EXTENSIONS`,
+  `ACTION_TAG_NAME`, `ACTION_ICON_PATTERN`;
+- адрес кнопки, выводимый из схемы: `resolveAction`, `resolveActionEvent`,
+  `resolveActionTarget`, `getNextElementId`, `getOutgoingTargetIds`,
+  `DEFAULT_ACTION_EVENT`.
 
 Состав API проверяется тестом [`src/vendor/bpmnSdkBundle.test.js`](../vendor/bpmnSdkBundle.test.js).
 
@@ -157,6 +167,105 @@ BPMN 2.0 не знает «запустить другой процесс», п�
 > `sendEvent`, а расширение фиксирует пару «источник → цель», точку входа и
 > состав передаваемого payload.
 
+### Кнопки участников узла
+
+В схеме описаны и кнопки кабинета: что участник видит и что нажатие отправляет
+движку. В BPMN 2.0 такого понятия нет, поэтому кнопка — расширение в собственном
+namespace `act` (`ACTION_MODELE_EXTENSIONS` для редактора):
+
+```xml
+<bpmn:userTask id="Task_CreatePurchaseOrder" name="Сформировать заказ у поставщика">
+  <bpmn:extensionElements>
+    <act:userAction id="sendToSupplier" label="Сформировать и отправить заказ Поставщику"
+                    icon="Send" event="SendToSupplier"
+                    elementId="Task_WaitForSupplierShipment"
+                    startsProcess="Process_SupplierSupply_v1" />
+  </bpmn:extensionElements>
+  <bpmn:potentialOwner name="MANAGER" />
+</bpmn:userTask>
+```
+
+Пара «событие + узел» необязательна — её выводит схема, поэтому кнопка
+«выполнить шаг» записывается коротко (так записаны все кнопки демо-схем SDK):
+
+```xml
+<act:userAction id="securityPass" label="Проверить пропуск и открыть ворота" icon="ShieldCheck" />
+```
+
+Читается это как «нажатие завершает блок и переводит токен на следующий узел»:
+`event` берётся из `DEFAULT_ACTION_EVENT` (`CompleteBlock`), `elementId` — цель
+единственной исходящей связи узла (`getNextElementId`). Значение, записанное в
+XML явно, всегда важнее умолчания: старые схемы читаются как раньше.
+
+| Поле | Смысл |
+| --- | --- |
+| `id` | ключ кнопки: по нему клиент сопоставляет её с действием кабинета |
+| `label` | надпись на кнопке |
+| `role` | роль участника; пусто — берётся у узла-хоста (`bpmn:potentialOwner`) |
+| `icon` | имя иконки (`Send`, `Truck`); незнакомое имя — иконка по умолчанию |
+| `event` | событие при нажатии (`event_name` запроса в шлюз). Пусто — `DEFAULT_ACTION_EVENT` (`CompleteBlock`): движок имя события не разбирает (оно уходит в subject NATS и в журнал), токен двигает `elementId` |
+| `elementId` | узел, который станет `ACTIVE` (`element_id` события). Пусто — следующий блок по единственной исходящей связи узла-хоста (`getNextElementId`); в развилке связей несколько, и там узел указывают явно |
+| `counterpartEvent`, `counterpartElementId` | необязательный сигнал в экземпляр второй стороны по тому же заказу |
+| `startsProcess` | `bpmn:process/@id` процесса второй стороны, который запускает нажатие |
+
+| Экспорт | Назначение |
+| --- | --- |
+| `listActions(xml)` | `[{elementId, action}]` в порядке появления в схеме |
+| `getElementActions(xml, elementId)` | кнопки узла |
+| `getElementAction(xml, elementId, id)` | одна кнопка по ключу (`null`, если её нет) |
+| `getActionAssignments(xml)` | карта `{element_id: [кнопка, ...]}` |
+| `getStartAction(xml)` | кнопка запуска процесса: первая кнопка на стартовом событии |
+| `resolveAction(xml, elementId, action)` | пара `{event, elementId}` кнопки — аргументы `sendEvent`: пустые поля заменяются умолчаниями схемы |
+| `resolveActionEvent(action)` / `resolveActionTarget(xml, elementId, action)` | то же по отдельности |
+| `getNextElementId(xml, elementId)` / `getOutgoingTargetIds(xml, elementId)` | следующий блок по единственной исходящей связи (`''`, если связь неоднозначна) и все цели связей узла |
+| `DEFAULT_ACTION_EVENT` | `CompleteBlock` — событие кнопки, не записанное в схеме |
+| `setElementActions(xml, elementId, actions)` | правка списка кнопок текстом; `[]` снимает все |
+| `normalizeAction` / `isValidAction` / `isActionHostType` | канон полей и проверки до записи (обязательны `id` и `label`) |
+| `ACTION_FIELDS`, `EMPTY_ACTION`, `ACTION_TYPE`, `ACTION_NAMESPACE`, `ACTION_TAG_NAME`, `ACTION_ICON_PATTERN`, `ACTION_MODELE_EXTENSIONS` | состав полей, пустая кнопка, тип моддла, namespace, тег, грамматика иконки, расширения редактора |
+
+Правила:
+
+- **кнопка запуска процесса** — та, что объявлена на **стартовом событии**:
+  `role` там нужна обязательно (у событий нет `resourceRole`), а `event` и
+  `elementId` задают первый шаг — движок переводит токен двумя событиями
+  (`StartProcess`, затем событие шага), см. `getStartAction`. Пару можно и не
+  записывать: у стартового события связь одна, и `resolveAction` доводит её до
+  первого блока (`CompleteBlock`) — но без самой кнопки старта процесс не описан,
+  и `startProcess` вернёт ошибку;
+- **хост — только узел потока** (задача, событие, шлюз, подпроцесс): на
+  `sequenceFlow` шаг не активируется, `setElementActions` бросает ошибку;
+- **обязательны только `id` и `label`**: пустые `event`/`elementId` допустимы и
+  означают умолчания схемы (их подставляет `resolveAction`), а непустые
+  проверяются по грамматике `element_id` — иначе опечатка в `elementId` увела бы
+  токен в никуда;
+- **список заменяется целиком**, поэтому «полуприменённого» состояния в схеме не
+  бывает: `[]` снимает кнопки узла;
+- **`id` объявлен в дескрипторе явно**, хотя тип наследует `Element`: у
+  `extensionElements` базовый класс атрибут `id` не признаёт, и без объявления
+  `bpmn-moddle` пишет `unknown attribute <id>`, а `saveXML` теряет ключ кнопки
+  (проверяется в [`src/vendor/bpmnModdleAction.test.js`](../vendor/bpmnModdleAction.test.js));
+- **namespace `xmlns:act` объявляется в корне** вместе с первой кнопкой, чужие
+  расширения узла (`trg:processTrigger`, `camunda:*`) сохраняются;
+- **правка идёт текстом** (как у роли и триггера): остальная схема, включая
+  `bpmndi:BPMNShape`, не переформатируется.
+
+Инспектор узлов отдаёт кнопки блоком «Кнопки участников на узле»: поля — по
+`ACTION_FIELDS`, подсказки — роли пользователей, идентификаторы узлов схемы и
+процессы второй стороны; правка наружу — пропом `onChangeActions(id, actions)`
+(`[]` снимает все). Обязательны только ключ и надпись: «Добавить кнопку» сразу
+пишет кнопку в схему, а в поле «Узел после нажатия» подсказывается блок, который
+схема выведет по единственной исходящей связи (`getNextElementId`). Кабинет
+([`App.jsx`](../../App.jsx)) поимённо разбирает только шаги со своими ключами
+(`ACTION_ID`): у них обработчики собирают payload, которого в схеме нет (номера
+УПД/ТТН, метки времени). Кнопку с незнакомым ключом кабинет показывает общим
+шагом, а пару «событие + узел» и роль для неё разрешает та же схема
+(`resolveAction`, `bpmn:potentialOwner`) — правок кода новый блок не требует.
+
+> Схема без `act:userAction` — схема без кнопок: кабинет покажет только ожидание.
+> Демо-схемы SDK (`DEFAULT_CUSTOMER_BPMN_XML`, `DEFAULT_SUPPLIER_BPMN_XML`) кнопки
+> несут, а кнопка «Демо-схема» в панели схемы возвращает их, если копия в
+> браузере осталась от прежней версии.
+
 ### Подсветка токенов процесса
 
 `BpmnViewer` помечает узлы схемой `{element_id: состояние}`
@@ -181,6 +290,70 @@ tokenMarkerClasses(TOKEN_STATES.COMPLETED);
 `COMPLETED`/`FAILED`/`TIMED_OUT` не были видны совсем. Узел, которого нет в
 схеме, подсветить нечем: `BpmnViewer` молча пропускает чужой `element_id`
 (проверка через `elementRegistry` перед `canvas.addMarker`).
+
+### Совместимость схемы с движком
+
+Схему компилирует движок (`bpm-engine-bpmn`), и он разбирает **не весь** BPMN:
+его парсер обходит прямых детей `<bpmn:process>` и знает только
+`startEvent`, `endEvent`, `serviceTask`, `userTask`, `exclusiveGateway`,
+`parallelGateway` и `sequenceFlow`. Всё остальное — включая базовый
+`<bpmn:task>`, который создаёт кнопка «Task» в палитре редактора, — он
+**молча пропускает** (без ошибки разбора). Связи, которые вели в такой узел или
+из него, становятся «висячими», компилятор отвечает `SequenceFlowSourceNotFound`
+/ `SequenceFlowTargetNotFound` и не компилирует определение целиком.
+
+Заметить это из клиента нельзя: шлюз принимает событие в NATS и отвечает
+`202 Accepted` независимо от результата компиляции, ошибка остаётся только в
+логе движка. Поэтому `validateEngineSchema(xml)` повторяет правила компилятора
+на клиенте и отдаёт отчёт:
+
+```js
+validateEngineSchema(xml);
+// { ok: false, problems: [{
+//     code: 'UnsupportedElement',            // коды совпадают с ErrorCode движка
+//     message: 'Узел Activity_1nup3yq типа <bpmn:task> движок не разбирает: ...',
+//     elementId: 'Activity_1nup3yq',
+//     flowId: '',
+//     hint: 'Замените узел на User task (или Service task): ...' }] }
+```
+
+Проверяются: разбор XML, наличие процесса, поддерживаемые типы узлов, «висячие»
+ссылки связей, петли на себя, ровно один `startEvent` и хотя бы один `endEvent`,
+соединённость узлов, достижимость до `endEvent`, форма шлюзов. Демо-схемы SDK
+(`DEFAULT_CUSTOMER_BPMN_XML`, `DEFAULT_SUPPLIER_BPMN_XML`) проходят проверку —
+это же условие зафиксировано тестом, чтобы правки демо не сломали старт процесса.
+
+### Совместимость с `diagram-js`
+
+Вторая, уже библиотечная, а не движковая проблема — устаревший вызов
+`ContextPad#getPad`, который делает сам `bpmn-js`. Кнопка «Change element»
+(гаечный ключ на контекстной панели узла) открывает меню замены через этот
+метод, а `diagram-js` (>= 14.10) объявил его устаревшим и на **каждый** вызов
+пишет в консоль предупреждение со стеком:
+
+```text
+Error: ContextPad#getPad is deprecated and will be removed in future library
+versions, cf. https://github.com/bpmn-io/diagram-js/pull/888
+    at ContextPad.getPad (ContextPad.js:472:1)
+    at getReplaceMenuPosition (ContextPadProvider.js:234:1)
+```
+
+Это не ошибка редактора: меню открывается штатно, до клиента доходит только
+сообщение в консоли, но строка начинается с `Error:` и читается как поломка.
+Обновление библиотек ничего не меняет — проверено на самых свежих версиях
+(`bpmn-js` 18.31.0 + `diagram-js` 15.28.1): там тот же вызов в
+`getReplaceMenuPosition` и то же предупреждение.
+
+Поэтому SDK ставит заплату —
+[`compat/diagramJsCompat.js`](compat/diagramJsCompat.js),
+`installDiagramJsCompat(diagram)` вызывается при создании диаграммы в
+`BpmnEditor` (у `BpmnViewer` контекстной панели нет — вызов безвреден).
+Поведение не подменяется: обёртка вызывает оригинальный `getPad` и не
+пропускает в консоль только это сообщение, остальные `console.warn` (в том
+числе от `diagram-js`) остаются видны. Проверяется в
+[`compat/diagramJsCompat.test.js`](compat/diagramJsCompat.test.js) и в
+`src/vendor/bpmnSdkBundle.test.js` — там же контроль: на моделлере без заплаты
+предупреждение есть.
 
 ## Как подключать
 
@@ -247,4 +420,8 @@ import '@erp/bpmn-client-sdk/dist/bpmn-sdk.css';
   `createSVGTransform`), поэтому «схема переживает импорт и экспорт» проверяется
   не через редактор, а на том же `bpmn-moddle`, который упакован в бандл —
   [`src/vendor/bpmnModdleRole.test.js`](../vendor/bpmnModdleRole.test.js).
+- Предупреждение `diagram-js` об устаревшем `ContextPad#getPad` (кнопка
+  «Change element» в редакторе) гасится на стороне SDK: апгрейд библиотек его
+  не убирает, а в консоли клиента оно выглядит как ошибка — см.
+  [«Совместимость с `diagram-js`»](#совместимость-с-diagram-js).
 

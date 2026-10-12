@@ -1,15 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Modeler from 'bpmn-js/lib/Modeler';
 
+import { installDiagramJsCompat } from '../compat/diagramJsCompat';
 import { XML_CHANGE_DEBOUNCE_MS } from '../constants';
 import {
   POTENTIAL_OWNER_TYPE,
+  isActionHostType,
   isActivityType,
   isFlowElementType,
   isTriggerHostType,
+  isValidAction,
   isValidElementId,
   isValidRole,
   isValidTrigger,
+  normalizeAction,
   normalizeTrigger,
 } from '../xml/bpmnXml';
 import {
@@ -17,6 +21,11 @@ import {
   TRIGGER_MODELE_EXTENSIONS,
   TRIGGER_TYPE,
 } from '../xml/triggerModdle';
+import {
+  ACTION_FIELDS,
+  ACTION_MODELE_EXTENSIONS,
+  ACTION_TYPE,
+} from '../xml/actionModdle';
 import { EnginePanel } from '../panels/EnginePanel';
 import '../styles/bpmn-sdk.css';
 
@@ -67,6 +76,35 @@ function triggerOfBusinessObject(businessObject) {
       [name]: found[name] == null ? '' : String(found[name]),
     }),
     {}
+  );
+}
+
+/**
+ * Кнопки участников из бизнес-объекта узла.
+ *
+ * Кнопки — собственный тип (`act:UserAction`), поэтому читаются из
+ * `extensionElements.values` только при зарегистрированном
+ * `ACTION_MODELE_EXTENSIONS` (та же ловушка, что у `trg:ProcessTrigger`).
+ * Узел может объявлять несколько кнопок — порядок в XML сохраняется.
+ *
+ * @param {Object} businessObject бизнес-объект элемента из `elementRegistry`.
+ * @returns {Array<object>} Кнопки ровно с полями `ACTION_FIELDS` (возможно, `[]`).
+ */
+function actionsOfBusinessObject(businessObject) {
+  const extensionElements = businessObject && businessObject.extensionElements;
+  const values = (extensionElements && extensionElements.values) || [];
+  const found = Array.isArray(values)
+    ? values.filter((value) => value && value.$type === ACTION_TYPE)
+    : [];
+
+  return found.map((value) =>
+    ACTION_FIELDS.reduce(
+      (action, name) => ({
+        ...action,
+        [name]: value[name] == null ? '' : String(value[name]),
+      }),
+      {}
+    )
   );
 }
 
@@ -144,6 +182,7 @@ export function BpmnEditor({
           type: element.type,
           role: roleOfBusinessObject(element.businessObject),
           trigger: triggerOfBusinessObject(element.businessObject),
+          actions: actionsOfBusinessObject(element.businessObject),
         }))
     );
   }, []);
@@ -184,11 +223,21 @@ export function BpmnEditor({
 
     const modeler = new Modeler({
       container: containerRef.current,
-      // Без регистрации `trg:processTrigger` моделлер не знает собственный тип
-      // и теряет триггер при `saveXML` (та же ловушка, что и с `camunda:*`).
-      moddleExtensions: TRIGGER_MODELE_EXTENSIONS,
+      // Без регистрации `trg:processTrigger` и `act:userAction` моделлер не
+      // знает собственные типы и теряет их при `saveXML` (та же ловушка, что и
+      // с `camunda:*`).
+      moddleExtensions: {
+        ...TRIGGER_MODELE_EXTENSIONS,
+        ...ACTION_MODELE_EXTENSIONS,
+      },
     });
     modelerRef.current = modeler;
+
+    // `bpmn-js` открывает меню «Change element» (гаечный ключ на контекстной
+    // панели) через устаревший `ContextPad#getPad`, и `diagram-js` пишет из-за
+    // этого предупреждение со стеком в консоль клиента. Подробности и рамки
+    // заплаты — в `compat/diagramJsCompat.js`.
+    installDiagramJsCompat(modeler);
 
     const handleChanged = () => {
       // Правки, порождённые импортом схемы, наружу не транслируем.
@@ -413,6 +462,65 @@ export function BpmnEditor({
     return true;
   }, []);
 
+  /**
+   * Запись/снятие кнопок участников (`act:userAction`).
+   *
+   * Механика та же, что у триггера: расширения узла пересобираются новым
+   * объектом `bpmn:ExtensionElements`, в котором остаются все прочие
+   * расширения (`trg:processTrigger`, `camunda:*`). Кнопок у узла может быть
+   * несколько, поэтому список пишется целиком: `[]` снимает их и, если других
+   * расширений нет, убирает контейнер.
+   *
+   * @param {string} elementId идентификатор узла.
+   * @param {Array<object>} actions кнопки (`ACTION_FIELDS`); `[]` — снять.
+   * @returns {boolean} правка принята (`false` => инспектор вернёт поля назад).
+   */
+  const handleChangeActions = useCallback((elementId, actions) => {
+    const modeler = modelerRef.current;
+    if (!modeler) return false;
+
+    const list = (Array.isArray(actions) ? actions : []).filter(
+      (action) => action && typeof action === 'object'
+    );
+    if (list.some((action) => !isValidAction(action))) return false;
+
+    const element = modeler.get('elementRegistry').get(elementId);
+    if (!element) return false;
+    if (list.length > 0 && !isActionHostType(element.type)) return false;
+
+    const moddle = modeler.get('moddle');
+    const current =
+      (element.businessObject.extensionElements &&
+        element.businessObject.extensionElements.values) ||
+      [];
+    const kept = current.filter((value) => !value || value.$type !== ACTION_TYPE);
+
+    let values = [...kept];
+    if (list.length > 0) {
+      try {
+        values = [
+          ...kept,
+          ...list.map((action) => moddle.create(ACTION_TYPE, normalizeAction(action))),
+        ];
+      } catch (e) {
+        return false;
+      }
+    }
+
+    const extensionElements =
+      values.length > 0
+        ? moddle.create('bpmn:ExtensionElements', { values })
+        : undefined;
+
+    try {
+      modeler.get('modeling').updateProperties(element, { extensionElements });
+    } catch (e) {
+      return false;
+    }
+
+    return true;
+  }, []);
+
   return (
     <div
       className={['bpmn-sdk-editor', className].filter(Boolean).join(' ')}
@@ -436,6 +544,7 @@ export function BpmnEditor({
           onChangeRole={handleChangeRole}
           triggerTargets={triggerTargets}
           onChangeTrigger={handleChangeTrigger}
+          onChangeActions={handleChangeActions}
         />
       )}
     </div>

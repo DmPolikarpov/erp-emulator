@@ -48,6 +48,18 @@ export const ENGINE_EVENTS = {
   DEPLOY_SCHEMA: 'DeploySchema',
   /** Старт нового экземпляра процесса. */
   START_PROCESS: 'StartProcess',
+  /**
+   * Завершение текущего блока: токен переходит на следующий узел.
+   *
+   * Движок имя события не разбирает: оно уходит в subject NATS
+   * (`mes.in.v1.event.erp.${event_name}`, см. `bpmn-gateways/http-cluster`) и в
+   * журнал как метка операции, а токен двигает `element_id`
+   * (см. `bpmn-engine/src/main.rs`). Поэтому «человеческое» имя операции кнопки
+   * можно не писать в схему: пустое `act:userAction/@event` означает «шаг
+   * выполнен» и отправляется этим значением (`DEFAULT_ACTION_EVENT` в
+   * `xml/bpmnXml.js`).
+   */
+  COMPLETE_BLOCK: 'CompleteBlock',
 };
 
 /** Идентификаторы служебных элементов для инфраструктурных событий. */

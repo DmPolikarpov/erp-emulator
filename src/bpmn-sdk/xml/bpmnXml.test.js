@@ -1,32 +1,53 @@
 import {
+  ACTION_ICON_PATTERN,
+  ACTION_TAG_NAME,
+  DEFAULT_ACTION_EVENT,
+  ENGINE_FLOW_NODE_TYPES,
   escapeRegExp,
+  getActionAssignments,
+  getElementAction,
+  getElementActions,
   getElementIds,
   getElementRole,
   getElementTrigger,
   getLocalName,
+  getNextElementId,
+  getOutgoingTargetIds,
   getProcessIds,
   getRoleAssignments,
+  getStartAction,
   getTriggerAssignments,
+  isActionHostType,
   isElementIdAvailable,
   isFlowElement,
   isFlowElementType,
   isIdAvailableAmong,
   isTriggerHostType,
+  isValidAction,
   isValidElementId,
   isValidInstancePrefix,
   isValidPayloadKeys,
   isValidRole,
   isValidTrigger,
   isValidXml,
+  listActions,
   listFlowElements,
   listTriggers,
+  normalizeAction,
   normalizePayloadKeys,
   normalizeTrigger,
   parseXml,
   renameElementId,
+  resolveAction,
+  resolveActionEvent,
+  resolveActionTarget,
+  SCHEMA_PROBLEM,
+  setElementActions,
   setElementRole,
   setElementTrigger,
+  validateEngineSchema,
 } from './bpmnXml';
+import { DEFAULT_CUSTOMER_BPMN_XML, DEFAULT_SUPPLIER_BPMN_XML } from '../defaults/milkProcess';
 
 const SIMPLE_BPMN = `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_1" targetNamespace="http://bpmn.io/schema/bpmn">
@@ -684,3 +705,566 @@ describe('bpmnXml: триггер кросс-процессного запуск
     }
   });
 });
+
+describe('bpmnXml: validateEngineSchema', () => {
+  /**
+   * Минимальная схема, которую движок компилирует: старт → шаг → конец.
+   * Связи описаны только `sequenceFlow` — `<bpmn:incoming>`/`outgoing` движок
+   * не читает (он собирает связи сам, обходом детей процесса).
+   */
+  const ENGINE_VALID_BPMN = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_1" targetNamespace="http://bpmn.io/schema/bpmn">
+  <bpmn:process id="Process_Valid" isExecutable="true">
+    <bpmn:startEvent id="StartEvent_1" name="Старт" />
+    <bpmn:userTask id="Task_Step" name="Шаг" />
+    <bpmn:endEvent id="EndEvent_1" name="Конец" />
+    <bpmn:sequenceFlow id="Flow_1" sourceRef="StartEvent_1" targetRef="Task_Step" />
+    <bpmn:sequenceFlow id="Flow_2" sourceRef="Task_Step" targetRef="EndEvent_1" />
+  </bpmn:process>
+</bpmn:definitions>`;
+
+  /** Коды проблем отчёта. */
+  const codes = (problems) => problems.map((problem) => problem.code);
+
+  it('схему из списка поддерживаемых узлов движок принимает', () => {
+    expect(ENGINE_FLOW_NODE_TYPES).toContain('userTask');
+    expect(validateEngineSchema(ENGINE_VALID_BPMN)).toEqual({
+      ok: true,
+      problems: [],
+    });
+  });
+
+  it('демо-схемы SDK совместимы с движком', () => {
+    // Демо-схемы — точка отсчёта правок редактора и запуск процесса в демо.
+    expect(validateEngineSchema(DEFAULT_CUSTOMER_BPMN_XML)).toEqual({
+      ok: true,
+      problems: [],
+    });
+    expect(validateEngineSchema(DEFAULT_SUPPLIER_BPMN_XML)).toEqual({
+      ok: true,
+      problems: [],
+    });
+  });
+
+  it('узел типа, которого движок не знает, объясняется отдельной проблемой', () => {
+    // Реальный случай: шаг, добавленный в палитре редактора, — базовый
+    // `<bpmn:task>`. Парсер движка его пропускает, связи через узел становятся
+    // висячими, и определение не компилируется целиком.
+    const xml = ENGINE_VALID_BPMN.replace('<bpmn:userTask', '<bpmn:task');
+    const { ok, problems } = validateEngineSchema(xml);
+
+    expect(ok).toBe(false);
+    expect(codes(problems)).toEqual([SCHEMA_PROBLEM.UNSUPPORTED_NODE]);
+
+    const [problem] = problems;
+    expect(problem.elementId).toBe('Task_Step');
+    expect(problem.message).toContain('bpmn:task');
+    expect(problem.message).toContain('userTask');
+    expect(problem.hint).toContain('User task');
+  });
+
+  it('подпроцесс тоже считается неподдерживаемым узлом', () => {
+    const xml = ENGINE_VALID_BPMN.replace('<bpmn:userTask', '<bpmn:subProcess');
+
+    expect(codes(validateEngineSchema(xml).problems)).toEqual([
+      SCHEMA_PROBLEM.UNSUPPORTED_NODE,
+    ]);
+  });
+
+  it('связь в удалённый узел объясняется по номеру связи', () => {
+    const xml = ENGINE_VALID_BPMN.replace(
+      'targetRef="Task_Step"',
+      'targetRef="Task_Removed"'
+    );
+    const { ok, problems } = validateEngineSchema(xml);
+
+    expect(ok).toBe(false);
+
+    const problem = problems.find(
+      (item) => item.code === SCHEMA_PROBLEM.FLOW_TARGET_NOT_FOUND
+    );
+
+    expect(problem).toBeTruthy();
+    expect(problem.flowId).toBe('Flow_1');
+    expect(problem.message).toContain('Task_Removed');
+  });
+
+  it('связь узла с самим собой — ошибка', () => {
+    const xml = ENGINE_VALID_BPMN.replace(
+      'targetRef="EndEvent_1"',
+      'targetRef="Task_Step"'
+    );
+
+    expect(codes(validateEngineSchema(xml).problems)).toContain(
+      SCHEMA_PROBLEM.FLOW_SELF_LOOP
+    );
+  });
+
+  it('оторванный от маршрута узел — ошибка', () => {
+    const xml = ENGINE_VALID_BPMN.replace(
+      '<bpmn:endEvent id="EndEvent_1" name="Конец" />',
+      '<bpmn:userTask id="Task_Lonely" name="Одинокий" />\n' +
+        '    <bpmn:endEvent id="EndEvent_1" name="Конец" />'
+    );
+    const orphans = validateEngineSchema(xml).problems.filter(
+      (item) => item.code === SCHEMA_PROBLEM.ORPHAN_NODE
+    );
+
+    // Ни входящей, ни исходящей связи — две записи по одному узлу.
+    expect(orphans.map((item) => item.elementId)).toEqual([
+      'Task_Lonely',
+      'Task_Lonely',
+    ]);
+  });
+
+  it('без стартового и без конечного события движок не компилирует', () => {
+    const withoutStart = ENGINE_VALID_BPMN.replace(
+      '<bpmn:startEvent id="StartEvent_1" name="Старт" />',
+      ''
+    );
+    const withoutEnd = ENGINE_VALID_BPMN.replace(
+      '<bpmn:endEvent id="EndEvent_1" name="Конец" />',
+      ''
+    );
+
+    expect(codes(validateEngineSchema(withoutStart).problems)).toContain(
+      SCHEMA_PROBLEM.NO_START_EVENT
+    );
+    expect(codes(validateEngineSchema(withoutEnd).problems)).toContain(
+      SCHEMA_PROBLEM.NO_END_EVENT
+    );
+  });
+
+  it('неразбираемый XML и схема без процесса дают по одной проблеме', () => {
+    expect(codes(validateEngineSchema('<bpmn:definitions>').problems)).toEqual([
+      SCHEMA_PROBLEM.INVALID_XML,
+    ]);
+    expect(
+      codes(
+        validateEngineSchema(
+          '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D" />'
+        ).problems
+      )
+    ).toEqual([SCHEMA_PROBLEM.NO_PROCESS]);
+  });
+
+  it('служебные узлы процесса (аннотация, дорожки) ошибкой не считаются', () => {
+
+    const xml = ENGINE_VALID_BPMN.replace(
+      '<bpmn:endEvent id="EndEvent_1" name="Конец" />',
+      '<bpmn:textAnnotation id="Text_1"><bpmn:text>подсказка</bpmn:text></bpmn:textAnnotation>\n' +
+        '    <bpmn:endEvent id="EndEvent_1" name="Конец" />'
+    );
+
+    expect(validateEngineSchema(xml)).toEqual({ ok: true, problems: [] });
+  });
+});
+
+
+
+
+/* ------------------------------------------------------------------ *
+ * Кнопки участников (`act:userAction`)
+ * ------------------------------------------------------------------ */
+
+/** Кнопка «отправить заказ» для тестов записи. */
+const ACTION = {
+  id: 'sendToSupplier',
+  label: 'Отправить заказ Поставщику',
+  role: 'MANAGER',
+  icon: 'Send',
+  event: 'SendToSupplier',
+  elementId: 'EndEvent_1',
+  counterpartEvent: '',
+  counterpartElementId: '',
+  startsProcess: '',
+};
+
+describe('bpmnXml: кнопки участников (act:userAction)', () => {
+  it('пишет кнопку в `extensionElements` узла, создавая контейнер и namespace', () => {
+    const xml = setElementActions(SIMPLE_BPMN, 'Task_Approve', [ACTION]);
+
+    // Объявление namespace обязательно: без него `bpmn-js` не прочитает тег.
+    expect(xml).toContain('xmlns:act="http://erp.mes/schema/bpmn/action"');
+    expect(xml).toContain(
+      '<' +
+        ACTION_TAG_NAME +
+        ' id="sendToSupplier" label="Отправить заказ Поставщику" role="MANAGER" ' +
+        'icon="Send" event="SendToSupplier" elementId="EndEvent_1" />'
+    );
+    // Контейнер появился внутри узла, а не рядом с ним.
+    expect(xml).toContain('<bpmn:extensionElements>');
+    expect(getElementActions(xml, 'Task_Approve')).toEqual([ACTION]);
+  });
+
+  it('разворачивает самозакрывающийся узел в парный тег', () => {
+    const selfClosing =
+      '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="D">' +
+      '<bpmn:process id="P"><bpmn:userTask id="Task_1" /></bpmn:process></bpmn:definitions>';
+
+    const xml = setElementActions(selfClosing, 'Task_1', [ACTION]);
+
+    expect(xml).toContain('<bpmn:userTask id="Task_1">');
+    expect(xml).toContain('</bpmn:userTask>');
+    expect(getElementActions(xml, 'Task_1')).toEqual([ACTION]);
+  });
+
+  it('дописывает вторую кнопку рядом с триггером и чужими расширениями', () => {
+    // Чужие расширения объявляются своим namespace: без `xmlns:` схема
+    // перестаёт быть корректной, и её не прочитает даже `DOMParser`.
+    const withTrigger = setElementTrigger(
+      SIMPLE_BPMN.replace(
+        'id="Definitions_1"',
+        'id="Definitions_1" xmlns:camunda="http://camunda.org/schema/1.0/bpmn"'
+      ),
+      'Task_Approve',
+      { targetProcessId: 'Process_Other' }
+    ).replace(
+      '</bpmn:extensionElements>',
+      '<camunda:properties><camunda:property name="a" value="b" /></camunda:properties>\n      </bpmn:extensionElements>'
+    );
+
+    const second = { ...ACTION, id: 'approve', label: 'Согласовать', event: 'Approve' };
+    const xml = setElementActions(withTrigger, 'Task_Approve', [ACTION, second]);
+
+    // Чужие расширения и триггер на месте, кнопки — в порядке списка.
+    expect(xml).toContain('trg:processTrigger');
+    expect(xml).toContain('camunda:property');
+    expect(getElementActions(xml, 'Task_Approve').map((action) => action.id)).toEqual([
+      'sendToSupplier',
+      'approve',
+    ]);
+    expect(getElementTrigger(xml, 'Task_Approve')).toEqual({
+      targetProcessId: 'Process_Other',
+      instancePrefix: '',
+      startElementId: '',
+      firstElementId: '',
+      payloadKeys: '',
+    });
+  });
+
+  it('заменяет список кнопок целиком и снимает его пустым списком', () => {
+    const first = setElementActions(SIMPLE_BPMN, 'Task_Approve', [ACTION]);
+    const second = { ...ACTION, id: 'other', label: 'Другая', event: 'Other' };
+
+    const replaced = setElementActions(first, 'Task_Approve', [second]);
+    expect(getElementActions(replaced, 'Task_Approve')).toEqual([second]);
+
+    const cleared = setElementActions(replaced, 'Task_Approve', []);
+    expect(cleared).not.toContain(ACTION_TAG_NAME);
+    expect(getElementActions(cleared, 'Task_Approve')).toEqual([]);
+    // Снятие кнопок не трогает остальную схему.
+    expect(listFlowElements(cleared).map((element) => element.id)).toEqual(
+      listFlowElements(SIMPLE_BPMN).map((element) => element.id)
+    );
+  });
+
+  it('идемпотентен: повторная запись того же списка не размножает теги', () => {
+    const once = setElementActions(SIMPLE_BPMN, 'Task_Approve', [ACTION]);
+    const twice = setElementActions(once, 'Task_Approve', [ACTION]);
+
+    expect(twice.match(/userAction/g)).toHaveLength(1);
+    expect(getElementActions(twice, 'Task_Approve')).toEqual([ACTION]);
+  });
+
+  it('собирает кнопки схемы и карту по узлам', () => {
+    expect(
+      listActions(DEFAULT_CUSTOMER_BPMN_XML).map((item) => [item.elementId, item.action.id])
+    ).toEqual([
+      ['StartEvent_Customer', 'createOrder'],
+      ['Task_CreatePurchaseOrder', 'sendToSupplier'],
+      ['Task_ReceiveDocsAndIssuePass', 'issuePass'],
+      ['Task_SecurityCheck', 'securityPass'],
+      ['Task_QualityControl', 'qualityApprove'],
+    ]);
+
+    expect(Object.keys(getActionAssignments(DEFAULT_CUSTOMER_BPMN_XML))).toEqual([
+      'StartEvent_Customer',
+      'Task_CreatePurchaseOrder',
+      'Task_ReceiveDocsAndIssuePass',
+      'Task_SecurityCheck',
+      'Task_QualityControl',
+    ]);
+
+    // Пара «событие + узел» в кнопке демо-схемы не записана: её выводит схема,
+    // поэтому проверяется не только чтение, но и разрешение пары.
+    const securityPass = getElementAction(
+      DEFAULT_CUSTOMER_BPMN_XML,
+      'Task_SecurityCheck',
+      'securityPass'
+    );
+    expect(securityPass).toMatchObject({ event: '', elementId: '' });
+    expect(
+      resolveAction(DEFAULT_CUSTOMER_BPMN_XML, 'Task_SecurityCheck', securityPass)
+    ).toEqual({ event: DEFAULT_ACTION_EVENT, elementId: 'Task_QualityControl' });
+
+    expect(getElementAction(DEFAULT_CUSTOMER_BPMN_XML, 'Task_SecurityCheck', 'nope')).toBeNull();
+    expect(
+      getElementActions(DEFAULT_CUSTOMER_BPMN_XML, 'Task_WaitForSupplierShipment')
+    ).toEqual([]);
+  });
+
+  it('читает кнопку запуска процесса со стартового события', () => {
+    const declaration = getStartAction(DEFAULT_CUSTOMER_BPMN_XML);
+
+    // В схеме у кнопки старта только роль: событие и узел первого шага схема
+    // выводит сама (`CompleteBlock` и цель единственной исходящей связи).
+    expect(declaration).toMatchObject({
+      elementId: 'StartEvent_Customer',
+      action: {
+        id: 'createOrder',
+        role: 'PRODUCTION',
+        event: '',
+        elementId: '',
+      },
+    });
+    expect(
+      resolveAction(DEFAULT_CUSTOMER_BPMN_XML, declaration.elementId, declaration.action)
+    ).toEqual({
+      event: DEFAULT_ACTION_EVENT,
+      elementId: 'Task_CreatePurchaseOrder',
+    });
+
+    const supplierDeclaration = getStartAction(DEFAULT_SUPPLIER_BPMN_XML);
+
+    expect(supplierDeclaration).toMatchObject({
+      elementId: 'StartEvent_Supplier',
+      action: {
+        id: 'startSupplierProcess',
+        event: '',
+        elementId: '',
+      },
+    });
+    expect(
+      resolveAction(
+        DEFAULT_SUPPLIER_BPMN_XML,
+        supplierDeclaration.elementId,
+        supplierDeclaration.action
+      )
+    ).toEqual({ event: DEFAULT_ACTION_EVENT, elementId: 'Task_SupplierCreateDocs' });
+
+    // Схема без кнопок запуска процесса его не описывает.
+    expect(getStartAction(SIMPLE_BPMN)).toBeNull();
+    expect(getStartAction('')).toBeNull();
+  });
+
+  it('демо-схемы несут кнопки участников с кросс-процессными эффектами', () => {
+    expect(listActions(DEFAULT_SUPPLIER_BPMN_XML).map((item) => item.action.id)).toEqual([
+      'startSupplierProcess',
+      'createDocs',
+      'shipment',
+    ]);
+
+    // Отгрузка поставщика = свой шаг плюс сигнал в экземпляр заказчика. Своё
+    // событие и узел в кнопке не записаны (их выводит схема: `CompleteBlock` и
+    // `EndEvent_Supplier`), а сигнал второй стороне — данными, которые из связей
+    // не выводятся.
+    const shipment = getElementAction(
+      DEFAULT_SUPPLIER_BPMN_XML,
+      'Task_SupplierShipment',
+      'shipment'
+    );
+    expect(shipment).toMatchObject({
+      event: '',
+      elementId: '',
+      counterpartEvent: 'SupplierShippedSignal',
+      counterpartElementId: 'Task_ReceiveDocsAndIssuePass',
+    });
+    expect(
+      resolveAction(DEFAULT_SUPPLIER_BPMN_XML, 'Task_SupplierShipment', shipment)
+    ).toEqual({ event: DEFAULT_ACTION_EVENT, elementId: 'EndEvent_Supplier' });
+
+    // Передача заказа запускает процесс второй стороны.
+    expect(
+      getElementAction(DEFAULT_CUSTOMER_BPMN_XML, 'Task_CreatePurchaseOrder', 'sendToSupplier')
+    ).toMatchObject({ startsProcess: 'Process_SupplierSupply_v1' });
+
+    // Роли кнопок задач берутся у узлов, а у кнопки старта — у неё самой.
+    expect(getElementRole(DEFAULT_CUSTOMER_BPMN_XML, 'Task_SecurityCheck')).toBe('SECURITY');
+    expect(getElementRole(DEFAULT_CUSTOMER_BPMN_XML, 'StartEvent_Customer')).toBe('');
+  });
+
+  it('все кнопки демо-схем выводят узел из связей и не теряют его', () => {
+    // Страховка от «сократили кнопку и потеряли адрес»: у каждой кнопки обеих
+    // демо-схем пара «событие + узел» разрешается в реальный узел процесса.
+    [DEFAULT_CUSTOMER_BPMN_XML, DEFAULT_SUPPLIER_BPMN_XML].forEach((xml) => {
+      const nodeIds = listFlowElements(xml).map((element) => element.id);
+
+      listActions(xml).forEach(({ elementId, action }) => {
+        const resolved = resolveAction(xml, elementId, action);
+
+        expect(resolved.event).toBe(DEFAULT_ACTION_EVENT);
+        expect(nodeIds).toContain(resolved.elementId);
+      });
+    });
+  });
+
+  it('выводит цель единственной исходящей связи и не угадывает при развилке', () => {
+    // `StartEvent_1` ведёт в `Task_Approve`, `Task_Approve` — в шлюз, а у самого
+    // шлюза исходящих связей нет: вывести «следующий шаг» можно только для
+    // первого, там ответ однозначен.
+    expect(getOutgoingTargetIds(SIMPLE_BPMN, 'StartEvent_1')).toEqual(['Task_Approve']);
+    expect(getOutgoingTargetIds(SIMPLE_BPMN, 'Task_Approve')).toEqual(['Gateway_1']);
+    expect(getOutgoingTargetIds(SIMPLE_BPMN, 'Gateway_1')).toEqual([]);
+    expect(getOutgoingTargetIds(SIMPLE_BPMN, '')).toEqual([]);
+
+    expect(getNextElementId(SIMPLE_BPMN, 'StartEvent_1')).toBe('Task_Approve');
+    expect(getNextElementId(SIMPLE_BPMN, 'Gateway_1')).toBe('');
+    expect(getNextElementId('', 'StartEvent_1')).toBe('');
+
+    // Развилка: две связи из одного узла — «следующий блок» не определён.
+    const branching = SIMPLE_BPMN.replace(
+      '<bpmn:sequenceFlow id="Flow_2" sourceRef="Task_Approve" targetRef="Gateway_1" />',
+      '<bpmn:sequenceFlow id="Flow_2" sourceRef="Task_Approve" targetRef="Gateway_1" />' +
+        '<bpmn:sequenceFlow id="Flow_3" sourceRef="Task_Approve" targetRef="EndEvent_1" />'
+    );
+
+    expect(getOutgoingTargetIds(branching, 'Task_Approve')).toEqual([
+      'Gateway_1',
+      'EndEvent_1',
+    ]);
+    expect(getNextElementId(branching, 'Task_Approve')).toBe('');
+  });
+
+  it('разрешает пару «событие + узел»: записанное в схеме важнее умолчания', () => {
+    const explicit = { ...ACTION, event: 'Approve', elementId: 'Task_Other' };
+
+    expect(resolveActionEvent(explicit)).toBe('Approve');
+    expect(resolveActionTarget(SIMPLE_BPMN, 'StartEvent_1', explicit)).toBe('Task_Other');
+    expect(resolveAction(SIMPLE_BPMN, 'StartEvent_1', explicit)).toEqual({
+      event: 'Approve',
+      elementId: 'Task_Other',
+    });
+
+    const minimal = { id: 'approve', label: 'Согласовать' };
+
+    expect(resolveActionEvent(minimal)).toBe(DEFAULT_ACTION_EVENT);
+    expect(resolveActionEvent(null)).toBe(DEFAULT_ACTION_EVENT);
+    expect(resolveActionTarget(SIMPLE_BPMN, 'StartEvent_1', minimal)).toBe('Task_Approve');
+    expect(resolveAction(SIMPLE_BPMN, 'StartEvent_1', minimal)).toEqual({
+      event: DEFAULT_ACTION_EVENT,
+      elementId: 'Task_Approve',
+    });
+
+    // Развилка: узел не выводится, значит кнопка обязана назвать его сама.
+    expect(resolveActionTarget(SIMPLE_BPMN, 'Gateway_1', minimal)).toBe('');
+  });
+
+  it('пишет короткую кнопку без события и узла', () => {
+    const minimal = { id: 'approve', label: 'Согласовать' };
+    const xml = setElementActions(SIMPLE_BPMN, 'Task_Approve', [minimal]);
+
+    // Канон кнопки-«шага»: только ключ и надпись, пустые поля не пишутся.
+    expect(xml).toContain('<' + ACTION_TAG_NAME + ' id="approve" label="Согласовать" />');
+    expect(getElementActions(xml, 'Task_Approve')).toEqual([
+      {
+        id: 'approve',
+        label: 'Согласовать',
+        role: '',
+        icon: '',
+        event: '',
+        elementId: '',
+        counterpartEvent: '',
+        counterpartElementId: '',
+        startsProcess: '',
+      },
+    ]);
+    expect(resolveAction(xml, 'Task_Approve', minimal)).toEqual({
+      event: DEFAULT_ACTION_EVENT,
+      elementId: 'Gateway_1',
+    });
+
+    // Обязательны ключ и надпись; недопустимый формат события и узла — ошибка,
+    // потому что оба уходят в движок (subject NATS и `element_id`).
+    expect(() => normalizeAction({ ...ACTION, event: '1 событие' })).toThrow(
+      /событие кнопки/
+    );
+    expect(() => normalizeAction({ ...ACTION, elementId: '1 узел' })).toThrow(/узел кнопки/);
+  });
+
+  it('приводит кнопку к канону и отбрасывает неизвестные поля', () => {
+    expect(
+      normalizeAction({
+        id: ' sendToSupplier ',
+        label: ' Отправить ',
+        event: ' SendToSupplier ',
+        elementId: 'Task_Next',
+        unknown: 'мусор',
+      })
+    ).toEqual({
+      id: 'sendToSupplier',
+      label: 'Отправить',
+      role: '',
+      icon: '',
+      event: 'SendToSupplier',
+      elementId: 'Task_Next',
+      counterpartEvent: '',
+      counterpartElementId: '',
+      startsProcess: '',
+    });
+
+    expect(isValidAction(ACTION)).toBe(true);
+    expect(isValidAction({ ...ACTION, label: '' })).toBe(false);
+    expect(isValidAction({ ...ACTION, counterpartEvent: 'Signal' })).toBe(false);
+
+    // Событие и узел необязательны: пустые поля — это умолчания схемы
+    // (`CompleteBlock` и следующий блок по единственной исходящей связи).
+    expect(isValidAction({ ...ACTION, event: '', elementId: '' })).toBe(true);
+    expect(isValidAction({ id: 'approve', label: 'Согласовать' })).toBe(true);
+
+    expect(ACTION_ICON_PATTERN.test('Truck')).toBe(true);
+    expect(ACTION_ICON_PATTERN.test('truck-2')).toBe(false);
+  });
+
+  it('отклоняет недопустимую кнопку, неизвестный узел и пустую схему', () => {
+    expect(() => setElementActions('', 'Task_Approve', [ACTION])).toThrow(/Пустая BPMN-схема/);
+    expect(() => setElementActions(SIMPLE_BPMN, 'Task_Missing', [ACTION])).toThrow(/не найден/);
+    expect(() =>
+      setElementActions(SIMPLE_BPMN, 'Task_Approve', [{ ...ACTION, label: '' }])
+    ).toThrow(/надписи/);
+    expect(() =>
+      setElementActions(SIMPLE_BPMN, 'Task_Approve', [{ ...ACTION, counterpartEvent: 'Signal' }])
+    ).toThrow(/второй стороны задаются вместе/);
+    expect(() => normalizeAction(null)).toThrow(/объект с полем id/);
+  });
+
+  it('отказывается ставить кнопку на последовательный поток, но умеет её снять', () => {
+    expect(isActionHostType('bpmn:userTask')).toBe(true);
+    expect(isActionHostType('bpmn:startEvent')).toBe(true);
+    expect(isActionHostType('bpmn:SequenceFlow')).toBe(false);
+
+    expect(() => setElementActions(SIMPLE_BPMN, 'Flow_1', [ACTION])).toThrow(
+      /только узлам потока/
+    );
+
+    // «Починка» схемы: кнопка, записанная в связь вручную, снимается. Namespace
+    // объявлен: без него XML неразбираем и читать в нём нечего.
+    const patched = SIMPLE_BPMN.replace(
+      'id="Definitions_1"',
+      'id="Definitions_1" xmlns:act="http://erp.mes/schema/bpmn/action"'
+    ).replace(
+      '<bpmn:sequenceFlow id="Flow_1" sourceRef="StartEvent_1" targetRef="Task_Approve" />',
+      '<bpmn:sequenceFlow id="Flow_1" sourceRef="StartEvent_1" targetRef="Task_Approve">' +
+        '<bpmn:extensionElements>' +
+        '<act:userAction id="x" label="X" event="E" elementId="EndEvent_1" />' +
+        '</bpmn:extensionElements></bpmn:sequenceFlow>'
+    );
+
+    expect(getElementActions(patched, 'Flow_1')).toHaveLength(1);
+    expect(setElementActions(patched, 'Flow_1', [])).not.toContain(ACTION_TAG_NAME);
+  });
+
+  it('без DOM чтение кнопок возвращает пустой список (как `listFlowElements`)', () => {
+    const domParser = global.DOMParser;
+
+    global.DOMParser = undefined;
+    try {
+      expect(listActions(DEFAULT_CUSTOMER_BPMN_XML)).toEqual([]);
+      expect(getElementActions(DEFAULT_CUSTOMER_BPMN_XML, 'Task_SecurityCheck')).toEqual([]);
+      expect(getStartAction(DEFAULT_CUSTOMER_BPMN_XML)).toBeNull();
+    } finally {
+      global.DOMParser = domParser;
+    }
+  });
+});
+

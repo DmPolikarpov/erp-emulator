@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import BpmnJS from 'bpmn-js/lib/NavigatedViewer';
 
+import { installDiagramJsCompat } from '../compat/diagramJsCompat';
 import { resolveTokenMap } from '../tokens';
 import '../styles/bpmn-sdk.css';
 
@@ -108,6 +109,11 @@ export function BpmnViewer({
 
     const viewer = new BpmnJS({ container: containerRef.current });
     viewerRef.current = viewer;
+
+    // У просмотрщика контекстной панели нет, поэтому вызов ничего не делает;
+    // он сработает, если потребитель добавит её через `additionalModules` —
+    // см. `compat/diagramJsCompat.js`.
+    installDiagramJsCompat(viewer);
 
     if (typeof callbacksRef.current.onReady === 'function') {
       callbacksRef.current.onReady(viewer);

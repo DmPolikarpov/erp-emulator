@@ -196,6 +196,38 @@
   color: #334155;
 }
 
+/* Кнопки панели (добавление и удаление кнопок участников) */
+
+.bpmn-sdk-panel__button {
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background-color: #fff;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.bpmn-sdk-panel__button--danger {
+  border-color: #fecaca;
+  color: #dc2626;
+}
+
+.bpmn-sdk-panel__button:disabled {
+  background-color: #e2e8f0;
+  color: #94a3b8;
+  cursor: default;
+}
+
+/* Один элемент списка кнопок: сетка полей плюс кнопка «удалить» */
+
+.bpmn-sdk-panel__item + .bpmn-sdk-panel__item {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dotted #cbd5e1;
+}
+
 /* ------------------------------------------------------------------ *
  * Редактор схемы (BpmnEditor)
  * ------------------------------------------------------------------ */

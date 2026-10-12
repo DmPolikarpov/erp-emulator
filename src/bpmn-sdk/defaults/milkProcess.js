@@ -1,18 +1,34 @@
-// Базовая схема Заказчика (Молочный Завод)
+// Базовая схема Заказчика (Молочный Завод).
+//
+// Кнопки кабинета объявлены в самих блоках (`act:userAction`): надпись, иконка,
+// роль участника и кросс-процессные эффекты (`startsProcess`,
+// `counterpartEvent`). Событие и узел, на который встаёт токен, здесь не
+// записаны: их выводит схема — «шаг выполнен» (`CompleteBlock`) и следующий блок
+// по единственной исходящей связи узла этой кнопки. Короткая кнопка читается как
+// «нажатие завершает шаг и переводит токен дальше», а нестандартный переход
+// по-прежнему пишут явными `event`/`elementId`. Клиент рисует ровно то, что
+// объявлено в схеме.
 export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
                   xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
                   xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
                   xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:act="http://erp.mes/schema/bpmn/action"
                   id="Definitions_CustomerProcess"
                   targetNamespace="http://bpmn.io/schema/bpmn">
   <bpmn:process id="Process_MilkCustomer_v1" name="Закупка и приемка сырого молока" isExecutable="true">
     <bpmn:startEvent id="StartEvent_Customer" name="Заявка производства на 100 л молока">
+      <bpmn:extensionElements>
+        <act:userAction id="createOrder" label="Создать внутренний заказ на 100 л" role="PRODUCTION" icon="PlusCircle" />
+      </bpmn:extensionElements>
       <bpmn:outgoing>Flow_C1</bpmn:outgoing>
     </bpmn:startEvent>
     
     <bpmn:sequenceFlow id="Flow_C1" sourceRef="StartEvent_Customer" targetRef="Task_CreatePurchaseOrder" />
     <bpmn:userTask id="Task_CreatePurchaseOrder" name="Сформировать заказ у поставщика">
+      <bpmn:extensionElements>
+        <act:userAction id="sendToSupplier" label="Сформировать и отправить заказ Поставщику" icon="Send" startsProcess="Process_SupplierSupply_v1" />
+      </bpmn:extensionElements>
       <bpmn:incoming>Flow_C1</bpmn:incoming>
       <bpmn:outgoing>Flow_C2</bpmn:outgoing>
       <bpmn:potentialOwner name="MANAGER" />
@@ -27,6 +43,9 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
     
     <bpmn:sequenceFlow id="Flow_C3" sourceRef="Task_WaitForSupplierShipment" targetRef="Task_ReceiveDocsAndIssuePass" />
     <bpmn:userTask id="Task_ReceiveDocsAndIssuePass" name="Принять документы и выписать пропуск">
+      <bpmn:extensionElements>
+        <act:userAction id="issuePass" label="Выписать пропуск на КПП" icon="KeyRound" />
+      </bpmn:extensionElements>
       <bpmn:incoming>Flow_C3</bpmn:incoming>
       <bpmn:outgoing>Flow_C4</bpmn:outgoing>
       <bpmn:potentialOwner name="MANAGER" />
@@ -34,6 +53,9 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
     
     <bpmn:sequenceFlow id="Flow_C4" sourceRef="Task_ReceiveDocsAndIssuePass" targetRef="Task_SecurityCheck" />
     <bpmn:userTask id="Task_SecurityCheck" name="Проверка пропуска на КПП">
+      <bpmn:extensionElements>
+        <act:userAction id="securityPass" label="Проверить пропуск и открыть ворота" icon="ShieldCheck" />
+      </bpmn:extensionElements>
       <bpmn:incoming>Flow_C4</bpmn:incoming>
       <bpmn:outgoing>Flow_C5</bpmn:outgoing>
       <bpmn:potentialOwner name="SECURITY" />
@@ -41,6 +63,9 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
     
     <bpmn:sequenceFlow id="Flow_C5" sourceRef="Task_SecurityCheck" targetRef="Task_QualityControl" />
     <bpmn:userTask id="Task_QualityControl" name="Контроль качества ОТК">
+      <bpmn:extensionElements>
+        <act:userAction id="qualityApprove" label="Подтвердить качество и передать в Производство" icon="ClipboardCheck" />
+      </bpmn:extensionElements>
       <bpmn:incoming>Flow_C5</bpmn:incoming>
       <bpmn:outgoing>Flow_C6</bpmn:outgoing>
       <bpmn:potentialOwner name="QUALITY" />
@@ -85,21 +110,33 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
   </bpmndi:BPMNDiagram>
 </bpmn:definitions>`;
 
-// Базовая схема Поставщика (ООО «Альпийские Луга»)
+// Базовая схема Поставщика (ООО «Альпийские Луга»).
+//
+// Кнопки объявлены на блоках так же, как у Заказчика. Кнопка отгрузки описывает
+// оба события нажатия: своё (`Shipment` на `EndEvent_Supplier`) и сигнал
+// Заказчику (`counterpartEvent` — узел `Task_ReceiveDocsAndIssuePass` в его
+// экземпляре процесса).
 export const DEFAULT_SUPPLIER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
                   xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
                   xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
                   xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:act="http://erp.mes/schema/bpmn/action"
                   id="Definitions_SupplierProcess"
                   targetNamespace="http://bpmn.io/schema/bpmn">
   <bpmn:process id="Process_SupplierSupply_v1" name="Внутренняя отгрузка поставщика" isExecutable="true">
     <bpmn:startEvent id="StartEvent_Supplier" name="Получен заказ от Заказчика">
+      <bpmn:extensionElements>
+        <act:userAction id="startSupplierProcess" label="Запустить обработку заказа" icon="PackageCheck" />
+      </bpmn:extensionElements>
       <bpmn:outgoing>Flow_S1</bpmn:outgoing>
     </bpmn:startEvent>
     
     <bpmn:sequenceFlow id="Flow_S1" sourceRef="StartEvent_Supplier" targetRef="Task_SupplierCreateDocs" />
     <bpmn:userTask id="Task_SupplierCreateDocs" name="Сформировать документы (УПД/ТТН)">
+      <bpmn:extensionElements>
+        <act:userAction id="createDocs" label="Сформировать ТТН и УПД" icon="FileText" />
+      </bpmn:extensionElements>
       <bpmn:incoming>Flow_S1</bpmn:incoming>
       <bpmn:outgoing>Flow_S2</bpmn:outgoing>
       <bpmn:potentialOwner name="SUPPLIER_MANAGER" />
@@ -107,6 +144,9 @@ export const DEFAULT_SUPPLIER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
     
     <bpmn:sequenceFlow id="Flow_S2" sourceRef="Task_SupplierCreateDocs" targetRef="Task_SupplierShipment" />
     <bpmn:userTask id="Task_SupplierShipment" name="Отгрузить и отправить автоцистерну">
+      <bpmn:extensionElements>
+        <act:userAction id="shipment" label="Подтвердить отгрузку" icon="Truck" counterpartEvent="SupplierShippedSignal" counterpartElementId="Task_ReceiveDocsAndIssuePass" />
+      </bpmn:extensionElements>
       <bpmn:incoming>Flow_S2</bpmn:incoming>
       <bpmn:outgoing>Flow_S3</bpmn:outgoing>
       <bpmn:potentialOwner name="SUPPLIER_MANAGER" />

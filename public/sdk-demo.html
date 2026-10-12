@@ -262,6 +262,12 @@
             });
           }
 
+          function changeActions(id, actions) {
+            return applySchema(function (current) {
+              return sdk.setElementActions(current, id, actions);
+            });
+          }
+
           return h(
             'div',
             { className: 'demo' },
@@ -273,8 +279,11 @@
                 'подключается отдельно и используется всеми компонентами SDK. ' +
                 'Инспектор пишет правки прямо в схему демо: роль — через ' +
                 'setElementRole, запуск второго процесса (trg:processTrigger) — через ' +
-                'setElementTrigger, а подсказки процессов берутся из второй демо-схемы ' +
-                'функцией getProcessIds.'
+                'setElementTrigger, кнопки участников (act:userAction) — через ' +
+                'setElementActions, а подсказки процессов берутся из второй демо-схемы ' +
+                'функцией getProcessIds. У кнопки можно оставить «Событие» и «Узел» ' +
+                'пустыми: схема сама подставит CompleteBlock и следующий блок по ' +
+                'единственной исходящей связи (getNextElementId).'
             ),
             h(
               'div',
@@ -355,6 +364,7 @@
                   onChangeRole: changeRole,
                   triggerTargets: triggerTargets,
                   onChangeTrigger: changeTrigger,
+                  onChangeActions: changeActions,
                   title: 'Инспектор узлов',
                 })
               )

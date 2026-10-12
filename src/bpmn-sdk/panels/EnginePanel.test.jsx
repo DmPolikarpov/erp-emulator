@@ -2,13 +2,20 @@ import React from 'react';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 
 import {
+  ACTION_FIELD_ERRORS,
+  ACTION_INCOMPLETE_ERROR,
+  actionFieldError,
+  actionsKey,
   ELEMENT_ID_FORMAT_ERROR,
   EnginePanel,
+  nextActionId,
+  resolveElementActions,
   resolveElementRole,
   resolveElementTrigger,
   TRIGGER_FIELD_ERRORS,
   triggerFieldError,
 } from './EnginePanel';
+import { EMPTY_ACTION } from '../xml/actionModdle';
 
 const ELEMENTS = [
   { id: 'StartEvent_Customer', name: 'Заказ принят', type: 'bpmn:StartEvent' },
@@ -91,6 +98,66 @@ const fullTrigger = (overrides = {}) => ({
   payloadKeys: '',
   ...overrides,
 });
+
+/**
+ * Схема, в которой кнопка участника объявлена прямо в XML.
+ *
+ * `xmlns:act` обязателен: без объявления namespace схема не разбирается
+ * (`DOMParser` сообщает об ошибке, и кнопки не читаются).
+ */
+const ACTION_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:act="http://erp.mes/schema/bpmn/action" targetNamespace="http://erp">
+  <bpmn:process id="Process_Demo" isExecutable="true">
+    <bpmn:userTask id="Task_Approve" name="Согласовать">
+      <bpmn:extensionElements>
+        <act:userAction id="approve" label="Согласовать заказ" role="MANAGER" icon="Send" event="Approve" elementId="Task_Next" />
+      </bpmn:extensionElements>
+    </bpmn:userTask>
+  </bpmn:process>
+</bpmn:definitions>`;
+
+/** Кнопка канонической формы — так её собирает форма. */
+const fullAction = (overrides = {}) => ({
+  id: 'approve',
+  label: 'Согласовать заказ',
+  role: 'MANAGER',
+  icon: 'Send',
+  event: 'Approve',
+  elementId: 'Task_Next',
+  counterpartEvent: '',
+  counterpartElementId: '',
+  startsProcess: '',
+  ...overrides,
+});
+
+/* --- поля кнопок участников (`act:userAction`) --- */
+
+/**
+ * Подписи полей, у которых схема подставляет значение сама: пустое «Событие» —
+ * «шаг выполнен» (`CompleteBlock`), пустой «Узел» — следующий блок по связи.
+ */
+const ACTION_EVENT_LABEL = 'Событие при нажатии (event), пусто — CompleteBlock:';
+const ACTION_ELEMENT_LABEL = 'Узел после нажатия (elementId), пусто — следующий блок:';
+
+const actionField = (index, label) => screen.getAllByLabelText(label)[index];
+const actionIdField = (index = 0) => actionField(index, 'Ключ кнопки (id):');
+const actionLabelField = (index = 0) => actionField(index, 'Надпись на кнопке (label):');
+const actionRoleField = (index = 0) => actionField(index, 'Роль участника (role):');
+const actionIconField = (index = 0) => actionField(index, 'Иконка (icon):');
+const actionEventField = (index = 0) => actionField(index, ACTION_EVENT_LABEL);
+const actionElementField = (index = 0) => actionField(index, ACTION_ELEMENT_LABEL);
+const actionCounterpartEventField = (index = 0) =>
+  actionField(index, 'Событие второй стороны (counterpartEvent):');
+const actionStartsProcessField = (index = 0) =>
+  actionField(index, 'Запускаемый процесс (startsProcess):');
+
+const addActionButton = () => screen.getByText('Добавить кнопку');
+const removeActionButton = (index = 0) => screen.getAllByText('Удалить кнопку')[index];
+
+/** Узел списка с кнопками: так инспектор получает их из реестра редактора. */
+const elementWithActions = (actions) => [
+  { ...ELEMENTS[1], actions },
+];
 
 describe('EnginePanel: список узлов', () => {
   it('наполняет выпадающий список переданными узлами', () => {
@@ -623,3 +690,297 @@ describe('EnginePanel: триггер кросс-процессного запу
     expect(triggerFieldError('payloadKeys', 'order num')).toBe(TRIGGER_FIELD_ERRORS.payloadKeys);
   });
 });
+
+describe('EnginePanel: кнопки участников (act:userAction)', () => {
+  it('показывает поля кнопок из реестра редактора', () => {
+    const onChangeActions = jest.fn(() => true);
+    setup({
+      elements: elementWithActions([fullAction()]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions,
+    });
+
+    expect(actionIdField().value).toBe('approve');
+    expect(actionLabelField().value).toBe('Согласовать заказ');
+    expect(actionRoleField().value).toBe('MANAGER');
+    expect(actionIconField().value).toBe('Send');
+    expect(actionEventField().value).toBe('Approve');
+    expect(actionElementField().value).toBe('Task_Next');
+    expect(actionCounterpartEventField().value).toBe('');
+    expect(actionStartsProcessField().value).toBe('');
+    // Поля доступны, пока владелец схемы умеет записывать кнопки.
+    expect(actionLabelField().disabled).toBe(false);
+    expect(addActionButton().disabled).toBe(false);
+  });
+
+  it('читает кнопки из XML, если их нет в `elements`', () => {
+    setup({
+      elements: ELEMENTS,
+      xml: ACTION_XML,
+      selectedElementId: 'Task_Approve',
+      onChangeActions: jest.fn(() => true),
+    });
+
+    expect(actionIdField().value).toBe('approve');
+    expect(actionEventField().value).toBe('Approve');
+    expect(actionElementField().value).toBe('Task_Next');
+  });
+
+  it('передаёт заполненный список кнопок наружу', () => {
+    const onChangeActions = jest.fn(() => true);
+    setup({
+      elements: elementWithActions([fullAction()]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions,
+    });
+
+    fireEvent.change(actionLabelField(), { target: { value: 'Согласовать и отправить' } });
+
+    expect(onChangeActions).toHaveBeenCalledWith('Task_Approve', [
+      fullAction({ label: 'Согласовать и отправить' }),
+    ]);
+  });
+
+  it('не отправляет в модель недопустимые значения и подсвечивает поле', () => {
+    const onChangeActions = jest.fn(() => true);
+    setup({
+      elements: elementWithActions([fullAction()]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions,
+    });
+
+    fireEvent.change(actionEventField(), { target: { value: '1 плохое' } });
+
+    expect(onChangeActions).not.toHaveBeenCalled();
+    expect(actionEventField().value).toBe('1 плохое');
+    expect(actionEventField().getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByText(ACTION_FIELD_ERRORS.event)).toBeTruthy();
+  });
+
+  it('добавляет кнопку и сразу записывает её в схему', () => {
+    const onChangeActions = jest.fn(() => true);
+    setup({
+      elements: elementWithActions([fullAction()]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions,
+    });
+
+    fireEvent.click(addActionButton());
+
+    // Кнопка-«шаг» полна уже на добавлении: ключ и надпись форма заполняет сама,
+    // а событие и узел схема выводит из связей — черновик не нужен.
+    expect(actionLabelField(1).value).toBe('Новая кнопка');
+    expect(actionEventField(1).value).toBe('');
+    expect(onChangeActions).toHaveBeenCalledWith('Task_Approve', [
+      fullAction(),
+      { ...EMPTY_ACTION, id: 'action1', label: 'Новая кнопка' },
+    ]);
+    expect(screen.queryByText(ACTION_INCOMPLETE_ERROR)).toBeNull();
+  });
+
+  it('не пишет список, в котором есть недописанная кнопка', () => {
+    const onChangeActions = jest.fn(() => true);
+    setup({
+      elements: elementWithActions([fullAction({ label: '' })]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions,
+    });
+
+    fireEvent.change(actionRoleField(), { target: { value: 'SECURITY' } });
+
+    // Надпись кнопки пуста — список в схему не уходит, форма объясняет почему.
+    expect(onChangeActions).not.toHaveBeenCalled();
+    expect(actionRoleField().value).toBe('SECURITY');
+    expect(screen.getByText(ACTION_INCOMPLETE_ERROR)).toBeTruthy();
+  });
+
+  it('подсказывает в поле «Узел» блок, который схема выведет по связи', () => {
+    const xmlWithFlow = XML.replace(
+      '<bpmn:userTask id="Task_Approve" name="Согласовать" />',
+      '<bpmn:userTask id="Task_Approve" name="Согласовать" />' +
+        '<bpmn:endEvent id="EndEvent_1" />' +
+        '<bpmn:sequenceFlow id="Flow_1" sourceRef="Task_Approve" targetRef="EndEvent_1" />'
+    );
+
+    setup({
+      elements: elementWithActions([fullAction({ elementId: '' })]),
+      xml: xmlWithFlow,
+      selectedElementId: 'Task_Approve',
+      onChangeActions: jest.fn(() => true),
+    });
+
+    // Пустое поле получает подсказку не «Task_Next», а реальный следующий блок.
+    expect(actionElementField(0).placeholder).toBe('EndEvent_1');
+
+    cleanup();
+
+    // Развилка: схема узел не выводит, подсказка остаётся общей.
+    const branching = xmlWithFlow
+      .replace(
+        '<bpmn:endEvent id="EndEvent_1" />',
+        '<bpmn:endEvent id="EndEvent_1" /><bpmn:endEvent id="EndEvent_2" />'
+      )
+      .replace(
+        '<bpmn:sequenceFlow id="Flow_1" sourceRef="Task_Approve" targetRef="EndEvent_1" />',
+        '<bpmn:sequenceFlow id="Flow_1" sourceRef="Task_Approve" targetRef="EndEvent_1" />' +
+          '<bpmn:sequenceFlow id="Flow_2" sourceRef="Task_Approve" targetRef="EndEvent_2" />'
+      );
+
+    setup({
+      elements: elementWithActions([fullAction({ elementId: '' })]),
+      xml: branching,
+      selectedElementId: 'Task_Approve',
+      onChangeActions: jest.fn(() => true),
+    });
+
+    expect(actionElementField(0).placeholder).toBe('Task_Next');
+  });
+
+  it('удаляет кнопку и записывает сокращённый список', () => {
+    const onChangeActions = jest.fn(() => true);
+    const first = fullAction();
+    const second = fullAction({ id: 'reject', label: 'Отклонить', event: 'Reject' });
+    setup({
+      elements: elementWithActions([first, second]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions,
+    });
+
+    fireEvent.click(removeActionButton(1));
+
+    expect(onChangeActions).toHaveBeenCalledWith('Task_Approve', [first]);
+  });
+
+  it('откатывает правку, если модель её отвергла', () => {
+    const onChangeActions = jest.fn(() => false);
+    setup({
+      elements: elementWithActions([fullAction()]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions,
+    });
+
+    fireEvent.change(actionLabelField(), { target: { value: 'Не сохранится' } });
+
+    expect(actionLabelField().value).toBe('Согласовать заказ');
+    expect(screen.getByText(/Не удалось записать кнопки/)).toBeTruthy();
+  });
+
+  it('откатывает правку при исключении в модели', () => {
+    const onChangeActions = jest.fn(() => {
+      throw new Error('модель недоступна');
+    });
+    setup({
+      elements: elementWithActions([fullAction()]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions,
+    });
+
+    fireEvent.change(actionEventField(), { target: { value: 'Another' } });
+
+    expect(actionEventField().value).toBe('Approve');
+    expect(screen.getByText(/Не удалось записать кнопки/)).toBeTruthy();
+  });
+
+  it('откатывает снятие кнопки, если модель его отвергла', () => {
+    const first = fullAction();
+    const second = fullAction({ id: 'reject', label: 'Отклонить', event: 'Reject' });
+    setup({
+      elements: elementWithActions([first, second]),
+      selectedElementId: 'Task_Approve',
+      onChangeActions: jest.fn(() => false),
+    });
+
+    fireEvent.click(removeActionButton(0));
+
+    expect(screen.getAllByLabelText('Надпись на кнопке (label):')).toHaveLength(2);
+    expect(actionIdField(0).value).toBe('approve');
+    expect(actionIdField(1).value).toBe('reject');
+    expect(screen.getByText(/Не удалось записать кнопки/)).toBeTruthy();
+  });
+
+  it('блокирует поля кнопок без узла и без владельца записи', () => {
+    // Узел не выбран — списка кнопок нет вообще, доступна только попытка
+    // добавить кнопку (и она заблокирована).
+    setup({ elements: elementWithActions([fullAction()]) });
+
+    expect(screen.queryByLabelText('Надпись на кнопке (label):')).toBeNull();
+    expect(addActionButton().disabled).toBe(true);
+
+    cleanup();
+
+    setup({
+      elements: elementWithActions([fullAction()]),
+      selectedElementId: 'Task_Approve',
+      disabled: true,
+      onChangeActions: jest.fn(() => true),
+    });
+
+    expect(actionLabelField().disabled).toBe(true);
+    expect(removeActionButton().disabled).toBe(true);
+  });
+
+  it('блокирует поля кнопок на последовательном потоке', () => {
+    setup({
+      elements: [{ id: 'Flow_1', name: '', type: 'bpmn:SequenceFlow' }],
+      selectedElementId: 'Flow_1',
+      onChangeActions: jest.fn(() => true),
+    });
+
+    expect(addActionButton().disabled).toBe(true);
+    expect(screen.getByText(/Кнопка ставится только на узлы потока/)).toBeTruthy();
+  });
+
+  it('resolveElementActions: приоритет у значения из реестра', () => {
+    const fromRegistry = [fullAction({ event: 'Registry' })];
+
+    expect(
+      resolveElementActions({ id: 'Task_Approve', actions: fromRegistry }, ACTION_XML)
+    ).toBe(fromRegistry);
+    expect(resolveElementActions({ id: 'Task_Approve' }, ACTION_XML)[0]).toMatchObject({
+      id: 'approve',
+      event: 'Approve',
+    });
+    expect(resolveElementActions({ id: 'Task_Gone' }, ACTION_XML)).toEqual([]);
+    expect(resolveElementActions(null, ACTION_XML)).toEqual([]);
+  });
+
+  it('actionsKey: сравнивает списки по значению', () => {
+    expect(actionsKey([fullAction()])).toBe(actionsKey([fullAction()]));
+    expect(actionsKey([fullAction()])).not.toBe(actionsKey([fullAction({ label: 'Другая' })]));
+    expect(actionsKey([fullAction(), fullAction({ id: 'x' })])).not.toBe(
+      actionsKey([fullAction()])
+    );
+    expect(actionsKey(null)).toBe('');
+    expect(actionsKey([])).toBe('');
+  });
+
+  it('actionFieldError: проверяет поля теми же правилами, что и XML', () => {
+    expect(actionFieldError('id', 'approve')).toBe('');
+    expect(actionFieldError('id', '1 Approve')).toBe(ACTION_FIELD_ERRORS.id);
+    expect(actionFieldError('label', 'Согласовать')).toBe('');
+    expect(actionFieldError('label', '  ')).toBe(ACTION_FIELD_ERRORS.label);
+    expect(actionFieldError('role', '')).toBe('');
+    expect(actionFieldError('role', 'not a role')).toBe(ACTION_FIELD_ERRORS.role);
+    expect(actionFieldError('icon', 'Truck')).toBe('');
+    expect(actionFieldError('icon', 'Truck 2')).toBe(ACTION_FIELD_ERRORS.icon);
+    expect(actionFieldError('event', 'Approve')).toBe('');
+    expect(actionFieldError('event', '')).toBe('');
+    expect(actionFieldError('event', '1 плохое')).toBe(ACTION_FIELD_ERRORS.event);
+    expect(actionFieldError('elementId', '')).toBe('');
+    expect(actionFieldError('elementId', 'Task_Next')).toBe('');
+    expect(actionFieldError('elementId', '1 плохой')).toBe(ACTION_FIELD_ERRORS.elementId);
+    expect(actionFieldError('counterpartEvent', '')).toBe('');
+    expect(actionFieldError('startsProcess', 'Process_Supplier')).toBe('');
+    expect(actionFieldError('startsProcess', '1 плохо')).toBe(ACTION_FIELD_ERRORS.startsProcess);
+    expect(actionFieldError('unknown', 'что угодно')).toBe('');
+  });
+
+  it('nextActionId: выдаёт свободный ключ кнопки', () => {
+    expect(nextActionId([])).toBe('action1');
+    expect(nextActionId([{ id: 'action1' }])).toBe('action2');
+    expect(nextActionId([{ id: 'action1' }, { id: 'action2' }])).toBe('action3');
+    expect(nextActionId([{ id: 'send' }])).toBe('action1');
+    expect(nextActionId(null)).toBe('action1');
+  });
+});
+

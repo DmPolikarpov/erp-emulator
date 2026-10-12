@@ -30,6 +30,7 @@ export * from './constants';
 export * from './tokens';
 export * from './xml/bpmnXml';
 export * from './xml/triggerModdle';
+export * from './xml/actionModdle';
 export * from './defaults/milkProcess';
 export * from './client/httpClient';
 export * from './client/wsClient';

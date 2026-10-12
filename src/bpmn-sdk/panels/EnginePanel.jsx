@@ -2,16 +2,24 @@ import React, { useEffect, useId, useMemo, useState } from 'react';
 import { Settings } from 'lucide-react';
 
 import {
+  ACTION_ICON_PATTERN,
+  DEFAULT_ACTION_EVENT,
+  getElementActions,
   getElementRole,
   getElementTrigger,
+  getNextElementId,
+  isActionHostType,
   isActivityType,
   isIdAvailableAmong,
   isTriggerHostType,
+  isValidAction,
   isValidElementId,
   isValidInstancePrefix,
   isValidPayloadKeys,
+  isValidRole,
   listFlowElements,
 } from '../xml/bpmnXml';
+import { EMPTY_ACTION, ACTION_FIELDS } from '../xml/actionModdle';
 import { EMPTY_TRIGGER, TRIGGER_FIELDS } from '../xml/triggerModdle';
 import { INSTANCE_PREFIX } from '../constants';
 import '../styles/bpmn-sdk.css';
@@ -59,6 +67,44 @@ export function resolveElementTrigger(element, xml) {
   if (element.trigger && typeof element.trigger === 'object') return element.trigger;
 
   return getElementTrigger(xml, element.id);
+}
+
+/**
+ * Кнопки участников узла.
+ *
+ * Приоритет, как и у роли с триггером, у значения из `elements` (живой реестр
+ * редактора). Если поля нет — кнопки читаются из самого XML (`act:userAction`).
+ *
+ * @param {Object} element узел списка (`{id, name, type, actions?}`).
+ * @param {string} [xml] схема-источник, если кнопки не пришли из реестра.
+ * @returns {Array<object>} кнопки с полями `ACTION_FIELDS` (возможно, `[]`).
+ */
+export function resolveElementActions(element, xml) {
+  if (!element) return [];
+  if (Array.isArray(element.actions)) return element.actions;
+
+  return getElementActions(xml, element.id);
+}
+
+/**
+ * Сериализует список кнопок для сравнения черновика с источником правды.
+ *
+ * Список пересобирается на каждом рендере, поэтому в зависимостях эффекта
+ * должно стоять значение (строка), а не ссылка на массив.
+ *
+ * @param {Array<object>} actions кнопки узла.
+ * @returns {string} ключ сравнения (`''` для «кнопок нет»).
+ */
+export function actionsKey(actions) {
+  if (!Array.isArray(actions)) return '';
+
+  return actions
+    .map((action) =>
+      ACTION_FIELDS.map((name) => String((action && action[name]) == null ? '' : action[name])).join(
+        '\u0000'
+      )
+    )
+    .join('\u0001');
 }
 
 /**
@@ -112,13 +158,96 @@ export function triggerFieldError(field, value) {
   }
 }
 
+/** Сообщения об ошибках полей кнопки участника. */
+export const ACTION_FIELD_ERRORS = {
+  id: `Недопустимый ключ кнопки. ${ELEMENT_ID_HINT}`,
+  label: 'У кнопки должна быть надпись — её видит участник в кабинете.',
+  role: 'Недопустимая роль участника: допустимы буквы, цифры, «_», «-», «.».',
+  icon: 'Имя иконки — одно слово латиницей без пробелов (например, Truck).',
+  event: `Недопустимое событие кнопки. Пусто — «шаг выполнен» (${DEFAULT_ACTION_EVENT}). ${ELEMENT_ID_HINT}`,
+  elementId: `Недопустимый узел, на который встанет токен. Пусто — следующий блок по связи. ${ELEMENT_ID_HINT}`,
+  counterpartEvent: `Недопустимое событие второй стороны. ${ELEMENT_ID_HINT}`,
+  counterpartElementId: `Недопустимый узел второй стороны. ${ELEMENT_ID_HINT}`,
+  startsProcess: 'Недопустимый запускаемый процесс (ожидается bpmn:process/@id).',
+};
+
 /**
- * Поле формы триггера запуска.
+ * Кнопка не уходит в схему: не заполнено то, что схема вывести не может.
  *
- * Все поля триггера — строки, поэтому поле одно: при добавлении поля в
- * `TRIGGER_FIELDS` форма не разрастается. `options` рисуются как `datalist`,
- * то есть подсказывают идентификаторы процессов, но не мешают ввести свой
- * (схема может ссылаться на процесс, которого нет в текущем списке).
+ * Обязательны ключ и надпись — по ключу клиент находит кнопку, надпись видит
+ * участник. Событие и узел — не ошибка: пустые поля означают умолчания схемы
+ * («шаг выполнен» — `CompleteBlock` и следующий блок по единственной исходящей
+ * связи), их подставляет `resolveAction` в момент нажатия.
+ */
+export const ACTION_INCOMPLETE_ERROR =
+  'Кнопка ещё не записана в схему: нужны ключ (id) и надпись (label). Событие и узел заполнять не обязательно — пустые поля читаются как «шаг выполнен» (CompleteBlock и следующий блок по связи).';
+
+/**
+ * Проверяет одно поле кнопки.
+ *
+ * @param {string} field имя поля (`ACTION_FIELDS`).
+ * @param {string} value значение из формы.
+ * @returns {string} сообщение об ошибке либо `''`, если поле допустимо.
+ */
+export function actionFieldError(field, value) {
+  const text = value == null ? '' : String(value);
+  const trimmed = text.trim();
+  const empty = trimmed === '';
+
+  switch (field) {
+    case 'id':
+      return isValidElementId(trimmed) ? '' : ACTION_FIELD_ERRORS.id;
+    case 'label':
+      return empty ? ACTION_FIELD_ERRORS.label : '';
+    case 'role':
+      return empty || isValidRole(trimmed) ? '' : ACTION_FIELD_ERRORS.role;
+    case 'icon':
+      return empty || ACTION_ICON_PATTERN.test(trimmed) ? '' : ACTION_FIELD_ERRORS.icon;
+    case 'event':
+      return empty || isValidElementId(trimmed) ? '' : ACTION_FIELD_ERRORS.event;
+    case 'elementId':
+      return empty || isValidElementId(trimmed) ? '' : ACTION_FIELD_ERRORS.elementId;
+    case 'counterpartEvent':
+      return empty || isValidElementId(trimmed) ? '' : ACTION_FIELD_ERRORS.counterpartEvent;
+    case 'counterpartElementId':
+      return empty || isValidElementId(trimmed) ? '' : ACTION_FIELD_ERRORS.counterpartElementId;
+    case 'startsProcess':
+      return empty || isValidElementId(trimmed) ? '' : ACTION_FIELD_ERRORS.startsProcess;
+    default:
+      return '';
+  }
+}
+
+/**
+ * Свободный ключ для новой кнопки (`action1`, `action2`, ...).
+ *
+ * Ключ кнопки — это `element_id`-подобное имя: он попадает в XML-атрибут, и
+ * клиент сопоставляет по нему кнопку из схемы с вычисляемым payload.
+ *
+ * @param {Array<object>} actions уже объявленные кнопки узла.
+ * @returns {string} ключ, которого нет среди существующих.
+ */
+export function nextActionId(actions) {
+  const used = new Set(
+    (Array.isArray(actions) ? actions : []).map((action) =>
+      String(action && action.id ? action.id : '')
+    )
+  );
+
+  let index = 1;
+  while (used.has('action' + index)) index += 1;
+
+  return 'action' + index;
+}
+
+/**
+ * Поле формы с подсказками.
+ *
+ * Все поля расширений (триггер, кнопки) — строки, поэтому поле одно:
+ * при добавлении поля в `TRIGGER_FIELDS`/`ACTION_FIELDS` форма не разрастается.
+ * `options` рисуются как `datalist`, то есть подсказывают идентификаторы, но не
+ * мешают ввести свой (схема может ссылаться на процесс или узел, которого нет в
+ * текущем списке).
  *
  * @param {Object} props
  * @param {string} props.id идентификатор поля (`label`/`input`/`datalist`).
@@ -127,11 +256,11 @@ export function triggerFieldError(field, value) {
  * @param {boolean} props.disabled только чтение.
  * @param {boolean} props.invalid значение отклонено (подсветка).
  * @param {string} props.placeholder подсказка-пример.
- * @param {string[]} [props.options=[]] подсказки-идентификаторы процессов.
+ * @param {string[]} [props.options=[]] подсказки-значения.
  * @param {(value: string) => void} props.onChange новое значение.
  * @param {() => void} props.onBlur ввод завершён (откат незавершённого ввода).
  */
-function TriggerField({
+function OptionField({
   id,
   label,
   value,
@@ -180,6 +309,53 @@ function TriggerField({
 }
 
 /**
+ * Поля формы кнопки участника в порядке `ACTION_FIELDS`.
+ *
+ * Форма не разрастается при добавлении поля в `ACTION_FIELDS`: поля описаны
+ * данными, а подсказки-значения (`optionsKey`) берутся из контекста панели —
+ * роли пользователей, идентификаторы узлов схемы, процессы второй стороны.
+ *
+ * Поля, у которых схема выводит значение сама (`event`, `elementId`), помечены в
+ * подписи: пустое поле — это не «дырка» в кнопке, а умолчание. Подпись поля
+ * `elementId` подсказывает и сам узел, если он выводится из схемы (см.
+ * `nextElementId`).
+ */
+const ACTION_FORM_FIELDS = [
+  { name: 'id', label: 'Ключ кнопки (id):', placeholder: 'sendToSupplier' },
+  { name: 'label', label: 'Надпись на кнопке (label):', placeholder: 'Отправить заказ' },
+  { name: 'role', label: 'Роль участника (role):', placeholder: 'MANAGER', optionsKey: 'roles' },
+  { name: 'icon', label: 'Иконка (icon):', placeholder: 'Send' },
+  {
+    name: 'event',
+    label: `Событие при нажатии (event), пусто — ${DEFAULT_ACTION_EVENT}:`,
+    placeholder: DEFAULT_ACTION_EVENT,
+  },
+  {
+    name: 'elementId',
+    label: 'Узел после нажатия (elementId), пусто — следующий блок:',
+    placeholder: 'Task_Next',
+    optionsKey: 'elements',
+  },
+  {
+    name: 'counterpartEvent',
+    label: 'Событие второй стороны (counterpartEvent):',
+    placeholder: 'SupplierShippedSignal',
+  },
+  {
+    name: 'counterpartElementId',
+    label: 'Узел второй стороны (counterpartElementId):',
+    placeholder: 'Task_ReceiveDocsAndIssuePass',
+    optionsKey: 'elements',
+  },
+  {
+    name: 'startsProcess',
+    label: 'Запускаемый процесс (startsProcess):',
+    placeholder: 'Process_Supplier',
+    optionsKey: 'processes',
+  },
+];
+
+/**
  * Инспектор узлов схемы: выбор узла и правка его идентификатора/названия.
  *
  * Идентификатор узла — это тот самый `element_id`, которым движок адресует
@@ -191,7 +367,7 @@ function TriggerField({
  * Компонент не зависит от `bpmn-js` — он работает с плоским списком узлов.
  *
  * @param {Object} props
- * @param {Array<{id: string, name: string, type: string}>} [props.elements]
+ * @param {Array<{id: string, name: string, type: string, actions?: Array<object>}>} [props.elements]
  *   узлы схемы (например, из `listFlowElements` или живого `elementRegistry`).
  * @param {string} [props.xml] схема-источник списка, если `elements` не передан.
  * @param {string|null} [props.selectedElementId] выбранный узел.
@@ -206,6 +382,9 @@ function TriggerField({
  *   которые можно запускать из узла (`trg:processTrigger/@targetProcessId`).
  * @param {(id: string, trigger: (Object|null)) => (boolean|void)} [props.onChangeTrigger]
  *   запись или снятие триггера запуска (`null` — снять); `false` или исключение => откат.
+ * @param {(id: string, actions: Array<object>) => (boolean|void)} [props.onChangeActions]
+ *   запись кнопок участников узла (`act:userAction`); `[]` — снять все;
+ *   `false` или исключение => откат.
  * @param {boolean} [props.disabled=false] только чтение.
  * @param {string} [props.title] заголовок панели.
  * @param {string} [props.className] дополнительные CSS-классы.
@@ -221,6 +400,7 @@ export function EnginePanel({
   onChangeRole,
   triggerTargets = [],
   onChangeTrigger,
+  onChangeActions,
   disabled = false,
   title = 'Инспектор узла (GUI настройки идентификатора и параметров)',
   className = '',
@@ -241,8 +421,10 @@ export function EnginePanel({
   const [draftName, setDraftName] = useState('');
   const [draftRole, setDraftRole] = useState(NO_ROLE_OPTION);
   const [draftTrigger, setDraftTrigger] = useState({ ownerId: null, trigger: EMPTY_TRIGGER });
+  const [draftActions, setDraftActions] = useState({ ownerId: null, actions: [] });
   const [errorMessage, setErrorMessage] = useState('');
   const [triggerError, setTriggerError] = useState('');
+  const [actionError, setActionError] = useState('');
 
   /** Фактическая роль узла (источник правды для поля роли). */
   const actualRole = resolveElementRole(selectedElement, xml);
@@ -260,6 +442,39 @@ export function EnginePanel({
 
   /** Ключ значения триггера: черновик сравнивается со схемой по значению. */
   const actualTriggerId = triggerKey(actualTrigger);
+
+  /**
+   * Фактические кнопки узла (источник правды для полей кнопок).
+   *
+   * Мемоизация, как и у триггера, нужна и по производительности: чтение из
+   * XML разбирает всю схему, а рендеров у панели много.
+   */
+  const actualActions = useMemo(
+    () => resolveElementActions(selectedElement, xml),
+    [selectedElement, xml]
+  );
+
+  /** Ключ значения кнопок: черновик сравнивается со схемой по значению. */
+  const actualActionsKey = actionsKey(actualActions);
+
+  /**
+   * Узел, который кнопка выберет по умолчанию.
+   *
+   * Пустое поле «Узел после нажатия» читается как «следующий блок по схеме»
+   * (`getNextElementId` — цель единственной исходящей связи). Значение
+   * показывается подсказкой в поле, чтобы «не заполнено» не выглядело как
+   * потерянное поле. `''`, если схема-источник не передана (панель работает на
+   * живом реестре редактора) или связь неоднозначна — тогда подсказка
+   * статичная, а узел придётся указать руками.
+   */
+  const nextElementId = useMemo(
+    () => (selectedElement ? getNextElementId(xml, selectedElement.id) : ''),
+    [selectedElement, xml]
+  );
+
+  /** Подсказка-пример поля кнопки: у узла — вывод из схемы, у остальных — её своя. */
+  const actionFieldPlaceholder = (field) =>
+    field.name === 'elementId' && nextElementId !== '' ? nextElementId : field.placeholder;
 
   /** Ключ узла-владельца: при смене узла черновики сбрасываются. */
   const ownerKey = selectedElement ? selectedElement.id : '';
@@ -299,6 +514,16 @@ export function EnginePanel({
     );
     setTriggerError('');
   }, [ownerKey, actualTrigger, actualTriggerId]);
+
+  // Кнопки синхронизируются так же — по значению и по узлу-владельцу.
+  useEffect(() => {
+    setDraftActions((current) =>
+      current.ownerId === ownerKey && actionsKey(current.actions) === actualActionsKey
+        ? current
+        : { ownerId: ownerKey, actions: actualActions }
+    );
+    setActionError('');
+  }, [ownerKey, actualActions, actualActionsKey]);
 
   // Узел исчез из схемы (например, загружена другая версия) — снимаем выбор.
   useEffect(() => {
@@ -462,6 +687,105 @@ export function EnginePanel({
     }
   };
 
+  /** Передаёт кнопки владельцу схемы; при отказе возвращает поля к схеме. */
+  const applyActions = (actions) => {
+    let applied = true;
+    try {
+      applied =
+        typeof onChangeActions === 'function'
+          ? onChangeActions(selectedElement.id, actions) !== false
+          : true;
+    } catch (e) {
+      applied = false;
+    }
+
+    if (!applied) {
+      setActionError('Не удалось записать кнопки — изменение отменено.');
+      setDraftActions({ ownerId: ownerKey, actions: actualActions });
+    }
+
+    return applied;
+  };
+
+  /**
+   * Правка поля кнопки.
+   *
+   * В схему список уходит целиком, как только все кнопки списка допустимы: у
+   * кнопки обязательны ключ и надпись, а событие и узел схема выводит сама
+   * (пустые поля — это «шаг выполнен» и следующий блок по связи). Недопустимые
+   * значения подсвечиваются, а черновик остаётся в форме — в отличие от
+   * триггера, недописанная кнопка не откатывается, иначе набор новой кнопки
+   * стирался бы на первом же уходе из поля.
+   */
+  const handleActionChange = (index, field, value) => {
+    if (!selectedElement || typeof onChangeActions !== 'function') return;
+
+    const next = draftActions.actions.map((action, position) =>
+      position === index ? { ...action, [field]: value } : action
+    );
+
+    setDraftActions({ ownerId: ownerKey, actions: next });
+    setActionError('');
+
+    const fieldError = actionFieldError(field, value);
+    if (fieldError) {
+      setActionError(fieldError);
+      return;
+    }
+
+    if (next.some((action) => !isValidAction(action))) {
+      setActionError(ACTION_INCOMPLETE_ERROR);
+      return;
+    }
+
+    applyActions(next);
+  };
+
+  /**
+   * Добавляет кнопку.
+   *
+   * Кнопка уходит в схему сразу: ключ и надпись форма заполняет сама, а событие
+   * и узел схема выводит из связей (пустые поля = «шаг выполнен» и следующий
+   * блок). Отдельного «черновика, который ждёт заполнения», как у кнопки с
+   * обязательными `event`/`elementId`, больше нет: список кнопок в форме и в
+   * схеме совпадают — как и при правке поля.
+   */
+  const handleAddAction = () => {
+    if (!selectedElement || typeof onChangeActions !== 'function') return;
+
+    const next = [
+      ...draftActions.actions,
+      { ...EMPTY_ACTION, id: nextActionId(draftActions.actions), label: 'Новая кнопка' },
+    ];
+
+    setDraftActions({ ownerId: ownerKey, actions: next });
+    setActionError('');
+
+    if (next.some((action) => !isValidAction(action))) {
+      setActionError(ACTION_INCOMPLETE_ERROR);
+      return;
+    }
+
+    applyActions(next);
+  };
+
+  /** Удаляет кнопку узла и сразу пишет сокращённый список в схему. */
+  const handleRemoveAction = (index) => {
+    if (!selectedElement || typeof onChangeActions !== 'function') return;
+
+    const next = draftActions.actions.filter((action, position) => position !== index);
+
+    setDraftActions({ ownerId: ownerKey, actions: next });
+    setActionError('');
+
+    if (next.some((action) => !isValidAction(action))) {
+      setActionError(ACTION_INCOMPLETE_ERROR);
+      return;
+    }
+
+    applyActions(next);
+  };
+
   const idInvalid = Boolean(errorMessage);
   const idFieldDisabled = disabled || !selectedElement;
 
@@ -491,6 +815,30 @@ export function EnginePanel({
         .filter(Boolean),
     [triggerTargets]
   );
+
+  // Кнопки участников: хостом может быть только узел потока (движок активирует
+  // его токеном), и записывать их должен уметь владелец схемы.
+  const actionsSupported = Boolean(selectedElement && isActionHostType(selectedElement.type));
+  const actionsDisabled =
+    idFieldDisabled || !actionsSupported || typeof onChangeActions !== 'function';
+
+  /** Значения полей формы кнопок (черновик, а не схема). */
+  const actions = draftActions.actions;
+
+  /** Подсказки-идентификаторы узлов схемы для полей «Узел после нажатия». */
+  const elementIdChoices = useMemo(
+    () => flowElements.map((element) => element.id).filter(Boolean),
+    [flowElements]
+  );
+
+  /** Подсказки для поля кнопки по источнику (`optionsKey` в `ACTION_FORM_FIELDS`). */
+  const actionFieldOptions = (optionsKey) => {
+    if (optionsKey === 'roles') return roleChoices;
+    if (optionsKey === 'elements') return elementIdChoices;
+    if (optionsKey === 'processes') return triggerTargetChoices;
+
+    return [];
+  };
 
   return (
     <div className={['bpmn-sdk-panel', className].filter(Boolean).join(' ')}>
@@ -604,7 +952,7 @@ export function EnginePanel({
         </h6>
 
         <div className="bpmn-sdk-panel__grid">
-          <TriggerField
+          <OptionField
             id={`${baseId}-trigger-target`}
             label="Запускаемый процесс (targetProcessId):"
             value={trigger.targetProcessId}
@@ -616,7 +964,7 @@ export function EnginePanel({
             onBlur={handleTriggerBlur}
           />
 
-          <TriggerField
+          <OptionField
             id={`${baseId}-trigger-prefix`}
             label="Префикс экземпляра (instancePrefix):"
             value={trigger.instancePrefix}
@@ -627,7 +975,7 @@ export function EnginePanel({
             onBlur={handleTriggerBlur}
           />
 
-          <TriggerField
+          <OptionField
             id={`${baseId}-trigger-first`}
             label="Первый узел целевого процесса (firstElementId):"
             value={trigger.firstElementId}
@@ -638,7 +986,7 @@ export function EnginePanel({
             onBlur={handleTriggerBlur}
           />
 
-          <TriggerField
+          <OptionField
             id={`${baseId}-trigger-start`}
             label="Узел-источник (startElementId):"
             value={trigger.startElementId}
@@ -649,7 +997,7 @@ export function EnginePanel({
             onBlur={handleTriggerBlur}
           />
 
-          <TriggerField
+          <OptionField
             id={`${baseId}-trigger-payload`}
             label="Ключи payload через запятую (payloadKeys):"
             value={trigger.payloadKeys}
@@ -668,6 +1016,71 @@ export function EnginePanel({
             {selectedElement && !triggerSupported
               ? 'Триггер запуска ставится только на узлы потока: последовательный поток движок токеном не активирует.'
               : 'Когда токен активирует узел, движок стартует экземпляр процесса из «Запускаемый процесс»: узлы «Первый узел» и «Узел-источник» задают, с какого шага начать и по какому шагу считать источник, а «Ключи payload» — какие поля контекста передать. Пустое поле «Запускаемый процесс» снимает триггер.'}
+          </p>
+        )}
+      </div>
+
+      <div className="bpmn-sdk-panel__section">
+        <h6 className="bpmn-sdk-panel__subtitle">
+          Кнопки участников на узле (act:userAction)
+        </h6>
+
+        {actions.length === 0 ? (
+          <p className="bpmn-sdk-panel__hint">У узла нет кнопок участников.</p>
+        ) : (
+          actions.map((action, index) => (
+            <div
+              className="bpmn-sdk-panel__item"
+              key={`${baseId}-action-${index}-${action.id || 'new'}`}
+            >
+              <div className="bpmn-sdk-panel__grid">
+                {ACTION_FORM_FIELDS.map((field) => (
+                  <OptionField
+                    key={`${baseId}-action-${index}-${field.name}`}
+                    id={`${baseId}-action-${index}-${field.name}`}
+                    label={field.label}
+                    value={action[field.name]}
+                    disabled={actionsDisabled}
+                    invalid={Boolean(actionFieldError(field.name, action[field.name]))}
+                    placeholder={actionFieldPlaceholder(field)}
+                    options={actionFieldOptions(field.optionsKey)}
+                    onChange={(value) => handleActionChange(index, field.name, value)}
+                  />
+                ))}
+
+                <div className="bpmn-sdk-panel__field">
+                  <button
+                    type="button"
+                    className="bpmn-sdk-panel__button bpmn-sdk-panel__button--danger"
+                    disabled={actionsDisabled}
+                    onClick={() => handleRemoveAction(index)}
+                  >
+                    Удалить кнопку
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+
+        <div className="bpmn-sdk-panel__field">
+          <button
+            type="button"
+            className="bpmn-sdk-panel__button"
+            disabled={actionsDisabled}
+            onClick={handleAddAction}
+          >
+            Добавить кнопку
+          </button>
+        </div>
+
+        {actionError ? (
+          <p className="bpmn-sdk-panel__error">{actionError}</p>
+        ) : (
+          <p className="bpmn-sdk-panel__hint">
+            {selectedElement && !actionsSupported
+              ? 'Кнопка ставится только на узлы потока: последовательный поток движок токеном не активирует.'
+              : `Кнопка описывает шаг участника: надпись и иконку рисует кабинет, «Событие» и «Узел после нажатия» уходят движку. Оба поля можно не заполнять: пустое «Событие» — это «шаг выполнен» (${DEFAULT_ACTION_EVENT}), пустой «Узел» — следующий блок по единственной исходящей связи (в развилке узел придётся указать — там схема его не выводит). «Роль участника» нужна там, где роль узла задать нельзя (у событий нет resourceRole), «Событие/Узел второй стороны» — сигнал в экземпляр соседа по заказу, «Запускаемый процесс» — старт процесса второй стороны.`}
           </p>
         )}
       </div>
