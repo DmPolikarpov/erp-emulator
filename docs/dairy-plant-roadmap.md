@@ -62,7 +62,7 @@
 
 | # | Разрыв | Как видно в демо | Где чинится | Этап |
 | --- | --- | --- | --- | --- |
-| 1 | Движок не исполняет граф: `parse_and_compile` вызывается только для сохранения определения, `Engine` создан и не используется; токен ставится по `element_id` из события | следующий шаг выбирает нажатая кнопка | [`bpmn-engine/src/main.rs`](../../bpmn-engine/src/main.rs), крейт `bpm-engine` | M1 |
+| 1 | Движок не исполняет граф: `parse_and_compile` вызывается только для сохранения определения, `BpmEngine` не запускается; токен ставится по `element_id` из события | следующий шаг выбирает нажатая кнопка | [`bpmn-engine/src/main.rs`](../../bpmn-engine/src/main.rs), вендорный крейт `bpmn-engine/vendor/bpm-engine` | M1 |
 | 2 | У шлюзов нет `conditionExpression` — только подписи «Да/Нет/Годная/…» | решение принимает человек | [`dairyPlant.js`](../src/bpmn-sdk/defaults/dairyPlant.js) + M1 | M1 |
 | 3 | Продвижение по ответу ERP захардкожено в `match element_id` | двигаются только `ServiceTask_ValidateOrder` / `ServiceTask_ReserveStock` | `main.rs` | M2 |
 | 4 | Нет воркеров для `serviceTask` | `Task_ERP_*` — обычные `userTask` | контракт воркера + шина | M2 |
@@ -77,14 +77,19 @@
 
 ### M1. Маршрутизация по графу — P0, L
 
+**Статус:** шаг 0 сделан (21.10.2026) — вендорная копия `bpm-engine 0.2.0`
+(коммит `0592996`) с тремя патчами и тестами
+[`vendor_patches.rs`](../../bpmn-engine/tests/vendor_patches.rs); маршрут
+по-прежнему считает клиент.
+
 **Зачем.** Пока следующий шаг приходит в событии, любая кнопка уводит токен куда угодно:
 шлюзы нарисованы, но не решают, а «Нет» на пастеризации вообще обходится кнопкой аварии.
 Демо должно показывать, что маршрут определяется схемой, а не UI.
 
 **Задачи.**
 
-- [ ] Задействовать `bpm_engine_runtime::Engine` (сейчас создан и не используется): на вход —
-      завершённый узел и payload, на выходе — следующий узел/узлы и статус экземпляра.
+- [ ] Запустить `BpmEngine` в `main.rs` (вендор подключён, но события в него не идут):
+      на вход — завершённый узел и payload, на выходе — следующий узел/узлы и статус экземпляра.
 - [ ] Разбирать `conditionExpression` и `default`-поток шлюза; сейчас у потоков есть только
       подписи «Да/Нет/Годная», условий нет.
 - [ ] `main.rs`: если клиент не прислал `next_element_id`, брать следующий узел из движка;
@@ -106,8 +111,9 @@
 - Rust-тест на маршрут по каждому из пяти шлюзов демо-проекта.
 
 **Файлы:** [`bpmn-engine/src/main.rs`](../../bpmn-engine/src/main.rs),
-[`bpmn-engine/src/db.rs`](../../bpmn-engine/src/db.rs), крейт `bpm-engine` (внешняя
-зависимость `0.2.0`, [`Cargo.toml`](../../bpmn-engine/Cargo.toml)),
+[`bpmn-engine/src/db.rs`](../../bpmn-engine/src/db.rs), вендорная копия
+[`bpmn-engine/vendor/bpm-engine`](../../bpmn-engine/vendor/bpm-engine)
+(провенанс и патчи — `VENDORED_FROM.md`),
 [`App.jsx`](../src/App.jsx),
 [`dairyPlant.js`](../src/bpmn-sdk/defaults/dairyPlant.js).
 
