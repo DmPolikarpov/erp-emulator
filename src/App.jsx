@@ -2,23 +2,28 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BpmnEditor,
   BpmnViewer,
+  DEFAULT_ACTION_EVENT,
   DEFAULT_CUSTOMER_BPMN_XML,
   DEFAULT_GATEWAY_URL,
+  DEFAULT_PROJECT_BPMN_XML,
   DEFAULT_SUPPLIER_BPMN_XML,
   ENGINE_EVENTS,
   INSTANCE_PREFIX,
   SOCKET_EVENTS,
   TOKEN_STATES,
   createUuid,
+  extractProcessXml,
   getElementRole,
   getLocalName,
   getOutgoingTargetIds,
   getProcessIds,
+  getProjectProcesses,
   getStartAction,
   isDeployInstanceId,
   listActions,
   listFlowElements,
   parseXml,
+  replaceProcessXml,
   resolveAction,
   useBpmnEngine,
   useProcessTokens,
@@ -28,10 +33,10 @@ import {
   Truck, ShieldCheck, ClipboardCheck, FileText, Upload, Send, 
   LogOut, History, KeyRound, Layers, PlusCircle, BarChart2,
   PackageCheck, Clock, CheckCircle2, Loader2, AlertCircle, Pencil,
-  Save, RotateCcw
+  Save, RotateCcw, FolderOpen, FolderPlus, Trash2, ArrowLeft, Play
 } from 'lucide-react';
 import { MetricsPanel } from './MetricsPanel';
-import { ROLE_CODES, USERS } from './roles';
+import { CONTOUR_LABELS, analyzeProject, findUser } from './projectRoles';
 import {
   beginRun,
   clearRuns,
@@ -40,17 +45,26 @@ import {
   loadRuns,
 } from './metricsStore';
 import {
-  clearSchema,
-  formatSavedAt,
-  loadSchema,
-  saveSchema,
-} from './schemaStore';
+  MEMORY_PROJECT_ID,
+  createProject,
+  deleteProject,
+  ensureDefaultProject,
+  formatProjectSavedAt,
+  listProjects,
+  setActiveProjectId,
+  updateProject,
+} from './projectStore';
 
 // Базовый URL API Gateway: `REACT_APP_GATEWAY_URL` (см. `.env`) либо
 // относительный путь — тогда запросы идут через CRA-прокси (`package.json`).
 const API_BASE_URL = DEFAULT_GATEWAY_URL;
 
-/** Демо-схемы SDK по организациям — точка отсчёта правок в редакторе. */
+/**
+ * Демо-схемы SDK по контурам — точка отсчёта кнопки «Демо-схема».
+ *
+ * В проекте нарезки процессов строятся из общей схемы (`extractProcessXml`),
+ * а сброс одного контура возвращает его демо-процесс (`replaceProcessXml`).
+ */
 const DEFAULT_SCHEMA_BY_ORG = {
   CUSTOMER: DEFAULT_CUSTOMER_BPMN_XML,
   SUPPLIER: DEFAULT_SUPPLIER_BPMN_XML,
@@ -117,6 +131,58 @@ const ACTION_ICONS = {
 };
 
 /**
+ * Оформление кнопок экрана проектов.
+ *
+ * Инлайновые стили — как и во всём демо-кабинете: отдельного CSS-слоя у экрана
+ * нет, а цвет кнопки передаётся вызывающим кодом.
+ *
+ * @param {string} background цвет фона.
+ * @returns {Object} стиль кнопки.
+ */
+const projectButtonStyle = (background) => ({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '6px',
+  padding: '8px 14px',
+  backgroundColor: background,
+  color: '#fff',
+  border: 'none',
+  borderRadius: '8px',
+  fontSize: '13px',
+  fontWeight: '600',
+  cursor: 'pointer',
+});
+
+/**
+ * Пара «стартовое событие + первый шаг» для схемы без кнопки инициатора.
+ *
+ * Демо-сценарий объявляет запуск кнопкой на стартовом событии
+ * (`act:userAction`), но загруженный BPMN может её и не иметь. Движку для
+ * старта достаточно стартового события и узла, на который встанет токен:
+ * у события одна исходящая связь, поэтому первый шаг выводится из схемы.
+ *
+ * @param {string} xml схема процесса.
+ * @returns {{elementId: string, action: object}|null} описание запуска.
+ */
+const synthStartStep = (xml) => {
+  const start = listFlowElements(xml).find((element) => /startEvent$/i.test(element.type));
+  if (!start) return null;
+
+  return {
+    elementId: start.id,
+    action: {
+      id: 'startProcess',
+      label: 'Запустить процесс',
+      role: '',
+      // Событие шага — то же, что у кнопки «шаг выполнен»: движок имя события
+      // не разбирает, токен двигает `elementId`.
+      event: DEFAULT_ACTION_EVENT,
+      elementId: getOutgoingTargetIds(xml, start.id)[0] || '',
+    },
+  };
+};
+
+/**
  * Кнопка действия участника.
  *
  * Надпись и иконка берутся из схемы (`act:userAction`), оформление — из `style`
@@ -141,14 +207,21 @@ function ActionButton({ action, onClick, style }) {
 }
 
 /**
- * Схема организации на старте приложения.
+ * Токены обеих сторон в одной подсветке.
  *
- * Приоритет у копии, сохранённой в браузере (`src/schemaStore.js`): правки
- * редактора переживают перезагрузку страницы. Если копии нет — демо-схема SDK.
- * Читаем кэш лениво (`useState(() => ...)`), то есть ровно один раз при
- * монтировании, а не на каждый рендер.
+ * Просмотрщик показывает проект целиком (оба процесса), а токены приходят по
+ * экземплярам: у Заказчика и Поставщика они разные. Карта `elementId → state`
+ * у сторон не пересекается (идентификаторы узлов в BPMN уникальны), поэтому
+ * карты просто складываются.
+ *
+ * @param {Object} customerTokens токены экземпляра Заказчика.
+ * @param {Object} supplierTokens токены экземпляра Поставщика.
+ * @returns {Object<string, string>} общая карта подсветки.
  */
-const initialSchemaXml = (org) => loadSchema(org)?.xml || DEFAULT_SCHEMA_BY_ORG[org];
+const mergeTokens = (customerTokens, supplierTokens) => ({
+  ...(customerTokens || {}),
+  ...(supplierTokens || {}),
+});
 
 /**
  * Двигал ли токен «текущий шаг» процесса.
@@ -316,22 +389,51 @@ const activeStepOf = (order, org) =>
   (org === 'SUPPLIER' ? order?.supplierActiveElementId : order?.customerActiveElementId) || '';
 
 export default function App() {
+  // Проект — одна BPMN-схема с процессами обеих сторон. Правки редактора живут
+  // в `projectXml`, а `savedProject` — сохранённая копия (бейдж «Сохранено»).
+  const [project, setProject] = useState(() => ensureDefaultProject());
+  const [projectXml, setProjectXml] = useState(() => project.xml);
+  const [savedProject, setSavedProject] = useState(() => project);
+  const [projects, setProjects] = useState(() => listProjects());
+  // Экран до входа: 'login' — карточки ролей проекта, 'projects' — список
+  // проектов (создание, импорт BPMN, удаление).
+  const [screen, setScreen] = useState('login');
+
   const [currentUser, setCurrentUser] = useState(null);
   const [loginInput, setLoginInput] = useState('production');
   const [passwordInput, setPasswordInput] = useState('123');
   const [authError, setAuthError] = useState('');
 
-  // Схема стороны: копия из браузера (если редактор её сохранял) либо демо-схема.
-  const [customerBpmnXml, setCustomerBpmnXml] = useState(() => initialSchemaXml('CUSTOMER'));
-  const [supplierBpmnXml, setSupplierBpmnXml] = useState(() => initialSchemaXml('SUPPLIER'));
+  // Роли и процессы — из схемы проекта: отдельного списка пользователей в коде
+  // больше нет, поэтому загруженный BPMN сразу даёт состав ролей для входа.
+  const analysis = useMemo(() => analyzeProject(projectXml), [projectXml]);
+  const processes = analysis.processes;
 
-  // Сохранённые в браузере копии схем по организациям: из них складывается
-  // бейдж «Сохранено в …» и индикатор несохранённых правок.
-  const [savedSchemas, setSavedSchemas] = useState(() => ({
-    CUSTOMER: loadSchema('CUSTOMER'),
-    SUPPLIER: loadSchema('SUPPLIER'),
-  }));
-  
+  // Нарезки процессов: движок адресует только первый `bpmn:process`, поэтому
+  // деплой, старт и метрики работают с процессом контура, а не с проектом.
+  const customerProcess = processes.find((process) => process.org === 'CUSTOMER') || null;
+  const supplierProcess = processes.find((process) => process.org === 'SUPPLIER') || null;
+
+  const customerBpmnXml = useMemo(
+    () => extractProcessXml(projectXml, customerProcess ? customerProcess.id : ''),
+    [projectXml, customerProcess]
+  );
+  const supplierBpmnXml = useMemo(
+    () => extractProcessXml(projectXml, supplierProcess ? supplierProcess.id : ''),
+    [projectXml, supplierProcess]
+  );
+
+  /** Правка одного контура в проекте (кнопка «Демо-схема»). */
+  const setOrgSchema = useCallback(
+    (org, xml) => {
+      const process = org === 'SUPPLIER' ? supplierProcess : customerProcess;
+      if (!process) return;
+
+      setProjectXml((previous) => replaceProcessXml(previous, process.id, xml));
+    },
+    [customerProcess, supplierProcess]
+  );
+
   // SDK: HTTP-клиент API Gateway и WS-подписка на токены процесса
   // (реконнект, парсинг кадров и жизненный цикл соединения — внутри SDK).
   const { client, socket, connected: wsConnected } = useBpmnEngine();
@@ -519,7 +621,7 @@ export default function App() {
    */
   const startProcess = useCallback(
     async (instanceId, bpmnXml, payload = {}) => {
-      const declaration = startStepOf(bpmnXml);
+      const declaration = startStepOf(bpmnXml) || synthStartStep(bpmnXml);
 
       // Схема без кнопки запуска процесс не описывает: движку нечего назвать
       // первым шагом — у стартового события нет ни события шага, ни узла.
@@ -613,15 +715,22 @@ export default function App() {
   }, []);
 
   /**
-   * Пишет схему организации в кэш браузера (`localStorage`).
+   * Сохраняет проект в браузере (`localStorage`).
    *
-   * Возвращает запись либо `null`: хранилище может быть недоступно
-   * (приватный режим, переполненная квота) — тогда правки остаются только в
-   * состоянии React, и текущая сессия работает как раньше.
+   * Возвращает запись либо `null`: хранилище может быть недоступно (приватный
+   * режим, переполненная квота) — тогда правки остаются только в состоянии
+   * React, и текущая сессия работает как раньше.
    */
-  const cacheBpmnSchema = (orgType, xmlData) => {
-    const record = saveSchema(orgType, xmlData);
-    if (record) setSavedSchemas((prev) => ({ ...prev, [orgType]: record }));
+  const persistProject = (xmlData) => {
+    if (!project || project.id === MEMORY_PROJECT_ID) return null;
+
+    const record = updateProject(project.id, { xml: xmlData });
+    if (record) {
+      setProject(record);
+      setSavedProject(record);
+      setProjects(listProjects());
+    }
+
     return record;
   };
 
@@ -646,7 +755,7 @@ export default function App() {
     if (result.ok) {
       // Деплой обновляет и копию в браузере: определение процесса в кластере и
       // схема, которую показывает кабинет, не должны расходиться после F5.
-      cacheBpmnSchema(orgType, xmlData);
+      persistProject(projectXml);
       logEvent(orgType, 'ALL', 'Схема задеплоена', `Руководитель задеплоил новую конфигурацию схемы ${orgType} в кластер.`);
       alert(`Схема ${orgType} успешно передана в оркестратор!`);
     } else {
@@ -777,6 +886,76 @@ export default function App() {
       logEvent('SYSTEM', 'ALL', 'Событие Оркестратора', `Инстанс ${instanceId} -> Узел: ${elementId || '—'} [Статус: ${state}]`);
     });
   }, [socket, logEvent, schemaXml]);
+
+  /**
+   * Запуск процесса по схеме, когда кнопки инициатора в ней нет.
+   *
+   * Кнопка `createOrder` — принадлежность демо-сценария закупки. В загруженном
+   * BPMN её может не быть, но отыграть процесс всё равно нужно: экземпляр
+   * стартует со стартового события схемы, а токен встаёт на первый узел
+   * (`startProcess` выводит пару из связей, см. `synthStartStep`).
+   */
+  const handleStartBySchema = async () => {
+    const org = currentUser.org;
+    const xml = schemaXml(org);
+    if (!xml) return;
+
+    const orderNum = `№${101 + orders.length}`;
+    const suffix = Math.random().toString(36).substring(2, 8);
+    const instanceId =
+      org === 'SUPPLIER'
+        ? `${INSTANCE_PREFIX.SUPPLIER}${suffix}`
+        : `${INSTANCE_PREFIX.CUSTOMER}${suffix}`;
+    const isCustomer = org === 'CUSTOMER';
+
+    setActionLoading(prev => ({ ...prev, [orderNum]: 'Запуск процесса в оркестраторе...' }));
+    setActionErrors(prev => ({ ...prev, [orderNum]: null }));
+
+    const { start, step } = await startProcess(instanceId, xml, { orderNum });
+
+    if (!start.ok) {
+      setActionLoading(prev => ({ ...prev, [orderNum]: null }));
+      setActionErrors(prev => ({ ...prev, [orderNum]: 'Не удалось запустить процесс. Попробуйте еще раз.' }));
+      return;
+    }
+
+    const declaration = startStepOf(xml) || synthStartStep(xml);
+    const activeElementId = declaration ? declaration.action.elementId : '';
+
+    setOrders(prev => {
+      if (prev.some((order) => order.customerInstanceId === instanceId || order.supplierInstanceId === instanceId)) {
+        return prev;
+      }
+
+      return [
+        {
+          id: orderNum,
+          createdAt: new Date().toLocaleTimeString('ru-RU'),
+          volume: '—',
+          customerInstanceId: isCustomer ? instanceId : null,
+          customerActiveElementId: isCustomer ? activeElementId : null,
+          customerProcessState: isCustomer ? 'ACTIVE' : 'IDLE',
+          supplierInstanceId: isCustomer ? null : instanceId,
+          supplierActiveElementId: isCustomer ? null : activeElementId,
+          supplierProcessState: isCustomer ? 'IDLE' : 'ACTIVE',
+        },
+        ...prev,
+      ];
+    });
+    setSelectedOrderId(orderNum);
+
+    logEvent(
+      org,
+      currentUser.role,
+      'Процесс запущен',
+      `Экземпляр ${instanceId} создан по схеме «${processTitleOf(xml)}».`,
+      orderNum
+    );
+
+    if (step && !step.ok) {
+      logEvent(org, 'ALL', 'Токен не встал на первый шаг', `Узел ${activeElementId || '—'} остался без подсветки: движок держит токен на стартовом событии.`, orderNum);
+    }
+  };
 
   // 1. ТОЧКА ВХОДА: Создание заказа Производством. Кнопку инициатора — надпись,
   // роль, событие первого шага — объявляет стартовое событие схемы, поэтому в
@@ -1188,8 +1367,8 @@ export default function App() {
    * Кнопка «Очистить» инфографики: забывает сохранённые метрики процессов.
    *
    * Чистится именно хранилище браузера, а не состояние React: метрика — не
-   * журнал событий, и её данные не должны всплывать после F5. Кэш схем лежит
-   * под другим ключом (`src/schemaStore.js`) и очисткой не затрагивается.
+   * журнал событий, и её данные не должны всплывать после F5. Проект лежит под
+   * другим ключом (`src/projectStore.js`) и очисткой не затрагивается.
    */
   const handleClearMetrics = () => {
     clearRuns();
@@ -1198,9 +1377,91 @@ export default function App() {
     logEvent('SYSTEM', 'ALL', 'Метрики очищены', 'Сохранённые метрики выполненных процессов удалены из браузера.');
   };
 
+  /** Открывает проект: его схема становится рабочей, вход — по его ролям. */
+  const openProject = (record) => {
+    if (!record) return;
+
+    setActiveProjectId(record.id);
+    setProject(record);
+    setSavedProject(record);
+    setProjectXml(record.xml);
+    setProjects(listProjects());
+    setCurrentUser(null);
+    setScreen('login');
+    setOrders([]);
+    setSelectedOrderId(null);
+  };
+
+  /** Создаёт проект из схемы и сразу открывает его. */
+  const handleCreateProject = (xml, name) => {
+    const created = createProject({ xml, name });
+
+    if (!created) {
+      alert('Не удалось создать проект: браузер не дал сохранить схему.');
+      return null;
+    }
+
+    openProject(created);
+    return created;
+  };
+
+  /** Новый проект на основе демо-схемы SDK. */
+  const handleCreateDefaultProject = () => {
+    handleCreateProject(DEFAULT_PROJECT_BPMN_XML, `Проект ${projects.length + 1}`);
+  };
+
+  /**
+   * Импорт BPMN-файла как проекта.
+   *
+   * Роли, процессы и кабинет выводятся из схемы (`analyzeProject`), поэтому
+   * загрузить можно любой BPMN: клиент покажет те роли, что объявлены в нём.
+   */
+  const handleImportProject = (event) => {
+    const input = event.target;
+    const file = input.files && input.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const xml = String(reader.result || '');
+
+      if (!parseXml(xml)) {
+        alert('Файл не является BPMN-схемой: XML не разбирается.');
+        return;
+      }
+
+      if (getProjectProcesses(xml).length === 0) {
+        alert('В схеме нет ни одного bpmn:process — отыгрывать нечего.');
+        return;
+      }
+
+      const name = file.name.replace(/\.bpmn(\.xml)?$/i, '').replace(/\.xml$/i, '') || 'Импорт';
+      handleCreateProject(xml, name);
+    };
+
+    reader.readAsText(file);
+    input.value = '';
+  };
+
+  const handleDeleteProject = (projectId) => {
+    if (!projectId) return;
+
+    deleteProject(projectId);
+    const rest = listProjects();
+    setProjects(rest);
+
+    if (!project || project.id !== projectId) return;
+
+    // Удалили открытый проект: открываем следующий, иначе — демо-проект, чтобы
+    // приложение не осталось без схемы (вход и кабинет живут по ней).
+    openProject(rest[0] || ensureDefaultProject());
+  };
+
   const handleLogin = (e) => {
     e.preventDefault();
-    const found = USERS.find(u => u.username === loginInput && u.pass === passwordInput);
+    const found = findUser(analysis.roles, loginInput, passwordInput);
+
     if (found) {
       setCurrentUser(found);
       setAuthError('');
@@ -1231,11 +1492,99 @@ export default function App() {
     document.addEventListener('mouseup', onMouseUp);
   };
 
+  if (screen === 'projects') {
+    return (
+      <div style={{ minHeight: '100vh', backgroundColor: '#0f172a', fontFamily: 'system-ui, sans-serif', padding: '32px' }}>
+        <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', gap: '12px', flexWrap: 'wrap' }}>
+            <div>
+              <h2 style={{ margin: 0, color: '#f8fafc', fontSize: '22px' }}>📁 Проекты</h2>
+              <p style={{ margin: '4px 0 0 0', color: '#94a3b8', fontSize: '13px' }}>
+                Проект — одна BPMN-схема с процессами сторон. Роли и кабинеты собираются из неё.
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button onClick={handleCreateDefaultProject} style={projectButtonStyle('#2563eb')}>
+                <FolderPlus size={16} /> Новый проект
+              </button>
+
+              <label style={{ ...projectButtonStyle('#0f766e'), cursor: 'pointer' }}>
+                <Upload size={16} /> Импорт BPMN
+                <input
+                  type="file"
+                  accept=".bpmn,.xml,application/xml,text/xml"
+                  onChange={handleImportProject}
+                  data-testid="project-import"
+                  style={{ display: 'none' }}
+                />
+              </label>
+
+              {analysis.roles.length > 0 && (
+                <button onClick={() => setScreen('login')} style={projectButtonStyle('#475569')}>
+                  <ArrowLeft size={16} /> К ролям
+                </button>
+              )}
+            </div>
+          </div>
+
+          {projects.map((item) => {
+            const info = analyzeProject(item.xml);
+            const savedAt = formatProjectSavedAt(item.updatedAt);
+            const organizations = info.processes.map((process) => process.orgName).join(' ↔ ');
+
+            return (
+              <div
+                key={item.id}
+                style={{ backgroundColor: '#fff', borderRadius: '12px', padding: '16px 20px', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}
+              >
+                <div>
+                  <div style={{ fontSize: '15px', fontWeight: '700', color: '#0f172a' }}>{item.name}</div>
+                  <div style={{ fontSize: '12px', color: '#64748b' }}>
+                    {organizations || 'процессов нет'} · ролей: {info.roles.length}
+                    {savedAt ? ` · изменён в ${savedAt}` : ''}
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button onClick={() => openProject(item)} style={projectButtonStyle('#2563eb')}>
+                    <FolderOpen size={15} /> Открыть
+                  </button>
+                  <button onClick={() => handleDeleteProject(item.id)} style={projectButtonStyle('#b91c1c')}>
+                    <Trash2 size={15} /> Удалить
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+
+          {projects.length === 0 && (
+            <p style={{ color: '#94a3b8', fontSize: '13px' }}>
+              Проектов пока нет: создайте демо-проект или импортируйте BPMN-файл.
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (!currentUser) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', backgroundColor: '#0f172a', fontFamily: 'system-ui, sans-serif' }}>
-        <div style={{ backgroundColor: '#fff', padding: '32px', borderRadius: '16px', width: '100%', maxWidth: '480px', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)' }}>
-          <div style={{ textAlign: 'center', marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', backgroundColor: '#0f172a', fontFamily: 'system-ui, sans-serif', padding: '24px', boxSizing: 'border-box' }}>
+        <div style={{ backgroundColor: '#fff', padding: '32px', borderRadius: '16px', width: '100%', maxWidth: '520px', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
+            <span style={{ fontSize: '12px', color: '#64748b' }}>
+              Проект: <strong style={{ color: '#0f172a' }}>{project.name}</strong>
+            </span>
+            <button
+              onClick={() => { setProjects(listProjects()); setScreen('projects'); }}
+              style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '4px 8px', fontSize: '12px', border: '1px solid #cbd5e1', borderRadius: '6px', backgroundColor: '#fff', cursor: 'pointer' }}
+            >
+              <FolderOpen size={13} /> Проекты
+            </button>
+          </div>
+
+          <div style={{ textAlign: 'center', marginBottom: '20px' }}>
             <h2 style={{ margin: '0 0 8px 0', color: '#0f172a', fontSize: '22px' }}>🥛 Межорганизационная ERP</h2>
             <p style={{ margin: 0, color: '#64748b', fontSize: '13px' }}>Выберите роль компании для входа</p>
           </div>
@@ -1253,33 +1602,51 @@ export default function App() {
             <button type="submit" style={{ padding: '12px', backgroundColor: '#2563eb', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', marginTop: '6px' }}>Войти в систему</button>
           </form>
 
-          <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid #e2e8f0' }}>
-            <span style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '8px', fontWeight: '600' }}>Быстрый доступ (пароль 123):</span>
-            
-            <div style={{ fontSize: '11px', color: '#1e3a8a', fontWeight: 'bold', marginBottom: '4px' }}>1. ЗАКАЗЧИК (Молочный Завод):</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginBottom: '10px' }}>
-              {USERS.filter(u => u.org === 'CUSTOMER').map(u => (
-                <button key={u.username} onClick={() => { setLoginInput(u.username); setPasswordInput(u.pass); setCurrentUser(u); setAuthError(''); }} style={{ padding: '6px 8px', fontSize: '11px', border: '1px solid #cbd5e1', borderRadius: '6px', cursor: 'pointer', textAlign: 'left', backgroundColor: u.role === 'PRODUCTION' ? '#fef3c7' : u.role === 'EXECUTIVE' ? '#dbeafe' : '#f8fafc' }}>
-                  {u.roleName}
-                </button>
-              ))}
+          {analysis.problems.map((problem) => (
+            <div key={problem} style={{ marginTop: '12px', padding: '8px 10px', backgroundColor: '#fffbeb', border: '1px solid #fde68a', borderRadius: '6px', color: '#92400e', fontSize: '12px' }}>
+              {problem}
             </div>
+          ))}
 
-            <div style={{ fontSize: '11px', color: '#166534', fontWeight: 'bold', marginBottom: '4px' }}>2. ПОСТАВЩИК (ООО «Альпийские Луга»):</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-              {USERS.filter(u => u.org === 'SUPPLIER').map(u => (
-                <button key={u.username} onClick={() => { setLoginInput(u.username); setPasswordInput(u.pass); setCurrentUser(u); setAuthError(''); }} style={{ padding: '6px 8px', fontSize: '11px', border: '1px solid #cbd5e1', borderRadius: '6px', cursor: 'pointer', textAlign: 'left', backgroundColor: u.role === 'SUPPLIER_EXECUTIVE' ? '#dcfce7' : '#f8fafc' }}>
-                  {u.roleName}
-                </button>
-              ))}
-            </div>
+          <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid #e2e8f0' }}>
+            <span style={{ fontSize: '12px', color: '#64748b', display: 'block', marginBottom: '8px', fontWeight: '600' }}>Роли проекта (пароль 123):</span>
+
+            {analysis.processes.map((process, index) => {
+              const processRoles = analysis.roles.filter((role) => role.processId === process.id);
+              if (processRoles.length === 0) return null;
+
+              return (
+                <div key={process.id}>
+                  <div style={{ fontSize: '11px', color: process.org === 'SUPPLIER' ? '#166534' : '#1e3a8a', fontWeight: 'bold', marginBottom: '4px' }}>
+                    {index + 1}. {CONTOUR_LABELS[process.org]} ({process.orgName}):
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginBottom: '10px' }}>
+                    {processRoles.map((role) => (
+                      <button
+                        key={role.key}
+                        onClick={() => { setLoginInput(role.username); setPasswordInput(role.pass); setCurrentUser(role); setAuthError(''); }}
+                        style={{ padding: '6px 8px', fontSize: '11px', border: '1px solid #cbd5e1', borderRadius: '6px', cursor: 'pointer', textAlign: 'left', backgroundColor: role.isExecutive ? '#dbeafe' : role.code === 'PRODUCTION' ? '#fef3c7' : '#f8fafc' }}
+                      >
+                        {role.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+
+            {analysis.roles.length === 0 && (
+              <p style={{ margin: 0, fontSize: '12px', color: '#b45309' }}>
+                В схеме не объявлено ролей: добавьте bpmn:potentialOwner на задачу или кнопку с ролью (act:userAction/@role).
+              </p>
+            )}
           </div>
         </div>
       </div>
     );
   }
 
-  const isExecutive = currentUser.role === 'EXECUTIVE' || currentUser.role === 'SUPPLIER_EXECUTIVE';
+  const isExecutive = Boolean(currentUser.isExecutive);
   const myNotifications = notifications.filter(n => n.role === 'ALL' || (n.org === currentUser.org && n.role === currentUser.role));
   const UserIcon = currentUser.icon;
   const currentOrder = orders.find(o => o.id === selectedOrderId) || orders[0] || null;
@@ -1342,7 +1709,13 @@ export default function App() {
       .filter((entry) => entry.elementId === activeElementId && entry.elementId !== startHostId)
       .map((entry) => resolveActionEntry(xml, entry))
       .filter((entry) => !KNOWN_ACTION_IDS.includes(entry.action.id))
-      .filter((entry) => currentUser.role === actionRoleOf(org, entry))
+      // Роль кнопки: своя (`act:userAction/@role`) либо роль узла. Шаг без роли —
+      // общая очередь: так ведут себя схемы, где роль не назначена ни задаче, ни
+      // кнопке, и загруженный BPMN можно отыграть без правок в редакторе.
+      .filter((entry) => {
+        const role = actionRoleOf(org, entry);
+        return !role || currentUser.role === role;
+      })
       .map((entry) => ({ ...entry, stepName: stepNames[entry.elementId] || entry.elementId }));
   })();
 
@@ -1352,42 +1725,48 @@ export default function App() {
 
   const currentOrg = currentUser.org;
   const currentSchemaXml = schemaXml(currentOrg);
-  const savedSchema = savedSchemas[currentOrg];
-  // Правки расходятся с сохранённой копией, а если копии ещё нет — с демо-схемой.
-  const isSchemaUnsaved =
-    (savedSchema ? savedSchema.xml : DEFAULT_SCHEMA_BY_ORG[currentOrg]) !== currentSchemaXml;
+  // Правки расходятся с сохранённой копией проекта.
+  const isSchemaUnsaved = savedProject.xml !== projectXml;
 
-  /** Подпись бейджа: несохранённые правки / копия в браузере / демо-схема. */
+  /** Подпись бейджа: несохранённые правки / копия в браузере. */
   const schemaSaveLabel = () => {
     if (isSchemaUnsaved) return '⚠ Есть несохранённые изменения';
-    if (!savedSchema) return 'Схема по умолчанию';
 
-    const savedAt = formatSavedAt(savedSchema.savedAt);
+    const savedAt = formatProjectSavedAt(savedProject.updatedAt);
     return savedAt ? `✅ Сохранено в ${savedAt}` : '✅ Сохранено в браузере';
   };
 
-  /** Кнопка «Сохранить схему»: правки переживут перезагрузку страницы. */
+  /** Кнопка «Сохранить схему»: правки проекта переживут перезагрузку страницы. */
   const handleSaveSchema = () => {
-    const record = cacheBpmnSchema(currentOrg, currentSchemaXml);
+    const record = persistProject(projectXml);
 
     if (!record) {
       logEvent(currentOrg, 'ALL', 'Схема не сохранена', 'Браузер не дал сохранить схему локально (приватный режим или переполнено хранилище).');
       return;
     }
 
-    logEvent(currentOrg, 'ALL', 'Схема сохранена', `Схема сохранена в браузере в ${formatSavedAt(record.savedAt)} — правки подхватятся при следующем открытии приложения.`);
+    logEvent(currentOrg, 'ALL', 'Схема сохранена', `Схема сохранена в браузере в ${formatProjectSavedAt(record.updatedAt)} — правки подхватятся при следующем открытии приложения.`);
   };
 
-  /** Кнопка «Демо-схема»: забывает копию в браузере и возвращает схему из SDK. */
+  /**
+   * Кнопка «Демо-схема»: возвращает демо-процесс своего контура.
+   *
+   * Проект остаётся проектом: меняется только процесс текущей организации, а
+   * процесс второй стороны не трогается — иначе сброс одной стороны ломал бы
+   * связи `startsProcess`/`counterpartEvent` другой.
+   */
   const handleResetSchema = () => {
-    clearSchema(currentOrg);
-    setSavedSchemas((prev) => ({ ...prev, [currentOrg]: null }));
-
     const defaultXml = DEFAULT_SCHEMA_BY_ORG[currentOrg];
-    if (currentOrg === 'SUPPLIER') setSupplierBpmnXml(defaultXml);
-    else setCustomerBpmnXml(defaultXml);
+    const process = currentOrg === 'SUPPLIER' ? supplierProcess : customerProcess;
 
-    logEvent(currentOrg, 'ALL', 'Схема сброшена', `Восстановлена демо-схема ${currentOrg}, сохранённая копия удалена.`);
+    if (!defaultXml || !process) return;
+
+    const nextProjectXml = replaceProcessXml(projectXml, process.id, defaultXml);
+
+    setProjectXml(nextProjectXml);
+    persistProject(nextProjectXml);
+
+    logEvent(currentOrg, 'ALL', 'Схема сброшена', `Восстановлена демо-схема ${currentOrg}: процесс заменён в проекте.`);
   };
 
   const isOrderCompleted = (order) => {
@@ -1448,7 +1827,7 @@ export default function App() {
         <div>
           <h1 style={{ margin: 0, fontSize: '20px', color: '#0f172a' }}>🥛 ERP «{currentUser.orgName}»</h1>
           <span style={{ fontSize: '13px', color: '#64748b' }}>
-            Контур: <strong>{currentUser.org === 'CUSTOMER' ? 'Заказчик' : 'Поставщик'}</strong> | Оркестратор: {wsConnected ? <strong style={{ color: '#16a34a' }}>✅ Подключен</strong> : <strong style={{ color: '#dc2626' }}>❌ Offline</strong>}
+            Проект: <strong>{project.name}</strong> | Контур: <strong>{CONTOUR_LABELS[currentUser.org]}</strong> | Оркестратор: {wsConnected ? <strong style={{ color: '#16a34a' }}>✅ Подключен</strong> : <strong style={{ color: '#dc2626' }}>❌ Offline</strong>}
           </span>
         </div>
 
@@ -1457,6 +1836,13 @@ export default function App() {
             <UserIcon size={18} color="#2563eb" />
             <span style={{ fontSize: '13px', fontWeight: '600' }}>{currentUser.roleName}</span>
           </div>
+
+          <button
+            onClick={() => { setCurrentUser(null); setProjects(listProjects()); setScreen('projects'); }}
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', border: '1px solid #cbd5e1', borderRadius: '8px', backgroundColor: '#fff', color: '#334155', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}
+          >
+            <FolderOpen size={16} /> Проекты
+          </button>
 
           <button onClick={() => setCurrentUser(null)} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', border: '1px solid #cbd5e1', borderRadius: '8px', backgroundColor: '#fff', color: '#ef4444', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}>
             <LogOut size={16} /> Выход
@@ -1527,6 +1913,26 @@ export default function App() {
             <h2 style={{ marginTop: 0, fontSize: '16px', color: '#1e293b', borderBottom: '1px solid #e2e8f0', paddingBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                <UserIcon size={20} color="#2563eb"/> Кабинет: {currentUser.roleName} {currentOrder ? `(Заказ ${currentOrder.id})` : ''}
             </h2>
+
+            {/* Запуск процесса для схемы без кнопки инициатора: загруженный BPMN
+                может не объявлять `act:userAction` на стартовом событии, но
+                экземпляр всё равно нужен — иначе шаги кабинета не подсветятся. */}
+            {!createOrderAction && (
+              <div style={{ padding: '16px', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', marginBottom: '16px' }}>
+                <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#1e40af', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Play size={18} /> Запуск по схеме
+                </h3>
+                <p style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#1e3a8a' }}>
+                  В схеме нет кнопки инициатора: экземпляр стартует со стартового события, а токен встанет на первый узел процесса.
+                </p>
+                <button
+                  onClick={handleStartBySchema}
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 18px', backgroundColor: '#2563eb', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+                >
+                  <Play size={16} /> Запустить процесс
+                </button>
+              </div>
+            )}
 
             {/* 1. РОЛЬ: ПРОИЗВОДСТВО. Запуск процесса — кнопка на стартовом
                 событии схемы; в ней же указана роль инициатора (см. `ACTION_ID`). */}
@@ -1926,40 +2332,36 @@ export default function App() {
                     </div>
                   )}
 
-                 {currentUser.org === 'CUSTOMER' ? (
-                   schemaMode === 'edit' ? (
-                     <BpmnEditor
-                       xml={customerBpmnXml}
-                       onChange={setCustomerBpmnXml}
-                       roleOptions={ROLE_CODES}
-                       triggerTargets={customerTriggerTargets}
-                       height={520}
-                     />
-                   ) : (
-                     <BpmnViewer
-                       xml={customerBpmnXml}
-                       tokens={tokensFor(currentOrder?.customerInstanceId)}
-                       activeElementId={currentOrder?.customerActiveElementId}
-                       height={520}
-                     />
-                   )
+                 {!currentSchemaXml ? (
+                   <p style={{ fontSize: '13px', color: '#b45309', margin: 0 }}>
+                     В проекте нет процесса для этого контура: добавьте второй процесс или откройте другой проект.
+                   </p>
+                 ) : schemaMode === 'edit' ? (
+                   /* Редактор правит проект целиком: второй процесс виден на холсте,
+                      а роли и триггеры подсказываются из всей схемы. */
+                   <BpmnEditor
+                     xml={projectXml}
+                     onChange={setProjectXml}
+                     roleOptions={analysis.roleCodes}
+                     triggerTargets={currentOrg === 'CUSTOMER' ? customerTriggerTargets : supplierTriggerTargets}
+                     height={520}
+                   />
                  ) : (
-                   schemaMode === 'edit' ? (
-                     <BpmnEditor
-                       xml={supplierBpmnXml}
-                       onChange={setSupplierBpmnXml}
-                       roleOptions={ROLE_CODES}
-                       triggerTargets={supplierTriggerTargets}
-                       height={520}
-                     />
-                   ) : (
-                     <BpmnViewer
-                       xml={supplierBpmnXml}
-                       tokens={tokensFor(currentOrder?.supplierInstanceId)}
-                       activeElementId={currentOrder?.supplierActiveElementId}
-                       height={520}
-                     />
-                   )
+                   /* Просмотрщик показывает проект, поэтому подсветка собирается из
+                      токенов обоих экземпляров: у сторон свои узлы и свои токены. */
+                   <BpmnViewer
+                     xml={projectXml}
+                     tokens={mergeTokens(
+                       tokensFor(currentOrder?.customerInstanceId),
+                       tokensFor(currentOrder?.supplierInstanceId)
+                     )}
+                     activeElementId={
+                       currentOrg === 'SUPPLIER'
+                         ? currentOrder?.supplierActiveElementId
+                         : currentOrder?.customerActiveElementId
+                     }
+                     height={520}
+                   />
                  )}
                </div>
              ) : (
