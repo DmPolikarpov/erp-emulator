@@ -42,6 +42,9 @@ const PUBLIC_API = [
   // константы
   'DEFAULT_CUSTOMER_BPMN_XML',
   'DEFAULT_SUPPLIER_BPMN_XML',
+  // демо-проект «Молочный завод» (заказ → производство → отгрузка)
+  'DAIRY_PLANT_PROJECT_XML',
+  'DAIRY_PLANT_PROJECT_NAME',
   'DEFAULT_GATEWAY_URL',
   'DEFAULT_WS_URL',
   'INSTANCE_PREFIX',

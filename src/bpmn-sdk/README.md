@@ -51,6 +51,11 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
   `DEFAULT_SUPPLIER_BPMN_XML`, `INSTANCE_PREFIX`, `ENGINE_EVENTS`, `ENGINE_ELEMENTS`,
   `SOCKET_EVENTS`, `SOCKET_STATUS`, `TOKEN_STATES`, `ERROR_KINDS`,
   `BPMN_TOKEN_BASE_CLASS`, `BPMN_TOKEN_CLASS`;
+- демо-проект «Молочный завод» (`defaults/dairyPlant.js`):
+  `DAIRY_PLANT_PROCESS_XML`, `DAIRY_PLANT_PROCESS_ID`, `DAIRY_PLANT_PARTICIPANT_NAME`,
+  `DAIRY_SUPPLIER_PROCESS_XML`, `DAIRY_SUPPLIER_PROCESS_ID`,
+  `DAIRY_SUPPLIER_PARTICIPANT_NAME`, `DAIRY_PLANT_PROJECT_XML`,
+  `DAIRY_PLANT_PROJECT_NAME`, `DAIRY_PROJECT_ROW_OFFSET`, `DAIRY_SALES_ROLE`;
 - логика токенов: `parseTokenMessage`, `resolveTokenMap`, `applyTokenUpdate`,
   `collectActiveElementIds`, `tokenMarkerClasses`, `isDeployInstanceId`,
   `deployInstanceId`;
@@ -76,6 +81,25 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
   `DEFAULT_ACTION_EVENT`.
 
 Состав API проверяется тестом [`src/vendor/bpmnSdkBundle.test.js`](../vendor/bpmnSdkBundle.test.js).
+
+### Демо-проекты
+
+В SDK два готовых проекта: их используют витрина и кабинет клиента.
+
+| Проект | Модуль | Состав | Как открыть |
+| --- | --- | --- | --- |
+| «Закупка и приёмка молока» | `defaults/milkProcess.js` | заказчик + поставщик, `DEFAULT_PROJECT_BPMN_XML` | создаётся при первом запуске клиента |
+| «Молочный завод» | `defaults/dairyPlant.js` | завод (9 ролей) + поставщик сырья (3 роли), `DAIRY_PLANT_PROJECT_XML` | кнопка «Молочный завод» в списке проектов |
+
+Схемы «Молочного завода» проверяет [`defaults/dairyPlant.test.js`](defaults/dairyPlant.test.js):
+оба процесса проходят `validateEngineSchema`, связи и DI на месте, кнопки ведут в
+существующие узлы, роли объявлены каталогами, а пулы проекта не перекрываются
+(второй сдвинут на `DAIRY_PROJECT_ROW_OFFSET`).
+
+Что в проекте пока рисуется, а не исполняется движком (шлюзы без условий,
+`serviceTask` вместо воркеров, межпроцессные сообщения через кнопки, роли как
+маршрутизация UI), и в каком порядке это закрывается — в
+[`../../docs/dairy-plant-roadmap.md`](../../docs/dairy-plant-roadmap.md).
 
 ### Роль исполнителя узла
 
@@ -255,7 +279,7 @@ XML явно, всегда важнее умолчания: старые схе�
 (`[]` снимает все). Обязательны только ключ и надпись: «Добавить кнопку» сразу
 пишет кнопку в схему, а в поле «Узел после нажатия» подсказывается блок, который
 схема выведет по единственной исходящей связи (`getNextElementId`). Кабинет
-([`App.jsx`](../../App.jsx)) поимённо разбирает только шаги со своими ключами
+([`App.jsx`](../App.jsx)) поимённо разбирает только шаги со своими ключами
 (`ACTION_ID`): у них обработчики собирают payload, которого в схеме нет (номера
 УПД/ТТН, метки времени). Кнопку с незнакомым ключом кабинет показывает общим
 шагом, а пару «событие + узел» и роль для неё разрешает та же схема

@@ -7,6 +7,8 @@ import {
   DEFAULT_GATEWAY_URL,
   DEFAULT_PROJECT_BPMN_XML,
   DEFAULT_SUPPLIER_BPMN_XML,
+  DAIRY_PLANT_PROJECT_NAME,
+  DAIRY_PLANT_PROJECT_XML,
   ENGINE_EVENTS,
   INSTANCE_PREFIX,
   SOCKET_EVENTS,
@@ -33,7 +35,7 @@ import {
   Truck, ShieldCheck, ClipboardCheck, FileText, Upload, Send, 
   LogOut, History, KeyRound, Layers, PlusCircle, BarChart2,
   PackageCheck, Clock, CheckCircle2, Loader2, AlertCircle, Pencil,
-  Save, RotateCcw, FolderOpen, FolderPlus, Trash2, ArrowLeft, Play
+  Save, RotateCcw, FolderOpen, FolderPlus, Trash2, ArrowLeft, Play, Factory
 } from 'lucide-react';
 import { MetricsPanel } from './MetricsPanel';
 import { CONTOUR_LABELS, analyzeProject, findUser } from './projectRoles';
@@ -1411,6 +1413,15 @@ export default function App() {
   };
 
   /**
+   * Проект «Молочный завод»: заказ → закупка сырья → приёмка → производство →
+   * отгрузка. Схема — тот же проект из двух процессов (`DAIRY_PLANT_PROJECT_XML`),
+   * поэтому её роли, кнопки и переходы кабинет читает как у любого другого проекта.
+   */
+  const handleCreateDairyProject = () => {
+    handleCreateProject(DAIRY_PLANT_PROJECT_XML, DAIRY_PLANT_PROJECT_NAME);
+  };
+
+  /**
    * Импорт BPMN-файла как проекта.
    *
    * Роли, процессы и кабинет выводятся из схемы (`analyzeProject`), поэтому
@@ -1507,6 +1518,10 @@ export default function App() {
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
               <button onClick={handleCreateDefaultProject} style={projectButtonStyle('#2563eb')}>
                 <FolderPlus size={16} /> Новый проект
+              </button>
+
+              <button onClick={handleCreateDairyProject} style={projectButtonStyle('#7c3aed')}>
+                <Factory size={16} /> Молочный завод
               </button>
 
               <label style={{ ...projectButtonStyle('#0f766e'), cursor: 'pointer' }}>

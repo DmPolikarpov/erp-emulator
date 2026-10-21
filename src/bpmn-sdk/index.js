@@ -34,6 +34,7 @@ export * from './xml/actionModdle';
 export * from './xml/rolesModdle';
 export * from './xml/projectXml';
 export * from './defaults/milkProcess';
+export * from './defaults/dairyPlant';
 export * from './client/httpClient';
 export * from './client/wsClient';
 export * from './hooks/useBpmnEngine';

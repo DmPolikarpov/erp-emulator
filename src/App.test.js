@@ -18,10 +18,14 @@ import { beginRun, completeRun, loadRuns } from './metricsStore';
 import { analyzeProject } from './projectRoles';
 import { createProject, listProjects } from './projectStore';
 import {
+  DAIRY_PLANT_PROCESS_ID,
+  DAIRY_PLANT_PROJECT_NAME,
+  DAIRY_SUPPLIER_PROCESS_ID,
   DEFAULT_CUSTOMER_BPMN_XML,
   DEFAULT_SUPPLIER_BPMN_XML,
   SOCKET_EVENTS,
   buildProjectXml,
+  getProcessIds,
   getRoleAssignments,
   setElementActions,
   setElementRole,
@@ -1329,5 +1333,33 @@ describe('App: интеграция с BPMN Client SDK', () => {
     // Токен выводится из единственной исходящей связи стартового события.
     expect(stepEvent).toBe('CompleteBlock');
     expect(stepElementId).toBe('Task_Pick');
+  });
+
+  /**
+   * Демо-проект «Молочный завод» — второй готовый проект SDK рядом с демо-закупкой.
+   * Кнопка в списке проектов создаёт его из `DAIRY_PLANT_PROJECT_XML`, и дальше
+   * приложение работает с ним как с любым загруженным BPMN: вход по каталогу
+   * ролей, кабинет — по кнопкам схемы.
+   */
+  it('кнопка «Молочный завод» создаёт проект из двух процессов', () => {
+    render(<App />);
+    fireEvent.click(screen.getByText('Проекты'));
+    fireEvent.click(screen.getByText('Молочный завод'));
+
+    const project = listProjects().find(
+      (item) => item.name === DAIRY_PLANT_PROJECT_NAME
+    );
+
+    expect(project).toBeTruthy();
+    expect(getProcessIds(project.xml)).toEqual([
+      DAIRY_PLANT_PROCESS_ID,
+      DAIRY_SUPPLIER_PROCESS_ID,
+    ]);
+
+    // Проект сразу открыт: подпись в шапке и роли обоих пулов на входе.
+    expect(screen.getByText(/Проект:/).textContent).toContain(DAIRY_PLANT_PROJECT_NAME);
+    expect(screen.getByText('Директор завода')).toBeTruthy();
+    expect(screen.getByText('Менеджер по продажам')).toBeTruthy();
+    expect(screen.getByText('Менеджер по продажам сырья')).toBeTruthy();
   });
 });
