@@ -1,3 +1,5 @@
+import { buildProjectXml } from '../xml/projectXml';
+
 // Базовая схема Заказчика (Молочный Завод).
 //
 // Кнопки кабинета объявлены в самих блоках (`act:userAction`): надпись, иконка,
@@ -14,9 +16,19 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
                   xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
                   xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
                   xmlns:act="http://erp.mes/schema/bpmn/action"
+                  xmlns:role="http://erp.mes/schema/bpmn/roles"
                   id="Definitions_CustomerProcess"
                   targetNamespace="http://bpmn.io/schema/bpmn">
   <bpmn:process id="Process_MilkCustomer_v1" name="Закупка и приемка сырого молока" isExecutable="true">
+    <bpmn:extensionElements>
+      <role:catalog id="RoleCatalog_Customer">
+        <role:businessRole code="EXECUTIVE" title="Руководитель Заказчика" kind="EXECUTIVE" icon="Crown" />
+        <role:businessRole code="PRODUCTION" title="Мастер производства" icon="PackageCheck" />
+        <role:businessRole code="MANAGER" title="Менеджер закупок" icon="Factory" />
+        <role:businessRole code="SECURITY" title="Охрана КПП" icon="ShieldCheck" />
+        <role:businessRole code="QUALITY" title="Специалист ОТК" icon="ClipboardCheck" />
+      </role:catalog>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="StartEvent_Customer" name="Заявка производства на 100 л молока">
       <bpmn:extensionElements>
         <act:userAction id="createOrder" label="Создать внутренний заказ на 100 л" role="PRODUCTION" icon="PlusCircle" />
@@ -122,9 +134,16 @@ export const DEFAULT_SUPPLIER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
                   xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
                   xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
                   xmlns:act="http://erp.mes/schema/bpmn/action"
+                  xmlns:role="http://erp.mes/schema/bpmn/roles"
                   id="Definitions_SupplierProcess"
                   targetNamespace="http://bpmn.io/schema/bpmn">
   <bpmn:process id="Process_SupplierSupply_v1" name="Внутренняя отгрузка поставщика" isExecutable="true">
+    <bpmn:extensionElements>
+      <role:catalog id="RoleCatalog_Supplier">
+        <role:businessRole code="SUPPLIER_EXECUTIVE" title="Руководитель Поставщика" kind="EXECUTIVE" icon="Building2" />
+        <role:businessRole code="SUPPLIER_MANAGER" title="Менеджер Поставщика" icon="Truck" />
+      </role:catalog>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="StartEvent_Supplier" name="Получен заказ от Заказчика">
       <bpmn:extensionElements>
         <act:userAction id="startSupplierProcess" label="Запустить обработку заказа" icon="PackageCheck" />
@@ -178,3 +197,25 @@ export const DEFAULT_SUPPLIER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
 </bpmn:definitions>`;
+
+/**
+ * Проект по умолчанию: оба процесса в одной схеме.
+ *
+ * Кабинет работает с проектом (`bpmn:collaboration` + два процесса), а движку
+ * уходит нарезка процесса (`extractProcessXml`) — он читает только первый
+ * `bpmn:process` документа. Дорожки разнесены по вертикали, подписи участников
+ * дают название организации в шапке кабинета.
+ *
+ * Роли проекта — из каталога `role:catalog` каждого процесса: отдельного списка
+ * пользователей в коде больше нет, поэтому схему можно править и загружать
+ * целиком, а вход в кабинет собирается из неё (`analyzeProject`).
+ */
+export const DEFAULT_PROJECT_NAME = 'Закупка и приёмка молока';
+
+export const DEFAULT_PROJECT_BPMN_XML = buildProjectXml(
+  [
+    { xml: DEFAULT_CUSTOMER_BPMN_XML, participantName: 'Молочный Завод' },
+    { xml: DEFAULT_SUPPLIER_BPMN_XML, participantName: 'ООО «Альпийские Луга»' },
+  ],
+  { name: DEFAULT_PROJECT_NAME }
+);

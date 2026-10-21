@@ -35,6 +35,13 @@ const {
   ACTION_MODELE_EXTENSIONS,
   ACTION_TYPE,
 } = require('../bpmn-sdk/xml/actionModdle');
+const { ROLE_MODELE_EXTENSIONS } = require('../bpmn-sdk/xml/rolesModdle');
+
+/**
+ * Расширения моделлера как у редактора: кроме кнопок он знает и каталог ролей
+ * (`role:catalog`), который теперь есть в демо-схемах.
+ */
+const MODELE_EXTENSIONS = { ...ACTION_MODELE_EXTENSIONS, ...ROLE_MODELE_EXTENSIONS };
 
 /** Кнопка со всеми заполненными полями: так видно, что читается каждое. */
 const ACTION = {
@@ -82,7 +89,7 @@ function modelFields(action) {
 const warningTexts = (warnings) => warnings.map((warning) => warning.message);
 
 describe('bpmn-moddle: кнопки участников (act:userAction)', () => {
-  const moddle = new BpmnModdle(ACTION_MODELE_EXTENSIONS);
+  const moddle = new BpmnModdle(MODELE_EXTENSIONS);
 
   it('читает кнопку, записанную хелпером `setElementActions`, без предупреждений', async () => {
     const xml = setElementActions(DEFAULT_CUSTOMER_BPMN_XML, ACTION_HOST, [ACTION]);
@@ -199,7 +206,7 @@ describe('bpmn-moddle: кнопки участников (act:userAction)', () =
     // `bpmn-moddle` предупреждений не выдаёт и элемент сохраняет, но его `$type`
     // — имя тега из XML (`act:userAction`), а не тип moddle (`act:UserAction`).
     const xml = setElementActions(DEFAULT_CUSTOMER_BPMN_XML, ACTION_HOST, [ACTION]);
-    const plain = new BpmnModdle();
+    const plain = new BpmnModdle(ROLE_MODELE_EXTENSIONS);
     const { rootElement, warnings } = await plain.fromXML(xml);
     const values = modelHost(rootElement).extensionElements.values;
 

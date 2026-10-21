@@ -375,7 +375,8 @@ const ACTION_FORM_FIELDS = [
  * @param {(oldId: string, newId: string) => (boolean|void)} [props.onChangeId]
  *   применение нового идентификатора; `false` или исключение => откат.
  * @param {(id: string, name: string) => void} [props.onChangeName] новое название.
- * @param {string[]} [props.roleOptions=[]] роли для выбора (`USERS[].role`).
+ * @param {string[]} [props.roleOptions=[]] роли для выбора: коды из `role:catalog`
+ *   и назначений шагов (`bpmn:potentialOwner`, `act:userAction/@role`).
  * @param {(id: string, role: string) => (boolean|void)} [props.onChangeRole]
  *   назначение роли исполнителя; `false` или исключение => откат.
  * @param {string[]} [props.triggerTargets=[]] идентификаторы процессов,

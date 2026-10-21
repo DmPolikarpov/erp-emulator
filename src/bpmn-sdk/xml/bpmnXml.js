@@ -30,6 +30,8 @@ import {
   ACTION_NAMESPACE,
   ACTION_NAMESPACE_PREFIX,
 } from './actionModdle';
+import { ROLE_CATALOG_LOCAL_NAME, ROLE_LOCAL_NAME, ROLE_NAMESPACE } from './rolesModdle';
+import { extractProcessXml } from './projectXml';
 
 /** Суффиксы локальных имён, которые считаются узлами потока управления. */
 export const FLOW_ELEMENT_SUFFIXES = ['Task', 'Event', 'Gateway'];
@@ -2222,6 +2224,173 @@ export function validateEngineSchema(xml) {
   problems.sort((first, second) => first.order - second.order);
 
   return { ok: problems.length === 0, problems };
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Проект: несколько процессов и каталог ролей в одной схеме
+ * ------------------------------------------------------------------ */
+
+/**
+ * Процессы проекта в порядке документа.
+ *
+ * Подпись дорожки (`participantName`) берётся из `bpmn:participant` проекта:
+ * это название организации, которое видит участник. У одно-процессной схемы
+ * кооперации нет, и подписью остаётся имя процесса.
+ *
+ * @param {string} xml BPMN-схема (проект или обычная схема процесса).
+ * @returns {Array<{id: string, name: string, isExecutable: boolean, participantName: string}>}
+ */
+export function getProjectProcesses(xml) {
+  const doc = parseXml(xml);
+  if (!doc) return [];
+
+  const participants = {};
+  const all = Array.from(doc.getElementsByTagName('*'));
+
+  all
+    .filter((node) => getLocalName(node) === 'participant' && node.getAttribute('processRef'))
+    .forEach((node) => {
+      participants[node.getAttribute('processRef')] = node.getAttribute('name') || '';
+    });
+
+  return all
+    .filter((node) => getLocalName(node) === 'process')
+    .map((node) => {
+      const id = node.getAttribute('id') || '';
+
+      return {
+        id,
+        name: node.getAttribute('name') || id,
+        isExecutable: node.getAttribute('isExecutable') !== 'false',
+        participantName: participants[id] || '',
+      };
+    })
+    .filter((process) => process.id !== '');
+}
+
+/**
+ * Владелец каждого элемента: `{elementId: processId}`.
+ *
+ * Нужен, чтобы разложить роли и кнопки по процессам: в проекте их несколько, и
+ * `bpmn:potentialOwner` сам по себе не говорит, чьему процессу принадлежит шаг.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {Object<string, string>} например `{Task_QualityControl: 'Process_MilkCustomer_v1'}`.
+ */
+export function getElementOwners(xml) {
+  const doc = parseXml(xml);
+  if (!doc) return {};
+
+  const owners = {};
+
+  Array.from(doc.getElementsByTagName('*'))
+    .filter((node) => getLocalName(node) === 'process')
+    .forEach((processNode) => {
+      const processId = processNode.getAttribute('id') || '';
+      if (!processId) return;
+
+      owners[processId] = processId;
+
+      Array.from(processNode.getElementsByTagName('*')).forEach((node) => {
+        const id = node.getAttribute && node.getAttribute('id');
+        if (id) owners[id] = processId;
+      });
+    });
+
+  return owners;
+}
+
+/**
+ * Каталог ролей `role:catalog` процесса (или всех процессов проекта).
+ *
+ * Роль — это титул: `code` адресует шаг (`potentialOwner`/`userAction`), `title`
+ * показывает кабинет. Схема без каталога — не ошибка: клиент возьмёт название
+ * из самого `bpmn:potentialOwner/@name` (см. `analyzeProject` в демо-клиенте).
+ *
+ * @param {string} xml BPMN-схема (проект или процесс).
+ * @param {string} [processId] только этот процесс (`''` — все).
+ * @returns {Array<{processId: string, code: string, title: string, kind: string, icon: string}>}
+ */
+export function getRoleCatalog(xml, processId) {
+  const doc = parseXml(xml);
+  if (!doc) return [];
+
+  const catalog = [];
+
+  Array.from(doc.getElementsByTagName('*'))
+    .filter((node) => getLocalName(node) === 'process')
+    .forEach((processNode) => {
+      const ownerId = processNode.getAttribute('id') || '';
+      if (processId && ownerId !== processId) return;
+
+      Array.from(processNode.getElementsByTagName('*'))
+        .filter((node) => getLocalName(node) === ROLE_CATALOG_LOCAL_NAME)
+        .filter((node) => !node.namespaceURI || node.namespaceURI === ROLE_NAMESPACE)
+        .forEach((catalogNode) => {
+          Array.from(catalogNode.getElementsByTagName('*'))
+            .filter((node) => getLocalName(node) === ROLE_LOCAL_NAME)
+            .forEach((role) => {
+              const code = (role.getAttribute('code') || '').trim();
+              if (!code) return;
+
+              catalog.push({
+                processId: ownerId,
+                code,
+                title: (role.getAttribute('title') || '').trim(),
+                kind: (role.getAttribute('kind') || '').trim(),
+                icon: (role.getAttribute('icon') || '').trim(),
+              });
+            });
+        });
+    });
+
+  return catalog;
+}
+
+/**
+ * Роли, объявленные прямо в кнопках (`act:userAction/@role`).
+ *
+ * У события нет `bpmn:potentialOwner` (спецификация BPMN 2.0 разрешает роль
+ * только Activity), поэтому роль кнопки старта живёт в самой кнопке. Кабинет
+ * должен знать такую роль, даже если её нет в каталоге.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {Array<{elementId: string, role: string, label: string}>}
+ */
+export function getActionRoles(xml) {
+  return listActions(xml)
+    .filter((entry) => entry.action && entry.action.role)
+    .map((entry) => ({
+      elementId: entry.elementId,
+      role: entry.action.role,
+      label: entry.action.label || entry.action.id || '',
+    }));
+}
+
+/**
+ * Проверка проекта: каждый процесс — отдельно, как его увидит движок.
+ *
+ * Оркестратор читает только первый `bpmn:process`, поэтому валидировать проект
+ * целиком бессмысленно: второй процесс для него не существует. Проблемы
+ * помечаются идентификатором процесса, чтобы их можно было объяснить человеку.
+ *
+ * @param {string} projectXml XML проекта.
+ * @returns {{ok: boolean, problems: Array<Object>, processes: Array<Object>}}
+ */
+export function validateProjectSchema(projectXml) {
+  const processes = getProjectProcesses(projectXml);
+  const problems = [];
+
+  processes.forEach((process) => {
+    const report = validateEngineSchema(extractProcessXml(projectXml, process.id));
+
+    report.problems.forEach((problem) => {
+      problems.push({ ...problem, processId: process.id, processName: process.name });
+    });
+  });
+
+  return { ok: problems.length === 0, problems, processes };
 }
 
 
