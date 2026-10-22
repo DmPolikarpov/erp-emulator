@@ -206,6 +206,18 @@ function definitionsAttributes(xml) {
 }
 
 /**
+ * Корневые объявления сообщений (`bpmn:message`).
+ *
+ * События ссылаются на них по `messageRef`; без объявления движок читает имя
+ * самого события (`bpmn:intermediateThrowEvent/@name`), и пара «отправка →
+ * ожидание» между процессами перестаёт совпадать. Поэтому и проект, и нарезка
+ * процесса обязаны сохранить эти строки.
+ */
+function messageDefinitionsOf(xml) {
+  return String(xml || '').match(/<bpmn:message\b[^>]*\/>/g) || [];
+}
+
+/**
  * Собирает проект из готовых схем процессов.
  *
  * Координаты DI исходных схем сохраняются, но каждая следующая дорожка
@@ -238,6 +250,17 @@ export function buildProjectXml(processes, options = {}) {
   const processXml = [];
   const participants = [];
   const di = [];
+  const messages = [];
+  const seenMessages = new Set();
+
+  list.forEach((item) => {
+    messageDefinitionsOf(item.xml).forEach((node) => {
+      const id = attributeOf(node, 'id');
+      if (id && seenMessages.has(id)) return;
+      if (id) seenMessages.add(id);
+      messages.push('  ' + node);
+    });
+  });
 
   list.forEach((item, index) => {
     const block = processBlockOf(item.xml, item.processId);
@@ -282,6 +305,8 @@ export function buildProjectXml(processes, options = {}) {
     '  <bpmn:collaboration id="' + (options.collaborationId || PROJECT_COLLABORATION_ID) + '">',
     participants.join('\n'),
     '  </bpmn:collaboration>',
+    '',
+    messages.join('\n'),
     '',
     processXml.join('\n\n'),
     '',
@@ -345,6 +370,7 @@ export function extractProcessXml(projectXml, processId) {
   return [
     XML_DECLARATION,
     '<bpmn:definitions ' + definitionsAttributes(projectXml) + '>',
+    ...messageDefinitionsOf(projectXml).map((message) => '  ' + message),
     block,
     '',
     '  <bpmndi:BPMNDiagram id="BPMNDiagram_' + targetId + '">',

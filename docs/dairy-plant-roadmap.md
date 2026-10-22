@@ -52,8 +52,8 @@
 | В исходнике | В демо | Причина |
 | --- | --- | --- |
 | 3 пула: Клиент, Завод, Поставщик | 2 процесса; роль клиента играет кнопка старта завода | в демо кабинет клиента не ведёт шагов; вернётся в M5 |
-| 6 `bpmn:messageFlow` | `startsProcess`, `counterpartEvent` | движок не исполняет message flow (README, огр. 12) → M3 |
-| 4 `sendTask`, 1 `receiveTask`, 1 `subProcess`, 1 `intermediateThrowEvent`, 3 `intermediateCatchEvent`, 5 `boundaryEvent` (message/error/escalation) | `userTask` + кнопки, ветки — шлюзами | этих типов нет в `ENGINE_FLOW_NODE_TYPES`; определение с ними не компилируется |
+| 6 `bpmn:messageFlow` | `bpmn:message` + throw/catch + `trg:processTrigger` | пару «источник → цель» и payload задаёт схема; движок запускает вторую сторону и находит её по `orderNum` (M3) |
+| 4 `sendTask`, 1 `receiveTask`, 1 `subProcess`, 1 `intermediateThrowEvent`, 3 `intermediateCatchEvent`, 5 `boundaryEvent` (message/error/escalation) | `userTask` + кнопки, ветки — шлюзами; сообщения — throw/catch-событиями | `sendTask`, `receiveTask`, `subProcess` и `boundaryEvent` в `ENGINE_FLOW_NODE_TYPES` не входят; промежуточные события сообщений входят (M3) |
 | 2 `serviceTask` | `Task_ERP_HandleDeviation`, `Task_ERP_CriticalAlert` — `bpmn:serviceTask` с `camunda:topic="erp"` | шаг исполняет воркер (мок в демо), кнопок у шага нет — M2 |
 | 3 `exclusiveGateway` | 5 `exclusiveGateway` | ветки брака и аварий разложены по дорожкам, чтобы шаг читался без легенды |
 | 6 `bpmn:lane` завода | 6 `bpmn:lane` | сохранены как есть |
@@ -189,25 +189,38 @@
 
 ### M3. Межпроцессные сообщения — P1, M
 
-**Зачем.** Поставщика сейчас стартует клиент: `sendToSupplier` → `startProcess` и перенос
+**Зачем.** Поставщика раньше стартовал клиент: `sendToSupplier` → `startProcess` и перенос
 `orderNum` руками. В исходной схеме обмен сторон нарисован шестью `bpmn:messageFlow`
 (заказ клиента, его подтверждение, заказ на сырьё, подтверждение, партия молока, готовая
-продукция); движок их не исполняет (огр. 12), `trg:processTrigger` не читает.
+продукция); движок их не исполнял (огр. 12), `trg:processTrigger` не читал.
 
 **Задачи.**
 
-- [ ] Разбор `bpmn:messageFlow` / `trg:processTrigger` задеплоенной схемы: создание
+- [x] Разбор `bpmn:messageFlow` / `trg:processTrigger` задеплоенной схемы: создание
       экземпляра второй стороны, вход в `firstElementId`, перенос `payloadKeys`.
-- [ ] Корреляция по бизнес-ключу (`orderNum`), а не по `instanceId`: ответ поставщика
-      находит экземпляр завода.
-- [ ] `Task_WaitPOConfirmed` и `Task_ReceiveMilk` → catch-события
-      (`messageEventDefinition`), когда движок начнёт их читать.
-- [ ] Клиент: убрать `startsProcess` / `counterpartEvent` из демо-проекта, оставив механизм
-      для старых схем.
+      *(Сделано: [`runtime/messages.rs`](../../bpmn-engine/src/runtime/messages.rs).
+      В движок уезжает нарезка одного процесса, поэтому пару «источник → цель»
+      задаёт триггер узла; `messageFlow` читается как диагностика — если проект
+      задеплоен целиком.)*
+- [x] Корреляция по бизнес-ключу (`orderNum`), а не по `instanceId`: ответ поставщика
+      находит экземпляр завода. *(Сделано: `MessageSent::correlation` — патч 6
+      вендора, `message_handler.rs` будит только свой заказ; тест
+      `vendor_patches.rs::message_delivery_respects_correlation`.)*
+- [x] `Task_WaitPOConfirmed` и `Task_ReceiveMilk` → catch-события
+      (`messageEventDefinition`), когда движок начнёт их читать. *(Сделано для
+      ожидания подтверждения. `Task_ReceiveMilk` оставлен человеческим шагом
+      приёмки: перед ним стоит catch `Event_MilkShipped`, иначе у QC пропала бы
+      кнопка приёмки партии.)*
+- [x] Клиент: убрать `startsProcess` / `counterpartEvent` из демо-проекта, оставив механизм
+      для старых схем. *(Сделано: в демо-схеме кнопки отправки и отгрузки полей не
+      объявляют; `App.jsx` по-прежнему понимает их, если схема старая.)*
 
 **Готово, когда.** «Отправить заказ поставщику» не вызывает `startProcess` в `App.jsx`;
 экземпляр `Process_Supplier` появляется по событию движка; «Погрузить и передать
-перевозчику» двигает `Task_ReceiveMilk` завода.
+перевозчику» двигает `Task_ReceiveMilk` завода. *(Сделано: экземпляр создаёт
+триггер `Event_SendPO`, id — `inst-supp-<orderNum>`; отгрузка отправляет
+`MilkShipped`, и завод переходит к приёмке. Не сделано: кабинет не подсвечивает
+ожидание на catch-событии — виден последний человеческий шаг.)*
 
 **Файлы:** движок (парсер и рантайм), `main.rs`, `nats_client.rs`,
 [`dairyPlant.js`](../src/bpmn-sdk/defaults/dairyPlant.js), [`App.jsx`](../src/App.jsx).

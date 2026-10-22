@@ -1844,6 +1844,8 @@ export const ENGINE_FLOW_NODE_TYPES = [
   'userTask',
   'exclusiveGateway',
   'parallelGateway',
+  'intermediateThrowEvent',
+  'intermediateCatchEvent',
 ];
 
 /** Перечисление поддерживаемых типов — для сообщений пользователю. */

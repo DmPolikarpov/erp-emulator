@@ -29,6 +29,12 @@ import {
   DEFAULT_PROJECT_BPMN_XML,
   DEFAULT_SUPPLIER_BPMN_XML,
 } from '../defaults/milkProcess';
+import {
+  DAIRY_PLANT_PROCESS_ID,
+  DAIRY_PLANT_PROCESS_XML,
+  DAIRY_SUPPLIER_PROCESS_ID,
+  DAIRY_SUPPLIER_PROCESS_XML,
+} from '../defaults/dairyPlant';
 
 const customerId = () => getProcessIds(DEFAULT_CUSTOMER_BPMN_XML)[0];
 const supplierId = () => getProcessIds(DEFAULT_SUPPLIER_BPMN_XML)[0];
@@ -200,6 +206,34 @@ describe('bpmnXml: роли проекта', () => {
     expect(validateProjectSchema(DEFAULT_PROJECT_BPMN_XML)).toEqual(
       expect.objectContaining({ ok: true, problems: [] })
     );
+  });
+});
+
+describe('projectXml: сообщения между процессами (M3)', () => {
+  it('проект и нарезки сохраняют корневые bpmn:message', () => {
+    const project = buildProjectXml([
+      { xml: DAIRY_PLANT_PROCESS_XML, participantName: 'Завод' },
+      { xml: DAIRY_SUPPLIER_PROCESS_XML, participantName: 'Поставщик' },
+    ]);
+
+    ['Message_PurchaseOrder', 'Message_PurchaseOrderConfirmed', 'Message_MilkShipped'].forEach(
+      (id) => expect(project).toContain('<bpmn:message id="' + id + '"')
+    );
+
+    // Одно объявление на проект: два `<bpmn:message>` с тем же id сделали бы
+    // документ невалидным, а `messageRef` — неоднозначным.
+    expect(project.match(/bpmn:message id="Message_MilkShipped"/g)).toHaveLength(1);
+
+    const plant = extractProcessXml(project, DAIRY_PLANT_PROCESS_ID);
+    const supplier = extractProcessXml(project, DAIRY_SUPPLIER_PROCESS_ID);
+
+    // Нарезка процесса — то, что уходит в движок: без объявлений и namespace
+    // триггера события сообщений и `trg:processTrigger` там не разрешаются.
+    expect(plant).toContain('xmlns:trg="http://erp.mes/schema/bpmn/trigger"');
+    expect(plant).toContain('messageRef="Message_PurchaseOrder"');
+    expect(plant).toContain('trg:processTrigger');
+    expect(supplier).toContain('messageRef="Message_MilkShipped"');
+    expect(supplier).not.toContain('trg:processTrigger');
   });
 });
 
