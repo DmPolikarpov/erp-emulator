@@ -426,17 +426,6 @@ export default function App() {
     [projectXml, supplierProcess]
   );
 
-  /** Правка одного контура в проекте (кнопка «Демо-схема»). */
-  const setOrgSchema = useCallback(
-    (org, xml) => {
-      const process = org === 'SUPPLIER' ? supplierProcess : customerProcess;
-      if (!process) return;
-
-      setProjectXml((previous) => replaceProcessXml(previous, process.id, xml));
-    },
-    [customerProcess, supplierProcess]
-  );
-
   // SDK: HTTP-клиент API Gateway и WS-подписка на токены процесса
   // (реконнект, парсинг кадров и жизненный цикл соединения — внутри SDK).
   const { client, socket, connected: wsConnected } = useBpmnEngine();
@@ -604,23 +593,22 @@ export default function App() {
    * Запускает экземпляр процесса и ставит токен на его первый шаг.
    *
    * Как процесс стартует — решает схема: кнопка, объявленная на стартовом
-   * событии (`act:userAction`, см. `getStartAction`), задаёт событие и узел
-   * первого шага. Пара «событие + узел» может быть и не записана: у стартового
-   * события одна исходящая связь, поэтому `resolveAction` доводит её до первого
-   * блока (`CompleteBlock` + цель связи). Событий всё равно два: `StartProcess`
-   * называет стартовое событие (и несёт `bpmn_xml` — по нему движок компилирует
-   * определение), а второе событие переводит токен со стартового события на
-   * первый блок схемы. Без второго события подсветка первого шага живёт только в
-   * интерфейсе: после его выполнения зелёным станет стартовое событие, а сам
-   * блок — нет.
+   * событии (`act:userAction`, см. `getStartAction`), задаёт узел первого шага.
+   * Пара «событие + узел» может быть и не записана: у стартового события одна
+   * исходящая связь, поэтому `resolveAction` доводит её до первого блока.
+   *
+   * Событие одно — `StartProcess` с `element_id` **первого шага**. Так старт
+   * работает в обоих режимах движка: legacy ставит токен прямо на этот узел, а
+   * граф M1 (`ENGINE_ROUTING=graph`) сам доходит от `startEvent` до того же
+   * узла. Второй `CompleteBlock` (как было до M1) в режиме графа закрыл бы
+   * первый человеческий шаг, который движок только что активировал.
    *
    * @param {string} instanceId идентификатор нового экземпляра процесса.
    * @param {string} bpmnXml схема стороны (`bpmn_xml` для движка); она же —
    *   источник кнопки запуска процесса.
-   * @param {Object} [payload] выходные данные запуска: уходят в оба события,
-   *   поэтому во втором схему передавать не нужно.
-   * @returns {Promise<{start: Object, step: Object|null}>} ответы шлюза;
-   *   `step === null`, если экземпляр процесса не создан.
+   * @param {Object} [payload] выходные данные запуска.
+   * @returns {Promise<{start: Object}>} ответ шлюза; `start.ok === false`, если
+   *   экземпляр процесса не создан.
    */
   const startProcess = useCallback(
     async (instanceId, bpmnXml, payload = {}) => {
@@ -635,18 +623,38 @@ export default function App() {
             error:
               'В схеме нет кнопки запуска процесса: объявите act:userAction на стартовом событии.',
           },
-          step: null,
         };
+      }
+
+      // Узел первого шага — адрес старта: без него событие не двигает токен.
+      if (!declaration.action.elementId) {
+        return {
+          start: {
+            ok: false,
+            error:
+              'В схеме не выводится первый шаг процесса: укажите elementId в кнопке стартового события.',
+          },
+        };
+      }
+
+      // Переменные кнопки старта — те же, что у обычного шага (8.1): граф
+      // читает их, если первый узел схемы — шлюз.
+      let variables = {};
+
+      try {
+        variables = parseActionVariables(declaration.action.variables);
+      } catch (error) {
+        return { start: { ok: false, error: error.message } };
       }
 
       const start = await client.sendEvent(
         instanceId,
         ENGINE_EVENTS.START_PROCESS,
-        declaration.elementId,
-        { bpmn_xml: bpmnXml, ...payload }
+        declaration.action.elementId,
+        { bpmn_xml: bpmnXml, ...payload, ...variables }
       );
 
-      if (!start.ok) return { start, step: null };
+      if (!start.ok) return { start };
 
       // Экземпляр процесса создан — с этого момента и считаем время выполнения.
       // Финиш метрика увидит по токену на конечном узле (см. подписку на
@@ -664,14 +672,7 @@ export default function App() {
 
       if (metricsRun) setProcessRuns(loadRuns());
 
-      const step = await client.sendEvent(
-        instanceId,
-        declaration.action.event,
-        declaration.action.elementId,
-        payload
-      );
-
-      return { start, step };
+      return { start };
     },
     [client, startStepOf]
   );
@@ -914,7 +915,7 @@ export default function App() {
     setActionLoading(prev => ({ ...prev, [orderNum]: 'Запуск процесса в оркестраторе...' }));
     setActionErrors(prev => ({ ...prev, [orderNum]: null }));
 
-    const { start, step } = await startProcess(instanceId, xml, { orderNum });
+    const { start } = await startProcess(instanceId, xml, { orderNum });
 
     if (!start.ok) {
       setActionLoading(prev => ({ ...prev, [orderNum]: null }));
@@ -954,10 +955,6 @@ export default function App() {
       `Экземпляр ${instanceId} создан по схеме «${processTitleOf(xml)}».`,
       orderNum
     );
-
-    if (step && !step.ok) {
-      logEvent(org, 'ALL', 'Токен не встал на первый шаг', `Узел ${activeElementId || '—'} остался без подсветки: движок держит токен на стартовом событии.`, orderNum);
-    }
   };
 
   // 1. ТОЧКА ВХОДА: Создание заказа Производством. Кнопку инициатора — надпись,
@@ -989,9 +986,10 @@ export default function App() {
     setActionLoading(prev => ({ ...prev, [orderNum]: 'Создание заказа в оркестраторе...' }));
     setActionErrors(prev => ({ ...prev, [orderNum]: null }));
 
-    // Запуск процесса: `StartProcess` ставит токен на стартовое событие, второе
-    // событие переносит его на первый шаг — узел из кнопки старта схемы.
-    const { start, step } = await startProcess(custInstId, customerBpmnXml, {
+    // Запуск процесса: `StartProcess` называет первый шаг — его узел схема
+    // выводит из кнопки старта. Второго события нет: в режиме графа оно
+    // закрыло бы первый человеческий шаг (M1, 10.2 п. 1).
+    const { start } = await startProcess(custInstId, customerBpmnXml, {
       orderNum,
       volume: '100 Л',
       initiator: actionRoleOf('CUSTOMER', createOrder),
@@ -1012,10 +1010,10 @@ export default function App() {
         documents: null, passData: null, shippedAt: null, entryTime: null, checkedAt: null
       };
       // Заказ мог появиться раньше ответа HTTP: движок публикует токен
-      // `StartProcess` сразу после первого события, а `startProcess` ждёт ещё и
-      // второго — WS-кадр успевает между ними. Тогда заказ уже в списке (ветка
-      // «незнакомый экземпляр» в подписке на токены), и второй такой же дал бы
-      // два узла с одним `key={o.id}` в списке и таблицах заказов.
+      // `StartProcess` до того, как шлюз ответит на POST, — WS-кадр успевает
+      // первым. Тогда заказ уже в списке (ветка «незнакомый экземпляр» в
+      // подписке на токены), и второй такой же дал бы два узла с одним
+      // `key={o.id}` в списке и таблицах заказов.
       setOrders(prev => {
         // Экземпляр процесса — точнее номера: заказ мог быть заведён по токену
         // с этим же `orderNum`, но из другого источника.
@@ -1043,14 +1041,6 @@ export default function App() {
       ].filter(Boolean);
 
       logEvent('CUSTOMER', notifyRoles, 'Заявка производства сформирована', `Запущен процесс для ${orderNum}`, orderNum);
-
-      // Экземпляр создан, а токен остался на стартовом событии: заказ в списке
-      // есть, но подсветки первого шага на схеме не будет — движок о таком шаге
-      // не знает. Пишем это в журнал: молчаливая потеря подсветки — это та же
-      // ошибка, только без объяснения (см. `startProcess`).
-      if (step && !step.ok) {
-        logEvent('SYSTEM', notifyRoles, 'Токен не встал на первый шаг', `Узел ${createOrder ? createOrder.action.elementId : '—'} остался без подсветки: движок держит токен на ${createOrder ? createOrder.elementId : 'стартовом событии'}`, orderNum);
-      }
     } else {
       setActionLoading(prev => ({ ...prev, [orderNum]: null }));
       setActionErrors(prev => ({ ...prev, [orderNum]: 'Произошла ошибка при запуске заказа. Попробуйте еще раз.' }));
@@ -1112,7 +1102,7 @@ export default function App() {
           orderId
         );
       } else {
-        const { start: resSupp, step: resSuppStep } = await startProcess(
+        const { start: resSupp } = await startProcess(
           suppInstId,
           schemaXml(targetOrg),
           { orderNum: orderId }
@@ -1121,9 +1111,6 @@ export default function App() {
         if (!resSupp.ok) {
           setActionLoading(prev => ({ ...prev, [orderId]: null }));
           setActionErrors(prev => ({ ...prev, [orderId]: `Ошибка создания процесса у ${targetOrg === 'SUPPLIER' ? 'Поставщика' : 'Заказчика'}. Попробуйте еще раз.` }));
-        } else if (resSuppStep && !resSuppStep.ok) {
-          const suppStart = startStepOf(schemaXml(targetOrg));
-          logEvent('SYSTEM', 'ALL', 'Токен не встал на первый шаг второй стороны', `Узел ${suppStart ? suppStart.action.elementId : '—'} остался без подсветки: движок держит токен на ${suppStart ? suppStart.elementId : 'стартовом событии'}`, orderId);
         }
       }
     } else {

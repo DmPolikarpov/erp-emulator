@@ -362,8 +362,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   // Регрессия «первый прямоугольник не красится зелёным после выполнения».
-  // Последовательность событий реального движка: старт процесса ставит токен на
-  // `StartEvent_Customer`, второе событие старта переносит его на первый шаг, а
+  // Последовательность событий движка: старт ставит токен на первый шаг, а
   // выполнение шага закрывает его `COMPLETED` (зелёный трейл) и активирует
   // следующий узел. Так первый блок виден подсветке в обоих состояниях.
   it('первый шаг уходит в COMPLETED, когда движок активирует второй узел', () => {
@@ -546,77 +545,53 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
 
-    // Старт — два события: `StartProcess` (стартовое событие + `bpmn_xml`),
-    // затем постановка токена на первый шаг (см. `startProcess` в `App.jsx`).
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    // Старт — одно событие: `StartProcess` несёт `bpmn_xml` и называет узел
+    // первого шага (его схема выводит из кнопки старта, см. `startProcess`).
+    // Второго `CompleteBlock` нет: в режиме графа (`ENGINE_ROUTING=graph`) он
+    // закрыл бы шаг, который движок только что активировал, и подсветка уехала
+    // бы на следующий узел (M1, 10.2 п. 1).
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
     const [instanceId, eventName, elementId, outputData] =
       mockSendEvent.mock.calls[0];
 
     expect(instanceId).toMatch(/^inst-cust-/);
     expect(eventName).toBe('StartProcess');
-    expect(elementId).toBe('StartEvent_Customer');
+    expect(elementId).toBe('Task_CreatePurchaseOrder');
     expect(outputData.orderNum).toBe('№101');
     expect(outputData.bpmn_xml).toContain('Process_MilkCustomer_v1');
   });
 
-  // Регрессия: движок закрывает `COMPLETED` тот узел, который был `ACTIVE`,
-  // поэтому первый блок красится только если токен на него встал. Без второго
-  // события старта движок держал `ACTIVE` на `StartEvent_Customer`, и первый
-  // прямоугольник (`Task_CreatePurchaseOrder`) не появлялся в его состоянии
-  // вообще — зелёным он не становился.
-  it('старт процесса переносит токен на первый шаг заказчика', async () => {
-    openAs('Мастер производства');
-
-    fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
-
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
-    const [instanceId, eventName, elementId, outputData] =
-      mockSendEvent.mock.calls[1];
-
-    // Тот же экземпляр, что и у `StartProcess`: иначе токен уехал бы в чужой.
-    expect(instanceId).toBe(mockSendEvent.mock.calls[0][0]);
-    // Пара «событие + узел» в кнопке старта не записана: движок имя события не
-    // разбирает (`mes.in.v1.event.>`), поэтому умолчание — `CompleteBlock`, а
-    // узел схема выводит по связи (`resolveAction`).
-    expect(eventName).toBe('CompleteBlock');
-    expect(elementId).toBe('Task_CreatePurchaseOrder');
-    // Схема уехала первым событием: во втором её нет.
-    expect(outputData.bpmn_xml).toBeUndefined();
-    expect(outputData.orderNum).toBe('№101');
-  });
-
   // Регрессия «кнопка создания внутреннего заказа ругается на дубликат ключа».
-  // `startProcess` отправляет два события подряд, и токен `StartProcess` движок
-  // публикует между ними: WS-кадр приходит раньше, чем обработчик кнопки кладёт
-  // заказ в список. Тогда заказ заводила ветка «незнакомый экземпляр» подписки, а
-  // обработчик добавлял второй такой же — два узла с одним `key={o.id}` в списке
-  // заказов и в таблицах (см. `handleProductionCreateOrder` в `App.jsx`).
+  // Токен старта движок публикует до ответа HTTP на `StartProcess`: WS-кадр
+  // приходит раньше, чем обработчик кнопки кладёт заказ в список. Тогда заказ
+  // заводила ветка «незнакомый экземпляр» подписки, а обработчик добавлял второй
+  // такой же — два узла с одним `key={o.id}` в списке заказов и в таблицах (см.
+  // `handleProductionCreateOrder` в `App.jsx`).
   it('токен старта, обогнавший ответ HTTP, не удваивает заказ', async () => {
     // React пишет предупреждение о дубликате ключа в `console.error`: спай нужен
     // до первого рендера с дублем, поэтому ставим его в начале теста.
     const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
     openAs('Мастер производства');
 
-    // Второе событие старта «зависает»: движок успевает опубликовать токен
-    // первого, а `setOrders` обработчика ещё не выполнился.
-    let releaseStartStep;
-    mockSendEvent
-      .mockResolvedValueOnce({ ok: true, status: 202 })
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            releaseStartStep = () => resolve({ ok: true, status: 202 });
-          })
-      );
+    // Событие старта «зависает»: движок успевает опубликовать токен, а
+    // `setOrders` обработчика ещё не выполнился.
+    let releaseStart;
+    mockSendEvent.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseStart = () => resolve({ ok: true, status: 202 });
+        })
+    );
 
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
     const [instanceId] = mockSendEvent.mock.calls[0];
 
+    // `StartProcess` называет первый шаг — его движок и активирует.
     emitToken({
       instanceId,
-      elementId: 'StartEvent_Customer',
+      elementId: 'Task_CreatePurchaseOrder',
       state: 'ACTIVE',
       payload: { orderNum: '№101', volume: '100 Л' },
     });
@@ -626,7 +601,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     // Приходит ответ HTTP: заказ уже известен, второй такой же не нужен.
     await act(async () => {
-      releaseStartStep();
+      releaseStart();
     });
 
     // Обработчик дошёл до журнала — значит, `setOrders` уже отработал.
@@ -657,12 +632,11 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     fireEvent.click(screen.getByText(/Сформировать и отправить заказ Поставщику/));
 
-    // 1 — перевод заказчика, 2 и 3 — старт процесса Поставщика (стартовое
-    // событие и первый шаг `Task_SupplierCreateDocs`).
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(3));
+    // 1 — перевод заказчика, 2 — старт процесса Поставщика (одно событие:
+    // `StartProcess` называет первый шаг `Task_SupplierCreateDocs`).
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
     const [custInstanceId, custEvent, custElement] = mockSendEvent.mock.calls[0];
     const [suppInstanceId, suppEvent, suppElement] = mockSendEvent.mock.calls[1];
-    const [, suppStepEvent, suppStepElement] = mockSendEvent.mock.calls[2];
 
     expect(custInstanceId).toBe('inst-cust-supp');
     // У кнопки в демо-схеме записаны только надпись и роль: событие нажатия —
@@ -672,11 +646,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     expect(suppInstanceId).toMatch(/^inst-supp-/);
     expect(suppEvent).toBe('StartProcess');
-    expect(suppElement).toBe('StartEvent_Supplier');
-
-    expect(mockSendEvent.mock.calls[2][0]).toBe(suppInstanceId);
-    expect(suppStepEvent).toBe('CompleteBlock');
-    expect(suppStepElement).toBe('Task_SupplierCreateDocs');
+    expect(suppElement).toBe('Task_SupplierCreateDocs');
   });
 
   it('кабинет показывает только шаги, роль которых в схеме принадлежит пользователю', () => {
@@ -784,7 +754,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
     openAs('Мастер производства');
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
     const [, , , outputData] = mockSendEvent.mock.calls[0];
     const project = listProjects()[0];
 
@@ -1160,7 +1130,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
     openAs('Мастер производства');
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
 
     const [instanceId, , , outputData] = mockSendEvent.mock.calls[0];
 
@@ -1295,22 +1265,19 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     fireEvent.click(screen.getAllByText('Принять поставку')[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
 
     const [instanceId, eventName, startElementId, outputData] = mockSendEvent.mock.calls[0];
-    const [, stepEvent, stepElementId] = mockSendEvent.mock.calls[1];
 
     expect(instanceId).toMatch(/^inst-cust-/);
     expect(eventName).toBe('StartProcess');
-    expect(startElementId).toBe('StartEvent_Store');
+    // Первый шаг выведен из схемы: стартовое событие -> задача склада.
+    expect(startElementId).toBe('Task_Store');
     expect(outputData.bpmn_xml).toContain('Process_Store_v1');
     expect(outputData.bpmn_xml).not.toContain('Process_MilkCustomer_v1');
-    // Первый шаг выведен из схемы: стартовое событие -> задача склада.
-    expect(stepEvent).toBe('CompleteBlock');
-    expect(stepElementId).toBe('Task_Store');
   });
 
-  it('схема без кнопки инициатора запускается со стартового события', async () => {
+  it('схема без кнопки инициатора запускается по связи стартового события', async () => {
     createProject({ name: 'Сборка', xml: PICK_PROJECT_XML });
 
     render(<App />);
@@ -1321,18 +1288,15 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(screen.getByText('Запуск по схеме')).toBeTruthy();
     fireEvent.click(screen.getByText('Запустить процесс'));
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
 
     const [instanceId, eventName, startElementId, outputData] = mockSendEvent.mock.calls[0];
-    const [, stepEvent, stepElementId] = mockSendEvent.mock.calls[1];
 
     expect(instanceId).toMatch(/^inst-cust-/);
     expect(eventName).toBe('StartProcess');
-    expect(startElementId).toBe('StartEvent_Pick');
-    expect(outputData.bpmn_xml).toContain('Process_Pick_v1');
     // Токен выводится из единственной исходящей связи стартового события.
-    expect(stepEvent).toBe('CompleteBlock');
-    expect(stepElementId).toBe('Task_Pick');
+    expect(startElementId).toBe('Task_Pick');
+    expect(outputData.bpmn_xml).toContain('Process_Pick_v1');
   });
 
   /**
