@@ -86,7 +86,12 @@ export const ACTION_LOCAL_NAME = 'userAction';
  *    `counterpartEvent` (задаётся вместе с ним);
  *  - `startsProcess` — `bpmn:process/@id` процесса второй стороны, экземпляр
  *    которого запускается нажатием (кнопка «отправить заказ Поставщику»).
- *    Пусто — нажатие не запускает новый процесс.
+ *    Пусто — нажатие не запускает новый процесс;
+ *  - `variables` — переменные процесса, которые нажатие выставляет (пары
+ *    `ключ=значение` через `;`: `variables="stockSufficient=true"`). Пусто —
+ *    нажатие переменных не пишет. По ним шлюз схемы выбирает ветку: условия
+ *    `conditionExpression` читают ровно эти имена, поэтому «кнопка» и
+ *    «значение ветки» — одно объявление в схеме, а не таблица в UI.
  */
 export const ACTION_FIELDS = [
   'id',
@@ -98,6 +103,7 @@ export const ACTION_FIELDS = [
   'counterpartEvent',
   'counterpartElementId',
   'startsProcess',
+  'variables',
 ];
 
 /**

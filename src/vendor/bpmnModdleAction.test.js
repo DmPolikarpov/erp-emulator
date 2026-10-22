@@ -54,6 +54,7 @@ const ACTION = {
   counterpartEvent: 'DocsReceived',
   counterpartElementId: 'Task_WaitForSupplierShipment',
   startsProcess: 'Process_SupplierSupply_v1',
+  variables: '',
 };
 
 /** Узел-хост кнопок в дефолтной схеме Заказчика. */
@@ -99,6 +100,9 @@ describe('bpmn-moddle: кнопки участников (act:userAction)', () =
     expect(modelFields(modelActions(rootElement)[0])).toEqual({
       $type: ACTION_TYPE,
       ...ACTION,
+      // Пустое необязательное поле в XML не пишется, поэтому модель читает его
+      // как `undefined` — так же, как роль и `startsProcess`.
+      variables: undefined,
     });
   });
 
@@ -183,7 +187,8 @@ describe('bpmn-moddle: кнопки участников (act:userAction)', () =
       fields.counterpartEvent,
       fields.counterpartElementId,
       fields.startsProcess,
-    ]).toEqual([undefined, undefined, undefined, undefined, undefined]);
+      fields.variables,
+    ]).toEqual([undefined, undefined, undefined, undefined, undefined, undefined]);
 
     // Текстовый читатель отдаёт все поля строкой: пустые — `''`.
     expect(getElementActions(xml, ACTION_HOST)).toEqual([
@@ -197,6 +202,7 @@ describe('bpmn-moddle: кнопки участников (act:userAction)', () =
         counterpartEvent: '',
         counterpartElementId: '',
         startsProcess: '',
+        variables: '',
       },
     ]);
   });

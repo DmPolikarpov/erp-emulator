@@ -454,6 +454,7 @@ describe('вендорный бандл BPMN Client SDK', () => {
       counterpartEvent: '',
       counterpartElementId: '',
       startsProcess: '',
+      variables: '',
     });
     expect(sdk.getElementRole(xml, 'Task_WaitForSupplierShipment')).toBe('MANAGER');
     expect(sdk.listActions(xml)).toHaveLength(6);

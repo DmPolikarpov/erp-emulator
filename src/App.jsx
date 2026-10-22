@@ -24,6 +24,7 @@ import {
   isDeployInstanceId,
   listActions,
   listFlowElements,
+  parseActionVariables,
   parseXml,
   replaceProcessXml,
   resolveAction,
@@ -1318,15 +1319,32 @@ export default function App() {
     // карточки: событие с пустым узлом движку не уходит.
     if (!entry.action.elementId) return;
 
+    // Переменные кнопки — часть контракта со шлюзом схемы: кривую строку лучше
+    // показать до события, чем отправить нажатие, которое уедет в `default`.
+    let variables = {};
+
+    try {
+      variables = parseActionVariables(entry.action.variables);
+    } catch (error) {
+      setActionErrors(prev => ({
+        ...prev,
+        [order.id]: `Кнопка «${stepName}»: ${error.message}`,
+      }));
+      return;
+    }
+
     setActionLoading(prev => ({ ...prev, [order.id]: `Оркестратор выполняет шаг «${stepName}»...` }));
     setActionErrors(prev => ({ ...prev, [order.id]: null }));
 
     const actedAt = new Date().toLocaleTimeString('ru-RU');
+    // Переменные кнопки (`act:userAction/@variables`) уходят в `output_data`
+    // того же события: по ним шлюз схемы выбирает ветку, поэтому «кнопка» и
+    // «значение ветки» — одно объявление в схеме, а не таблица в кабинете.
     const res = await client.sendEvent(
       instanceId,
       entry.action.event,
       entry.action.elementId,
-      { orderNum: order.id, actedAt }
+      { orderNum: order.id, actedAt, ...variables }
     );
 
     if (!res.ok) {

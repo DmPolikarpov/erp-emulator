@@ -18,6 +18,7 @@ import {
   isValidPayloadKeys,
   isValidRole,
   listFlowElements,
+  parseActionVariables,
 } from '../xml/bpmnXml';
 import { EMPTY_ACTION, ACTION_FIELDS } from '../xml/actionModdle';
 import { EMPTY_TRIGGER, TRIGGER_FIELDS } from '../xml/triggerModdle';
@@ -169,6 +170,7 @@ export const ACTION_FIELD_ERRORS = {
   counterpartEvent: `Недопустимое событие второй стороны. ${ELEMENT_ID_HINT}`,
   counterpartElementId: `Недопустимый узел второй стороны. ${ELEMENT_ID_HINT}`,
   startsProcess: 'Недопустимый запускаемый процесс (ожидается bpmn:process/@id).',
+  variables: 'Переменные — пары ключ=значение через «;» (например, stockSufficient=true); ключ — имя переменной.',
 };
 
 /**
@@ -213,6 +215,15 @@ export function actionFieldError(field, value) {
       return empty || isValidElementId(trimmed) ? '' : ACTION_FIELD_ERRORS.counterpartElementId;
     case 'startsProcess':
       return empty || isValidElementId(trimmed) ? '' : ACTION_FIELD_ERRORS.startsProcess;
+    case 'variables':
+      // Формат проверяет тот же разбор, что и клиент при нажатии (8.1):
+      // «полуразобранная» строка оставила бы шлюз без значения.
+      try {
+        parseActionVariables(trimmed);
+        return '';
+      } catch (error) {
+        return ACTION_FIELD_ERRORS.variables;
+      }
     default:
       return '';
   }
@@ -352,6 +363,11 @@ const ACTION_FORM_FIELDS = [
     label: 'Запускаемый процесс (startsProcess):',
     placeholder: 'Process_Supplier',
     optionsKey: 'processes',
+  },
+  {
+    name: 'variables',
+    label: 'Переменные шлюза (variables), ключ=значение через «;»:',
+    placeholder: 'stockSufficient=true',
   },
 ];
 

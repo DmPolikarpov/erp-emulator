@@ -127,6 +127,7 @@ const fullAction = (overrides = {}) => ({
   counterpartEvent: '',
   counterpartElementId: '',
   startsProcess: '',
+  variables: '',
   ...overrides,
 });
 
@@ -972,6 +973,11 @@ describe('EnginePanel: кнопки участников (act:userAction)', () =
     expect(actionFieldError('counterpartEvent', '')).toBe('');
     expect(actionFieldError('startsProcess', 'Process_Supplier')).toBe('');
     expect(actionFieldError('startsProcess', '1 плохо')).toBe(ACTION_FIELD_ERRORS.startsProcess);
+    expect(actionFieldError('variables', '')).toBe('');
+    expect(actionFieldError('variables', 'stockSufficient=true; note=')).toBe('');
+    expect(actionFieldError('variables', 'stockSufficient')).toBe(
+      ACTION_FIELD_ERRORS.variables
+    );
     expect(actionFieldError('unknown', 'что угодно')).toBe('');
   });
 

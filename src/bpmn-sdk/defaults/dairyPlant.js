@@ -28,8 +28,12 @@ import { buildProjectXml } from '../xml/projectXml';
  *  - дорожки (`bpmn:lane`) сохранены: по ним видно, кто ведёт шаг;
  *  - каждая задача несёт кнопки `act:userAction` — надпись, иконку, роль и
  *    узел, который станет активным после нажатия. Ветвление нарисовано
- *    `bpmn:exclusiveGateway`, но кнопки ведут сразу в целевую задачу, поэтому
- *    токен на шлюз не встаёт: кабинет не умеет «нажимать шлюз»;
+ *    `bpmn:exclusiveGateway`: у каждой «Да»-связи есть `conditionExpression`, а
+ *    `default` указывает на негативную ветку, поэтому движок M1
+ *    (`ENGINE_ROUTING=graph`) выбирает ветку сам. Кнопки объявляют те же
+ *    значения через `variables` (`haveStock` → `stockSufficient=true`), так что
+ *    `elementId` кнопки и маршрут графа совпадают — это проверяет
+ *    `dairyPlant.test.js`;
  *  - процессные роли (`role:catalog`) — это вход в кабинет: 9 ролей завода и
  *    3 роли поставщика, руководители (`kind="EXECUTIVE"`) видят схему и метрики;
  *  - служебные задачи ERP (`Task_ERP_*`) объявлены `userTask`, а не
@@ -70,6 +74,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
                   xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
                   xmlns:act="http://erp.mes/schema/bpmn/action"
                   xmlns:role="http://erp.mes/schema/bpmn/roles"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                   id="Definitions_DairyPlant"
                   targetNamespace="http://bpmn.io/schema/bpmn">
   <bpmn:process id="Process_Dairy" name="Молочный завод: заказ, производство, отгрузка" isExecutable="true">
@@ -176,8 +181,8 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 
     <bpmn:userTask id="Task_CheckStock" name="Проверить остатки ГП">
       <bpmn:extensionElements>
-        <act:userAction id="haveStock" label="ГП хватает — отгрузить со склада" role="SALES" icon="Truck" elementId="Task_Ship" />
-        <act:userAction id="needPurchase" label="ГП не хватает — закупить сырьё" role="SALES" icon="ShoppingCart" elementId="Task_CreatePO" />
+        <act:userAction id="haveStock" label="ГП хватает — отгрузить со склада" role="SALES" icon="Truck" elementId="Task_Ship" variables="stockSufficient=true" />
+        <act:userAction id="needPurchase" label="ГП не хватает — закупить сырьё" role="SALES" icon="ShoppingCart" elementId="Task_CreatePO" variables="stockSufficient=false" />
       </bpmn:extensionElements>
       <bpmn:documentation>СОП-03: запрос остатков готовой продукции в 1С:ERP и оценка покрытия заказа.</bpmn:documentation>
       <bpmn:incoming>SF3</bpmn:incoming>
@@ -185,7 +190,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="SALES" />
     </bpmn:userTask>
 
-    <bpmn:exclusiveGateway id="Gateway_Stock" name="Хватает ГП?" default="SF6">
+    <bpmn:exclusiveGateway id="Gateway_Stock" name="Хватает ГП?" default="SF5">
       <bpmn:incoming>SF4</bpmn:incoming>
       <bpmn:outgoing>SF5</bpmn:outgoing>
       <bpmn:outgoing>SF6</bpmn:outgoing>
@@ -255,8 +260,8 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 
     <bpmn:userTask id="Task_AnalyzeMilk" name="Лабораторный анализ">
       <bpmn:extensionElements>
-        <act:userAction id="qualityPassed" label="ГОСТ ОК — оприходовать партию" role="QC" icon="CheckCircle2" elementId="Task_StoreMilk" />
-        <act:userAction id="qualityRejected" label="Брак — оформить возврат" role="QC" icon="AlertCircle" elementId="Task_ReturnMilk" />
+        <act:userAction id="qualityPassed" label="ГОСТ ОК — оприходовать партию" role="QC" icon="CheckCircle2" elementId="Task_StoreMilk" variables="labPassed=true" />
+        <act:userAction id="qualityRejected" label="Брак — оформить возврат" role="QC" icon="AlertCircle" elementId="Task_ReturnMilk" variables="labPassed=false" />
       </bpmn:extensionElements>
       <bpmn:documentation>СОП-09: жирность, белок, кислотность, антибиотики, КМАФАнМ.</bpmn:documentation>
       <bpmn:incoming>SF12</bpmn:incoming>
@@ -264,7 +269,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="QC" />
     </bpmn:userTask>
 
-    <bpmn:exclusiveGateway id="Gateway_Quality" name="ГОСТ ОК?" default="SF14">
+    <bpmn:exclusiveGateway id="Gateway_Quality" name="ГОСТ ОК?" default="SF15">
       <bpmn:incoming>SF13</bpmn:incoming>
       <bpmn:outgoing>SF14</bpmn:outgoing>
       <bpmn:outgoing>SF15</bpmn:outgoing>
@@ -338,8 +343,8 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 
     <bpmn:userTask id="Tech_Pasteurize" name="Пастеризация">
       <bpmn:extensionElements>
-        <act:userAction id="pasteurizeDone" label="Режим выдержан, продукт пастеризован" role="TECHNOLOGIST" icon="CheckCircle2" elementId="Tech_Ferment" />
-        <act:userAction id="pasteurizeCrash" label="Авария ПОУ — эскалация в ERP" role="TECHNOLOGIST" icon="AlertCircle" elementId="Task_ERP_CriticalAlert" />
+        <act:userAction id="pasteurizeDone" label="Режим выдержан, продукт пастеризован" role="TECHNOLOGIST" icon="CheckCircle2" elementId="Tech_Ferment" variables="pasteurizeOk=true" />
+        <act:userAction id="pasteurizeCrash" label="Авария ПОУ — эскалация в ERP" role="TECHNOLOGIST" icon="AlertCircle" elementId="Task_ERP_CriticalAlert" variables="pasteurizeOk=false" />
       </bpmn:extensionElements>
       <bpmn:documentation>ТИ-01.5: пастеризация 85±2 °C с выдержкой 15–20 с; при отказе ПОУ — останов линии.</bpmn:documentation>
       <bpmn:incoming>SF22_Homog</bpmn:incoming>
@@ -347,9 +352,10 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="TECHNOLOGIST" />
     </bpmn:userTask>
 
-    <bpmn:exclusiveGateway id="Gateway_PasteurizeOK" name="Режим выдержан?" default="SF_T5">
+    <bpmn:exclusiveGateway id="Gateway_PasteurizeOK" name="Режим выдержан?" default="SF_T5_No">
       <bpmn:incoming>SF23_Past</bpmn:incoming>
       <bpmn:outgoing>SF_T5</bpmn:outgoing>
+      <bpmn:outgoing>SF_T5_No</bpmn:outgoing>
     </bpmn:exclusiveGateway>
 
     <bpmn:userTask id="Tech_Ferment" name="Ферментация / сквашивание">
@@ -364,8 +370,8 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 
     <bpmn:userTask id="Tech_CoolCheck" name="Охлаждение и технологический контроль">
       <bpmn:extensionElements>
-        <act:userAction id="techQCPassed" label="Партия соответствует ТУ" role="TECHNOLOGIST" icon="CheckCircle2" elementId="Tech_Pack" />
-        <act:userAction id="techQCFailed" label="Отклонение ТУ — на переработку" role="TECHNOLOGIST" icon="AlertCircle" elementId="Tech_Rework" />
+        <act:userAction id="techQCPassed" label="Партия соответствует ТУ" role="TECHNOLOGIST" icon="CheckCircle2" elementId="Tech_Pack" variables="techQcPassed=true" />
+        <act:userAction id="techQCFailed" label="Отклонение ТУ — на переработку" role="TECHNOLOGIST" icon="AlertCircle" elementId="Tech_Rework" variables="techQcPassed=false" />
       </bpmn:extensionElements>
       <bpmn:documentation>ТИ-01.7: охлаждение, контроль кислотности, вкуса и консистенции.</bpmn:documentation>
       <bpmn:incoming>SF_T6</bpmn:incoming>
@@ -373,7 +379,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="TECHNOLOGIST" />
     </bpmn:userTask>
 
-    <bpmn:exclusiveGateway id="Gateway_TechQC" name="ТУ соблюдены?" default="SF_T8_Yes">
+    <bpmn:exclusiveGateway id="Gateway_TechQC" name="ТУ соблюдены?" default="SF_T8_No">
       <bpmn:incoming>SF_T7</bpmn:incoming>
       <bpmn:outgoing>SF_T8_Yes</bpmn:outgoing>
       <bpmn:outgoing>SF_T8_No</bpmn:outgoing>
@@ -381,9 +387,9 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 
     <bpmn:userTask id="Tech_Pack" name="Розлив и упаковка">
       <bpmn:extensionElements>
-        <act:userAction id="packCompleted" label="Партия упакована и промаркирована" role="PRODUCTION" icon="PackageCheck" elementId="Task_StoreFG" />
-        <act:userAction id="packDegraded" label="Деградация линии — коррекция" role="PRODUCTION" icon="AlertCircle" elementId="Tech_LogDegradation" />
-        <act:userAction id="packCrashed" label="Останов линии — эскалация в ERP" role="PRODUCTION" icon="AlertCircle" elementId="Task_ERP_CriticalAlert" />
+        <act:userAction id="packCompleted" label="Партия упакована и промаркирована" role="PRODUCTION" icon="PackageCheck" elementId="Task_StoreFG" variables="packOutcome=good" />
+        <act:userAction id="packDegraded" label="Деградация линии — коррекция" role="PRODUCTION" icon="AlertCircle" elementId="Tech_LogDegradation" variables="packOutcome=degraded" />
+        <act:userAction id="packCrashed" label="Останов линии — эскалация в ERP" role="PRODUCTION" icon="AlertCircle" elementId="Task_ERP_CriticalAlert" variables="packOutcome=crash" />
       </bpmn:extensionElements>
       <bpmn:documentation>ТИ-01.8: фасовка, маркировка партии и даты, передача на склад ГП.</bpmn:documentation>
       <bpmn:incoming>SF_T8_Yes</bpmn:incoming>
@@ -391,7 +397,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="PRODUCTION" />
     </bpmn:userTask>
 
-    <bpmn:exclusiveGateway id="Gateway_PackOutcome" name="Итог упаковки?" default="SF18_ToWarehouse">
+    <bpmn:exclusiveGateway id="Gateway_PackOutcome" name="Итог упаковки?" default="SF_T_Err2">
       <bpmn:incoming>SF_T10</bpmn:incoming>
       <bpmn:outgoing>SF18_ToWarehouse</bpmn:outgoing>
       <bpmn:outgoing>SF_T_Esc1</bpmn:outgoing>
@@ -444,6 +450,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       </bpmn:extensionElements>
       <bpmn:documentation>ERP-L4 / ДИ-РУК-02: остановка заказов, уведомление директора, план восстановления.</bpmn:documentation>
       <bpmn:incoming>SF_T_Err2</bpmn:incoming>
+      <bpmn:incoming>SF_T5_No</bpmn:incoming>
       <bpmn:outgoing>SF_T_Err3</bpmn:outgoing>
       <bpmn:potentialOwner name="DIRECTOR" />
     </bpmn:userTask>
@@ -474,7 +481,9 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
     <bpmn:sequenceFlow id="SF3" sourceRef="Task_ProcessOrder" targetRef="Task_CheckStock" />
     <bpmn:sequenceFlow id="SF4" sourceRef="Task_CheckStock" targetRef="Gateway_Stock" />
     <bpmn:sequenceFlow id="SF5" name="Нет" sourceRef="Gateway_Stock" targetRef="Task_CreatePO" />
-    <bpmn:sequenceFlow id="SF6" name="Да" sourceRef="Gateway_Stock" targetRef="Task_Ship" />
+    <bpmn:sequenceFlow id="SF6" name="Да" sourceRef="Gateway_Stock" targetRef="Task_Ship">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">\${stockSufficient == 'true'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="SF7" sourceRef="Task_CreatePO" targetRef="Task_ApprovePO" />
     <bpmn:sequenceFlow id="SF8" sourceRef="Task_ApprovePO" targetRef="Task_SendPO" />
     <bpmn:sequenceFlow id="SF9" sourceRef="Task_SendPO" targetRef="Task_WaitPOConfirmed" />
@@ -482,24 +491,35 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
     <bpmn:sequenceFlow id="SF11" sourceRef="Task_ReceiveMilk" targetRef="Task_AcceptMilk" />
     <bpmn:sequenceFlow id="SF12" sourceRef="Task_AcceptMilk" targetRef="Task_AnalyzeMilk" />
     <bpmn:sequenceFlow id="SF13" sourceRef="Task_AnalyzeMilk" targetRef="Gateway_Quality" />
-    <bpmn:sequenceFlow id="SF14" name="Да" sourceRef="Gateway_Quality" targetRef="Task_StoreMilk" />
+    <bpmn:sequenceFlow id="SF14" name="Да" sourceRef="Gateway_Quality" targetRef="Task_StoreMilk">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">\${labPassed == 'true'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="SF15" name="Нет" sourceRef="Gateway_Quality" targetRef="Task_ReturnMilk" />
     <bpmn:sequenceFlow id="SF16" sourceRef="Task_ReturnMilk" targetRef="End_Reject" />
     <bpmn:sequenceFlow id="SF17" sourceRef="Task_StoreMilk" targetRef="Tech_CleanCool" />
-    <bpmn:sequenceFlow id="SF18_ToWarehouse" name="Годная" sourceRef="Gateway_PackOutcome" targetRef="Task_StoreFG" />
+    <bpmn:sequenceFlow id="SF18_ToWarehouse" name="Годная" sourceRef="Gateway_PackOutcome" targetRef="Task_StoreFG">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">\${packOutcome == 'good'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="SF19" sourceRef="Task_StoreFG" targetRef="Task_Ship" />
     <bpmn:sequenceFlow id="SF20_Clean" sourceRef="Tech_CleanCool" targetRef="Tech_Normalize" />
     <bpmn:sequenceFlow id="SF21_Norm" sourceRef="Tech_Normalize" targetRef="Tech_Homogenize" />
     <bpmn:sequenceFlow id="SF22_Homog" sourceRef="Tech_Homogenize" targetRef="Tech_Pasteurize" />
     <bpmn:sequenceFlow id="SF23_Past" sourceRef="Tech_Pasteurize" targetRef="Gateway_PasteurizeOK" />
-    <bpmn:sequenceFlow id="SF_T5" name="Да" sourceRef="Gateway_PasteurizeOK" targetRef="Tech_Ferment" />
+    <bpmn:sequenceFlow id="SF_T5" name="Да" sourceRef="Gateway_PasteurizeOK" targetRef="Tech_Ferment">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">\${pasteurizeOk == 'true'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="SF_T5_No" name="Нет" sourceRef="Gateway_PasteurizeOK" targetRef="Task_ERP_CriticalAlert" />
     <bpmn:sequenceFlow id="SF_T6" sourceRef="Tech_Ferment" targetRef="Tech_CoolCheck" />
     <bpmn:sequenceFlow id="SF_T7" sourceRef="Tech_CoolCheck" targetRef="Gateway_TechQC" />
-    <bpmn:sequenceFlow id="SF_T8_Yes" name="Да" sourceRef="Gateway_TechQC" targetRef="Tech_Pack" />
+    <bpmn:sequenceFlow id="SF_T8_Yes" name="Да" sourceRef="Gateway_TechQC" targetRef="Tech_Pack">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">\${techQcPassed == 'true'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="SF_T8_No" name="Нет" sourceRef="Gateway_TechQC" targetRef="Tech_Rework" />
     <bpmn:sequenceFlow id="SF_T9_Reject" sourceRef="Tech_Rework" targetRef="End_TechDefect" />
     <bpmn:sequenceFlow id="SF_T10" sourceRef="Tech_Pack" targetRef="Gateway_PackOutcome" />
-    <bpmn:sequenceFlow id="SF_T_Esc1" name="Деградация" sourceRef="Gateway_PackOutcome" targetRef="Tech_LogDegradation" />
+    <bpmn:sequenceFlow id="SF_T_Esc1" name="Деградация" sourceRef="Gateway_PackOutcome" targetRef="Tech_LogDegradation">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">\${packOutcome == 'degraded'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="SF_T_Err2" name="Авария" sourceRef="Gateway_PackOutcome" targetRef="Task_ERP_CriticalAlert" />
     <bpmn:sequenceFlow id="SF_T_Esc2" sourceRef="Tech_LogDegradation" targetRef="Task_ERP_HandleDeviation" />
     <bpmn:sequenceFlow id="SF_T_Esc3" sourceRef="Task_ERP_HandleDeviation" targetRef="End_ERP_DeviationLogged" />
@@ -788,6 +808,11 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmndi:BPMNEdge id="SF_T5_di" bpmnElement="SF_T5">
         <di:waypoint x="2440" y="710" />
         <di:waypoint x="2490" y="710" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF_T5_No_di" bpmnElement="SF_T5_No">
+        <di:waypoint x="2420" y="730" />
+        <di:waypoint x="2420" y="1000" />
+        <di:waypoint x="3120" y="1000" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF_T6_di" bpmnElement="SF_T6">
         <di:waypoint x="2600" y="710" />

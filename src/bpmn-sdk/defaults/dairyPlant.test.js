@@ -36,6 +36,7 @@ import {
   getStartAction,
   isValidAction,
   listActions,
+  parseActionVariables,
   parseXml,
   validateEngineSchema,
   validateProjectSchema,
@@ -136,6 +137,90 @@ function diIndex(xml) {
   });
 
   return { shapes, edges };
+}
+
+/** Текст `conditionExpression` связи (пробелы обрезаны). */
+function conditionTextOf(xml, flowId) {
+  const flow = elementById(xml, flowId);
+  if (!flow) return '';
+
+  const condition = childrenOf(flow).find(
+    (child) => getLocalName(child) === 'conditionExpression'
+  );
+
+  return condition ? (condition.textContent || '').trim() : '';
+}
+
+/**
+ * Условие связи в грамматике 7.2.
+ *
+ * Сравнение строк — `==`/`!=`, чисел — `>`, `>=`, `<`, `<=`; отсутствующая
+ * переменная читается как пустая строка (так её видит EL движка).
+ *
+ * @returns {boolean|null} `null` — условия нет; иначе выполнено ли оно.
+ */
+function conditionHolds(text, variables) {
+  const expression = String(text || '').trim();
+
+  if (expression === '') return null;
+
+  const hit =
+    /^\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=|>=|<=|>|<)\s*(?:'([^']*)'|"([^"]*)"|(-?\d+(?:\.\d+)?))\s*\}$/.exec(
+      expression
+    );
+
+  // Демо-схема других форм не использует: если появится — тест должен упасть,
+  // а не «угадать» ветку.
+  if (!hit) throw new Error('Условие вне грамматики 7.2: ' + expression);
+
+  const actual = variables[hit[1]] === undefined ? '' : variables[hit[1]];
+  const expected =
+    hit[3] !== undefined ? hit[3] : hit[4] !== undefined ? hit[4] : hit[5];
+
+  if (hit[2] === '==') return actual === expected;
+  if (hit[2] === '!=') return actual !== expected;
+
+  const left = Number(actual);
+  const right = Number(expected);
+
+  // Нечисловое сравнение движок глушит в `false` (`transition.rs`).
+  if (Number.isNaN(left) || Number.isNaN(right)) return false;
+
+  if (hit[2] === '>') return left > right;
+  if (hit[2] === '>=') return left >= right;
+  if (hit[2] === '<') return left < right;
+  return left <= right;
+}
+
+/**
+ * Маршрут движка по шлюзу (7.1): связи в порядке объявления, default — после
+ * всех; связь без условия выигрывает сразу.
+ *
+ * @param {Array<{id: string, targetRef: string, conditionText: string}>} flows
+ *   исходящие связи шлюза в порядке `<process>`.
+ * @param {string} defaultFlowId связь из `<bpmn:exclusiveGateway default="...">`.
+ * @param {Object<string, string>} variables переменные кнопки.
+ * @returns {string} узел, на который встанет токен (`''` — не выбран).
+ */
+function routeGateway(flows, defaultFlowId, variables) {
+  let fallback = '';
+
+  for (const flow of flows) {
+    const holds = conditionHolds(flow.conditionText, variables);
+
+    if (holds === null) {
+      if (flow.id === defaultFlowId) {
+        fallback = flow.targetRef;
+        continue;
+      }
+
+      return flow.targetRef;
+    }
+
+    if (holds) return flow.targetRef;
+  }
+
+  return fallback;
 }
 
 describe('dairyPlant: процессы', () => {
@@ -289,6 +374,88 @@ describe('dairyPlant: кнопки и роли', () => {
     expect(flowNodeIds(DAIRY_PLANT_PROCESS_XML)).toContain(
       shipMilk.action.counterpartElementId
     );
+  });
+});
+
+/**
+ * Маршрут, который посчитает движок M1 (дизайн 7.1–7.2): переменные кнопки
+ * подставляются в условия связей шлюза, и «Да»/«Нет» должны вести туда же,
+ * куда ведёт `elementId` кнопки. Это и есть совместимость legacy-кнопок с
+ * графом: у каждой кнопки ровно один узел.
+ */
+describe('dairyPlant: маршрут кнопок через шлюзы', () => {
+  const xml = DAIRY_PLANT_PROCESS_XML;
+  const flows = flowIndex(xml);
+  const actions = listActions(xml);
+
+  /** Исходящие связи шлюза в порядке `<process>`. */
+  function outgoingOf(gatewayId) {
+    return Object.keys(flows)
+      .filter((flowId) => flows[flowId].sourceRef === gatewayId)
+      .map((flowId) => ({
+        id: flowId,
+        targetRef: flows[flowId].targetRef,
+        conditionText: conditionTextOf(xml, flowId),
+      }));
+  }
+
+  it('у каждого шлюза один default без условия и условия на остальных', () => {
+    const gateways = processChildren(xml, 'exclusiveGateway');
+
+    expect(gateways).toHaveLength(5);
+
+    gateways.forEach((gateway) => {
+      const gatewayId = gateway.getAttribute('id');
+      const defaultFlowId = gateway.getAttribute('default') || '';
+      const outgoing = outgoingOf(gatewayId);
+      const defaultFlow = outgoing.find((flow) => flow.id === defaultFlowId);
+
+      expect(defaultFlow).toBeTruthy();
+      expect(defaultFlow.conditionText).toBe('');
+      expect(outgoing.length).toBeGreaterThan(1);
+      outgoing
+        .filter((flow) => flow.id !== defaultFlowId)
+        .forEach((flow) => expect(flow.conditionText).not.toBe(''));
+    });
+  });
+
+  it('переменные кнопки-решения ведут в её же elementId', () => {
+    processChildren(xml, 'exclusiveGateway').forEach((gateway) => {
+      const gatewayId = gateway.getAttribute('id');
+      const defaultFlowId = gateway.getAttribute('default') || '';
+      const incoming = Object.keys(flows).filter(
+        (flowId) => flows[flowId].targetRef === gatewayId
+      );
+
+      expect(incoming).toHaveLength(1);
+
+      const hostId = flows[incoming[0]].sourceRef;
+      const decisions = actions.filter((entry) => entry.elementId === hostId);
+
+      expect(decisions.length).toBeGreaterThanOrEqual(2);
+
+      decisions.forEach(({ action }) => {
+        expect(action.variables).not.toBe('');
+
+        const variables = parseActionVariables(action.variables);
+        const target = routeGateway(outgoingOf(gatewayId), defaultFlowId, variables);
+
+        // Ошибка читается как «кнопка X ведёт в Y, а граф — в Z».
+        expect([action.id, target]).toEqual([action.id, action.elementId]);
+      });
+    });
+  });
+
+  it('без переменной кнопка уезжает в негативную ветку (fail-closed)', () => {
+    // Старый клиент или ручное событие: решения нет — безопаснее остановить
+    // линию или вернуть партию, чем молча отгрузить (приложение A).
+    const gateway = processChildren(xml, 'exclusiveGateway').find(
+      (node) => node.getAttribute('id') === 'Gateway_Stock'
+    );
+
+    expect(
+      routeGateway(outgoingOf('Gateway_Stock'), gateway.getAttribute('default'), {})
+    ).toBe('Task_CreatePO');
   });
 });
 
