@@ -1738,6 +1738,34 @@ export default function App() {
       .map((entry) => ({ ...entry, stepName: stepNames[entry.elementId] || entry.elementId }));
   })();
 
+  /**
+   * Активный шаг — внешняя задача (`bpmn:serviceTask`)?
+   *
+   * У такого шага нет `act:userAction`: команду публикует движок, а токен
+   * двигает ответ воркера. Кабинет показывает подсказку вместо кнопок, чтобы
+   * пустой блок действий не читался как ошибка (`schemaStepActions`).
+   *
+   * @type {{name: string, topic: string}|null}
+   */
+  const activeExternalTask = (() => {
+    const activeElementId = activeStepOf(currentOrder, currentUser.org);
+    if (!activeElementId) return null;
+
+    const doc = parseXml(schemaXml(currentUser.org));
+    if (!doc) return null;
+
+    const node = Array.from(doc.getElementsByTagName('*')).find(
+      (item) => item.getAttribute('id') === activeElementId
+    );
+
+    if (!node || getLocalName(node) !== 'serviceTask') return null;
+
+    return {
+      name: node.getAttribute('name') || activeElementId,
+      topic: node.getAttribute('camunda:topic') || 'default',
+    };
+  })();
+
   /* ------------------------------ *
    * Локальный кэш схемы в браузере
    * ------------------------------ */
@@ -2246,6 +2274,21 @@ export default function App() {
                 )}
 
                 {actionErrors[currentOrder.id] && <RenderActionStatus orderId={currentOrder.id} />}
+              </div>
+            )}
+
+            {/* 7.1. ВНЕШНЯЯ ЗАДАЧА (`bpmn:serviceTask`). Кнопок у шага нет:
+                движок уже опубликовал команду воркеру, и токен сдвинет его
+                ответ. Подсказка объясняет пустой блок действий. */}
+            {currentOrder && schemaStepActions.length === 0 && activeExternalTask && (
+              <div style={{ padding: '16px', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', marginBottom: '16px' }}>
+                <p style={{ fontSize: '14px', margin: '0 0 8px 0', color: '#1e40af' }}>
+                  ⚙️ Шаг «{activeExternalTask.name}» исполняет внешняя система (тема <code>{activeExternalTask.topic}</code>) [Заказ {currentOrder.id}].
+                </p>
+                <p style={{ fontSize: '12px', margin: 0, color: '#1e3a8a' }}>
+                  Команда опубликована в <code>mes.out.v1.cmd.{activeExternalTask.topic}</code>.
+                  Результат придёт в кабинет автоматически: ответ воркера двигает процесс дальше.
+                </p>
               </div>
             )}
           </div>

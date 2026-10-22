@@ -54,7 +54,7 @@
 | 3 пула: Клиент, Завод, Поставщик | 2 процесса; роль клиента играет кнопка старта завода | в демо кабинет клиента не ведёт шагов; вернётся в M5 |
 | 6 `bpmn:messageFlow` | `startsProcess`, `counterpartEvent` | движок не исполняет message flow (README, огр. 12) → M3 |
 | 4 `sendTask`, 1 `receiveTask`, 1 `subProcess`, 1 `intermediateThrowEvent`, 3 `intermediateCatchEvent`, 5 `boundaryEvent` (message/error/escalation) | `userTask` + кнопки, ветки — шлюзами | этих типов нет в `ENGINE_FLOW_NODE_TYPES`; определение с ними не компилируется |
-| 2 `serviceTask` | `Task_ERP_HandleDeviation`, `Task_ERP_CriticalAlert` объявлены `userTask` | у клиента нет воркеров, токен на `serviceTask` некому двигать → M2 |
+| 2 `serviceTask` | `Task_ERP_HandleDeviation`, `Task_ERP_CriticalAlert` — `bpmn:serviceTask` с `camunda:topic="erp"` | шаг исполняет воркер (мок в демо), кнопок у шага нет — M2 |
 | 3 `exclusiveGateway` | 5 `exclusiveGateway` | ветки брака и аварий разложены по дорожкам, чтобы шаг читался без легенды |
 | 6 `bpmn:lane` завода | 6 `bpmn:lane` | сохранены как есть |
 
@@ -65,7 +65,7 @@
 | 1 | Движок не исполняет граф: `parse_and_compile` вызывается только для сохранения определения, `BpmEngine` не запускается; токен ставится по `element_id` из события | следующий шаг выбирает нажатая кнопка | [`bpmn-engine/src/main.rs`](../../bpmn-engine/src/main.rs), вендорный крейт `bpmn-engine/vendor/bpm-engine` | M1 |
 | 2 | У шлюзов были только подписи «Да/Нет/Годная/…» — условий не было *(закрыто в M1, шаг 1)* | решение принимает человек (до включения графа) | [`dairyPlant.js`](../src/bpmn-sdk/defaults/dairyPlant.js) + M1 | M1 |
 | 3 | Продвижение по ответу ERP было захардкожено в `match element_id` *(закрыто в M1, шаг 3)* | двигались только `ServiceTask_ValidateOrder` / `ServiceTask_ReserveStock`; теперь маршрут по графу | [`main.rs`](../../bpmn-engine/src/main.rs) + `runtime/` | M1 |
-| 4 | Нет воркеров для `serviceTask` | `Task_ERP_*` — обычные `userTask` | контракт воркера + шина | M2 |
+| 4 | Нет воркеров для `serviceTask` *(закрыто в M2)* | `Task_ERP_*` — `serviceTask` с темой `erp`; команду и ответ ведёт воркер | контракт воркера + шина | M2 |
 | 5 | `messageFlow`/`trg:processTrigger` не исполняются | поставщика стартует клиент (`startProcess`) | движок + схема | M3 |
 | 6 | Роль узла — маршрутизация UI, а не авторизация (огр. 10) | шаг можно провести прямым `sendEvent` мимо роли | WS-шлюз + серверная схема | M6 |
 | 7 | Метрики считает браузер (огр. 13) | у второго клиента инфографика пустая | серверная метрика из `tokens`/`execution_history` | M7 |
@@ -135,10 +135,11 @@
 ### M2. Воркеры ERP и `serviceTask` — P0, L
 
 **Зачем.** Два шага демо — обращения к ERP (`Task_ERP_HandleDeviation`,
-`Task_ERP_CriticalAlert`). Ответ ERP уже двигает экземпляр по графу (M1, шаг 3), а
-сами `Task_ERP_*` остаются обычными `userTask`, которые «исполняет» человек;
-ретраев и идемпотентности ответов нет. Пока контракта воркера нет, «авария линии» —
-кнопка, а не интеграция.
+`Task_ERP_CriticalAlert`). Закрыто: оба объявлены `bpmn:serviceTask` с темой
+`erp`, движок сам публикует команду воркеру, ответ двигает токен по графу (M1,
+шаг 3), временные ошибки уходят в ретрай с backoff, а исчерпание попыток — в
+`ActionRequiredEvent`. В демо роль 1С играет мок-воркер, поэтому «авария линии»
+наступает без кнопки.
 
 **Задачи.**
 
@@ -155,25 +156,36 @@
       ключ `<instance>:<element>:<token>` приходит в ответе; без ключа повтор
       гасится отсутствием `Waiting`-токена. Ответ на узел, который сейчас не ждёт,
       игнорируется — раньше он закрывал соседний через fallback.)*
-- [ ] Ретраи и компенсация вместо мгновенного `FAILED` (огр. 4): `retry_count`, `backoff`,
-      `ActionRequiredEvent` — крайний случай.
-- [ ] Демо: `Task_ERP_*` → `bpmn:serviceTask`; кнопки `applyDeviation` / `escalateCritical`
-      убрать, оставить показ результата.
-- [ ] Мок-воркер (NATS-подписчик) для показа сценария без 1С.
+- [x] Ретраи и компенсация вместо мгновенного `FAILED` (огр. 4): `retry_count`, `backoff`,
+      `ActionRequiredEvent` — крайний случай. *(Сделано: `erp_retry` (миграция 0002),
+      `failure_plan`/`backoff_secs`, публикатор ретраев в `main.rs`; компенсация —
+      `ActionRequiredEvent` в `mes.out.v1.cmd.<system>`.)*
+- [x] Демо: `Task_ERP_*` → `bpmn:serviceTask`; кнопки `applyDeviation` / `escalateCritical`
+      убрать, оставить показ результата. *(Сделано: `camunda:topic="erp"`,
+      `camunda:retries="2"`; кабинет показывает подсказку «шаг исполняет внешняя
+      система» вместо кнопок.)*
+- [x] Мок-воркер (NATS-подписчик) для показа сценария без 1С. *(Сделано:
+      `src/bin/erp_mock_worker.rs` + `erp-mock-worker.yaml`; читает
+      `mes.out.v1.cmd.erp`, отвечает тем же `idempotency_key`, умеет проваливать
+      первые попытки для демо backoff.)*
 
 **Готово, когда.**
 
 - Падение пастеризации закрывает `Task_ERP_CriticalAlert` ответом мока, `End_ERP_Aborted`
-  наступает без нажатия кнопки. *(Активация и команда уже есть; ждёт демо-схему
-  и мок-воркер.)*
+  наступает без нажатия кнопки. *(Сделано: демо-схема + мок-воркер.)*
 - Повторная публикация ответа не меняет состояние. *(Проверяется ключом
   `idempotency_key`.)*
-- Ответ с `retryable = true` уходит в ретрай, а не в `FAILED`.
+- Ответ с `retryable = true` уходит в ретрай, а не в `FAILED`. *(Сделано:
+  `failure_plan` + `erp_retry`; юнит-тесты в `runtime/mod.rs`.)*
 
 **Файлы:** [`main.rs`](../../bpmn-engine/src/main.rs),
 [`events.rs`](../../bpmn-engine/src/events.rs),
 [`nats_client.rs`](../../bpmn-engine/src/nats_client.rs),
-[`dairyPlant.js`](../src/bpmn-sdk/defaults/dairyPlant.js), мок-воркер (новый каталог).
+[`runtime/mod.rs`](../../bpmn-engine/src/runtime/mod.rs),
+[`runtime/pump.rs`](../../bpmn-engine/src/runtime/pump.rs),
+мок-воркер [`src/bin/erp_mock_worker.rs`](../../bpmn-engine/src/bin/erp_mock_worker.rs)
+и [`erp-mock-worker.yaml`](../../bpmn-engine/erp-mock-worker.yaml),
+[`dairyPlant.js`](../src/bpmn-sdk/defaults/dairyPlant.js).
 
 ### M3. Межпроцессные сообщения — P1, M
 
@@ -365,7 +377,7 @@ npm run build
 | --- | --- | --- | --- |
 | `Gateway_Stock` — «Хватает ГП?» | `stockSufficient` | «Да» → `Task_Ship` | «Нет» → `Task_CreatePO` |
 | `Gateway_Quality` — «ГОСТ ОК?» | `labPassed` | «Да» → `Task_StoreMilk` | «Нет» → `Task_ReturnMilk` → `End_Reject` |
-| `Gateway_PasteurizeOK` — «Режим выдержан?» | `pasteurizeOk` | «Да» → `Tech_Ferment` | ветки нет: аварию уводит кнопка `pasteurizeCrash` в `Task_ERP_CriticalAlert` |
+| `Gateway_PasteurizeOK` — «Режим выдержан?» | `pasteurizeOk` | «Да» → `Tech_Ferment` | «Нет» (default, `SF_T5_No`) → `Task_ERP_CriticalAlert` → `End_ERP_Aborted` |
 | `Gateway_TechQC` — «ТУ соблюдены?» | `techQcPassed` | «Да» → `Tech_Pack` | «Нет» → `Tech_Rework` → `End_TechDefect` |
 | `Gateway_PackOutcome` — «Итог упаковки?» | `packOutcome` | «Годная» → `Task_StoreFG` → `Task_Ship` | «Деградация» → `Tech_LogDegradation` → `Task_ERP_HandleDeviation`; «Авария» → `Task_ERP_CriticalAlert` → `End_ERP_Aborted` |
 
