@@ -51,6 +51,11 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
   `DEFAULT_SUPPLIER_BPMN_XML`, `INSTANCE_PREFIX`, `ENGINE_EVENTS`, `ENGINE_ELEMENTS`,
   `SOCKET_EVENTS`, `SOCKET_STATUS`, `TOKEN_STATES`, `ERROR_KINDS`,
   `BPMN_TOKEN_BASE_CLASS`, `BPMN_TOKEN_CLASS`;
+- демо-проект «Молочный завод» (`defaults/dairyPlant.js`):
+  `DAIRY_PLANT_PROCESS_XML`, `DAIRY_PLANT_PROCESS_ID`, `DAIRY_PLANT_PARTICIPANT_NAME`,
+  `DAIRY_SUPPLIER_PROCESS_XML`, `DAIRY_SUPPLIER_PROCESS_ID`,
+  `DAIRY_SUPPLIER_PARTICIPANT_NAME`, `DAIRY_PLANT_PROJECT_XML`,
+  `DAIRY_PLANT_PROJECT_NAME`, `DAIRY_PROJECT_ROW_OFFSET`, `DAIRY_SALES_ROLE`;
 - логика токенов: `parseTokenMessage`, `resolveTokenMap`, `applyTokenUpdate`,
   `collectActiveElementIds`, `tokenMarkerClasses`, `isDeployInstanceId`,
   `deployInstanceId`;
@@ -76,6 +81,25 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
   `DEFAULT_ACTION_EVENT`.
 
 Состав API проверяется тестом [`src/vendor/bpmnSdkBundle.test.js`](../vendor/bpmnSdkBundle.test.js).
+
+### Демо-проекты
+
+В SDK два готовых проекта: их используют витрина и кабинет клиента.
+
+| Проект | Модуль | Состав | Как открыть |
+| --- | --- | --- | --- |
+| «Закупка и приёмка молока» | `defaults/milkProcess.js` | заказчик + поставщик, `DEFAULT_PROJECT_BPMN_XML` | создаётся при первом запуске клиента |
+| «Молочный завод» | `defaults/dairyPlant.js` | завод (9 ролей) + поставщик сырья (3 роли), `DAIRY_PLANT_PROJECT_XML` | кнопка «Молочный завод» в списке проектов |
+
+Схемы «Молочного завода» проверяет [`defaults/dairyPlant.test.js`](defaults/dairyPlant.test.js):
+оба процесса проходят `validateEngineSchema`, связи и DI на месте, кнопки ведут в
+существующие узлы, роли объявлены каталогами, а пулы проекта не перекрываются
+(второй сдвинут на `DAIRY_PROJECT_ROW_OFFSET`).
+
+Что в проекте пока рисуется, а не исполняется движком (шлюзы без условий,
+`serviceTask` вместо воркеров, межпроцессные сообщения через кнопки, роли как
+маршрутизация UI), и в каком порядке это закрывается — в
+[`../../docs/dairy-plant-roadmap.md`](../../docs/dairy-plant-roadmap.md).
 
 ### Роль исполнителя узла
 
@@ -207,6 +231,7 @@ XML явно, всегда важнее умолчания: старые схе�
 | `elementId` | узел, который станет `ACTIVE` (`element_id` события). Пусто — следующий блок по единственной исходящей связи узла-хоста (`getNextElementId`); в развилке связей несколько, и там узел указывают явно |
 | `counterpartEvent`, `counterpartElementId` | необязательный сигнал в экземпляр второй стороны по тому же заказу |
 | `startsProcess` | `bpmn:process/@id` процесса второй стороны, который запускает нажатие |
+| `variables` | переменные процесса, которые выставляет нажатие: пары `ключ=значение` через `;` (`stockSufficient=true`). Клиент добавляет их в `output_data` события — по ним `conditionExpression` шлюза выбирает ветку (дизайн M1, 8.1). Пусто — нажатие переменных не пишет |
 
 | Экспорт | Назначение |
 | --- | --- |
@@ -217,6 +242,7 @@ XML явно, всегда важнее умолчания: старые схе�
 | `getStartAction(xml)` | кнопка запуска процесса: первая кнопка на стартовом событии |
 | `resolveAction(xml, elementId, action)` | пара `{event, elementId}` кнопки — аргументы `sendEvent`: пустые поля заменяются умолчаниями схемы |
 | `resolveActionEvent(action)` / `resolveActionTarget(xml, elementId, action)` | то же по отдельности |
+| `parseActionVariables(variables)` | строка `variables` → `{ключ: значение}`; пустая — `{}`, кривая — исключение (её же ловит валидатор) |
 | `getNextElementId(xml, elementId)` / `getOutgoingTargetIds(xml, elementId)` | следующий блок по единственной исходящей связи (`''`, если связь неоднозначна) и все цели связей узла |
 | `DEFAULT_ACTION_EVENT` | `CompleteBlock` — событие кнопки, не записанное в схеме |
 | `setElementActions(xml, elementId, actions)` | правка списка кнопок текстом; `[]` снимает все |
@@ -255,7 +281,7 @@ XML явно, всегда важнее умолчания: старые схе�
 (`[]` снимает все). Обязательны только ключ и надпись: «Добавить кнопку» сразу
 пишет кнопку в схему, а в поле «Узел после нажатия» подсказывается блок, который
 схема выведет по единственной исходящей связи (`getNextElementId`). Кабинет
-([`App.jsx`](../../App.jsx)) поимённо разбирает только шаги со своими ключами
+([`App.jsx`](../App.jsx)) поимённо разбирает только шаги со своими ключами
 (`ACTION_ID`): у них обработчики собирают payload, которого в схеме нет (номера
 УПД/ТТН, метки времени). Кнопку с незнакомым ключом кабинет показывает общим
 шагом, а пару «событие + узел» и роль для неё разрешает та же схема
@@ -319,9 +345,24 @@ validateEngineSchema(xml);
 
 Проверяются: разбор XML, наличие процесса, поддерживаемые типы узлов, «висячие»
 ссылки связей, петли на себя, ровно один `startEvent` и хотя бы один `endEvent`,
-соединённость узлов, достижимость до `endEvent`, форма шлюзов. Демо-схемы SDK
-(`DEFAULT_CUSTOMER_BPMN_XML`, `DEFAULT_SUPPLIER_BPMN_XML`) проходят проверку —
-это же условие зафиксировано тестом, чтобы правки демо не сломали старт процесса.
+соединённость узлов, достижимость до `endEvent`, форма шлюзов.
+
+С M1 проверяется и **смысл** развилок — иначе опечатка в условии не падает, а
+молча уводит токен в `default`:
+
+| Код | Когда |
+| --- | --- |
+| `ConditionUnsupported` | текст `conditionExpression` вне грамматики движка: скобки, `not`, литерал слева, `=` вместо `==`, функции |
+| `GatewayDefaultFlowWithCondition` | у связи с `default` есть `conditionExpression`: компилятор вернёт `Default` раньше разбора текста, то есть условие не действует |
+| `GatewayFlowWithoutCondition` | у `exclusiveGateway` есть исходящая связь без условия и без `default`: она выигрывает у всех условий |
+| `GatewayUnknownVariable` | условие читает переменную, которой не выставляет ни одна `act:userAction` процесса: ветка недостижима |
+| `ActionVariableFormat` | `variables` кнопки не разложилась в пары `ключ=значение` |
+| `TaskMultipleOutgoing` | у задачи больше одной исходящей связи: движок создаст по токену на каждую (неявный AND-split без слияния) |
+
+Демо-схемы SDK (`DEFAULT_CUSTOMER_BPMN_XML`, `DEFAULT_SUPPLIER_BPMN_XML`) и
+проект «Молочный завод» (`DAIRY_PLANT_PROJECT_XML`, пять шлюзов с условиями)
+проходят проверку — это же условие зафиксировано тестом, чтобы правки демо не
+сломали старт процесса.
 
 ### Совместимость с `diagram-js`
 

@@ -14,13 +14,22 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import App from './App';
-import { ROLE_CODES } from './roles';
 import { beginRun, completeRun, loadRuns } from './metricsStore';
-import { loadSchema, saveSchema } from './schemaStore';
-import { DEFAULT_CUSTOMER_BPMN_XML, DEFAULT_SUPPLIER_BPMN_XML, SOCKET_EVENTS, setElementActions, setElementRole } from './vendor/bpmn-sdk';
-
-/** XML «правок редактора»: маркер, по которому видно, какая схема поехала дальше. */
-const EDITED_XML = '<bpmn:definitions id="EditedInEditor" />';
+import { analyzeProject } from './projectRoles';
+import { createProject, listProjects } from './projectStore';
+import {
+  DAIRY_PLANT_PROCESS_ID,
+  DAIRY_PLANT_PROJECT_NAME,
+  DAIRY_SUPPLIER_PROCESS_ID,
+  DEFAULT_CUSTOMER_BPMN_XML,
+  DEFAULT_SUPPLIER_BPMN_XML,
+  SOCKET_EVENTS,
+  buildProjectXml,
+  getProcessIds,
+  getRoleAssignments,
+  setElementActions,
+  setElementRole,
+} from './vendor/bpmn-sdk';
 
 /**
  * Та же «правка редактора», но совместимая с движком: старт → шаг → конец.
@@ -52,6 +61,18 @@ const INCOMPATIBLE_XML = DEFAULT_CUSTOMER_BPMN_XML.replace(
   '<bpmn:task id="Task_QualityControl"$1</bpmn:task>'
 );
 
+/** Правка «сохранённого» процесса Заказчика: по ней видно, какая схема уехала. */
+const EDITED_CUSTOMER_XML = DEFAULT_CUSTOMER_BPMN_XML.replace(
+  'Закупка и приемка сырого молока',
+  'Закупка и правка Заказчика'
+);
+
+/** Проект из демо-процессов с этой правкой — то, что отдаёт редактор холста. */
+const EDITED_PROJECT_XML = buildProjectXml([
+  { xml: EDITED_CUSTOMER_XML, participantName: 'Молочный Завод' },
+  { xml: DEFAULT_SUPPLIER_BPMN_XML, participantName: 'ООО «Альпийские Луга»' },
+]);
+
 /**
  * Правка редактора: после ОТК добавлен блок приёмки сырья на склад в роли ОТК.
  *
@@ -77,6 +98,78 @@ const XML_WITH_QUALITY_STEP = DEFAULT_CUSTOMER_BPMN_XML.replace(
     '    <bpmn:sequenceFlow id="Flow_C7" sourceRef="Task_QualityStorage" targetRef="EndEvent_Customer" />',
   ].join('\n')
 );
+
+/**
+ * Схема без кнопок участников: каталог ролей на месте, а `act:userAction`
+ * вырезаны. Так выглядит загруженный BPMN, нарисованный без разметки кнопок:
+ * кабинет должен показать шаг и не рисовать действий.
+ */
+const XML_WITHOUT_ACTIONS = DEFAULT_CUSTOMER_BPMN_XML.replace(
+  /<bpmn:extensionElements>\s*<act:userAction[^>]*\/>\s*<\/bpmn:extensionElements>/g,
+  ''
+);
+
+/** Проект из списка проектов: один процесс, каталог ролей и кнопка старта. */
+const STORE_PROJECT_XML = buildProjectXml([
+  {
+    xml: `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:act="http://erp.mes/schema/bpmn/action"
+                  xmlns:role="http://erp.mes/schema/bpmn/roles"
+                  id="Definitions_Store" targetNamespace="http://bpmn.io/schema/bpmn">
+  <bpmn:process id="Process_Store_v1" name="Приёмка на склад" isExecutable="true">
+    <bpmn:extensionElements>
+      <role:catalog id="RoleCatalog_Store">
+        <role:businessRole code="STOREKEEPER" title="Кладовщик" icon="PackageCheck" />
+      </role:catalog>
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="StartEvent_Store" name="Поставка пришла">
+      <bpmn:extensionElements>
+        <act:userAction id="createOrder" label="Принять поставку" role="STOREKEEPER" icon="PlusCircle" />
+      </bpmn:extensionElements>
+      <bpmn:outgoing>Flow_Store_1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="Task_Store" name="Разместить на складе">
+      <bpmn:incoming>Flow_Store_1</bpmn:incoming>
+      <bpmn:outgoing>Flow_Store_2</bpmn:outgoing>
+      <bpmn:potentialOwner name="STOREKEEPER" />
+    </bpmn:userTask>
+    <bpmn:sequenceFlow id="Flow_Store_1" sourceRef="StartEvent_Store" targetRef="Task_Store" />
+    <bpmn:sequenceFlow id="Flow_Store_2" sourceRef="Task_Store" targetRef="EndEvent_Store" />
+    <bpmn:endEvent id="EndEvent_Store" name="Поставка принята">
+      <bpmn:incoming>Flow_Store_2</bpmn:incoming>
+    </bpmn:endEvent>
+  </bpmn:process>
+</bpmn:definitions>`,
+    participantName: 'Склад',
+  },
+]);
+
+/** Проект без кнопки инициатора: запуск выводится из стартового события. */
+const PICK_PROJECT_XML = buildProjectXml([
+  {
+    xml: `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  id="Definitions_Pick" targetNamespace="http://bpmn.io/schema/bpmn">
+  <bpmn:process id="Process_Pick_v1" name="Сборка заказа" isExecutable="true">
+    <bpmn:startEvent id="StartEvent_Pick" name="Заказ получен">
+      <bpmn:outgoing>Flow_Pick_1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="Task_Pick" name="Собрать заказ">
+      <bpmn:incoming>Flow_Pick_1</bpmn:incoming>
+      <bpmn:outgoing>Flow_Pick_2</bpmn:outgoing>
+      <bpmn:potentialOwner name="PICKER" />
+    </bpmn:userTask>
+    <bpmn:sequenceFlow id="Flow_Pick_1" sourceRef="StartEvent_Pick" targetRef="Task_Pick" />
+    <bpmn:sequenceFlow id="Flow_Pick_2" sourceRef="Task_Pick" targetRef="EndEvent_Pick" />
+    <bpmn:endEvent id="EndEvent_Pick" name="Заказ собран">
+      <bpmn:incoming>Flow_Pick_2</bpmn:incoming>
+    </bpmn:endEvent>
+  </bpmn:process>
+</bpmn:definitions>`,
+    participantName: 'Сборка',
+  },
+]);
 
 /* ------------------------------------------------------------------ *
  * Моки SDK
@@ -150,6 +243,32 @@ const openAs = (roleName) => {
   fireEvent.click(screen.getByText(roleName));
 };
 
+/**
+ * Кладёт в браузер проект с правкой процесса — «сохранённую схему».
+ *
+ * Приложение хранит схему проектом целиком (`src/projectStore.js`), а не двумя
+ * независимыми копиями по организациям. Поэтому правим процесс в проекте:
+ * вторая сторона остаётся демо-схемой SDK.
+ */
+const saveProjectProcess = (org, xml) => {
+  return createProject({
+    name: 'Тестовый проект',
+    xml: buildProjectXml([
+      {
+        xml: org === 'CUSTOMER' ? xml : DEFAULT_CUSTOMER_BPMN_XML,
+        participantName: 'Молочный Завод',
+      },
+      {
+        xml: org === 'SUPPLIER' ? xml : DEFAULT_SUPPLIER_BPMN_XML,
+        participantName: 'ООО «Альпийские Луга»',
+      },
+    ]),
+  });
+};
+
+/** Демо-проект в браузере: он же нужен для проверки пропса `roleOptions`. */
+const defaultProjectXml = () => listProjects()[0].xml;
+
 describe('App: интеграция с BPMN Client SDK', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -162,7 +281,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
     mockViewerProps.length = 0;
     mockEditorProps.length = 0;
 
-    // Кэш схем — общий для всего файла (`jsdom`): чистим, иначе тесты
+    // Кэш проекта — общий для всего файла (`jsdom`): чистим, иначе тесты
     // подхватывали бы копию, сохранённую предыдущим тестом.
     window.localStorage.clear();
 
@@ -243,8 +362,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   // Регрессия «первый прямоугольник не красится зелёным после выполнения».
-  // Последовательность событий реального движка: старт процесса ставит токен на
-  // `StartEvent_Customer`, второе событие старта переносит его на первый шаг, а
+  // Последовательность событий движка: старт ставит токен на первый шаг, а
   // выполнение шага закрывает его `COMPLETED` (зелёный трейл) и активирует
   // следующий узел. Так первый блок виден подсветке в обоих состояниях.
   it('первый шаг уходит в COMPLETED, когда движок активирует второй узел', () => {
@@ -379,7 +497,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   it('несовместимую схему показывает предупреждение в панели схемы', () => {
-    saveSchema('CUSTOMER', INCOMPATIBLE_XML);
+    saveProjectProcess('CUSTOMER', INCOMPATIBLE_XML);
 
     openAs('Руководитель Заказчика');
 
@@ -390,7 +508,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   it('несовместимая схема не запускает процесс и не заводит заказ', async () => {
-    saveSchema('CUSTOMER', INCOMPATIBLE_XML);
+    saveProjectProcess('CUSTOMER', INCOMPATIBLE_XML);
 
     openAs('Мастер производства');
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
@@ -427,77 +545,53 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
 
-    // Старт — два события: `StartProcess` (стартовое событие + `bpmn_xml`),
-    // затем постановка токена на первый шаг (см. `startProcess` в `App.jsx`).
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    // Старт — одно событие: `StartProcess` несёт `bpmn_xml` и называет узел
+    // первого шага (его схема выводит из кнопки старта, см. `startProcess`).
+    // Второго `CompleteBlock` нет: в режиме графа (`ENGINE_ROUTING=graph`) он
+    // закрыл бы шаг, который движок только что активировал, и подсветка уехала
+    // бы на следующий узел (M1, 10.2 п. 1).
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
     const [instanceId, eventName, elementId, outputData] =
       mockSendEvent.mock.calls[0];
 
     expect(instanceId).toMatch(/^inst-cust-/);
     expect(eventName).toBe('StartProcess');
-    expect(elementId).toBe('StartEvent_Customer');
+    expect(elementId).toBe('Task_CreatePurchaseOrder');
     expect(outputData.orderNum).toBe('№101');
     expect(outputData.bpmn_xml).toContain('Process_MilkCustomer_v1');
   });
 
-  // Регрессия: движок закрывает `COMPLETED` тот узел, который был `ACTIVE`,
-  // поэтому первый блок красится только если токен на него встал. Без второго
-  // события старта движок держал `ACTIVE` на `StartEvent_Customer`, и первый
-  // прямоугольник (`Task_CreatePurchaseOrder`) не появлялся в его состоянии
-  // вообще — зелёным он не становился.
-  it('старт процесса переносит токен на первый шаг заказчика', async () => {
-    openAs('Мастер производства');
-
-    fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
-
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
-    const [instanceId, eventName, elementId, outputData] =
-      mockSendEvent.mock.calls[1];
-
-    // Тот же экземпляр, что и у `StartProcess`: иначе токен уехал бы в чужой.
-    expect(instanceId).toBe(mockSendEvent.mock.calls[0][0]);
-    // Пара «событие + узел» в кнопке старта не записана: движок имя события не
-    // разбирает (`mes.in.v1.event.>`), поэтому умолчание — `CompleteBlock`, а
-    // узел схема выводит по связи (`resolveAction`).
-    expect(eventName).toBe('CompleteBlock');
-    expect(elementId).toBe('Task_CreatePurchaseOrder');
-    // Схема уехала первым событием: во втором её нет.
-    expect(outputData.bpmn_xml).toBeUndefined();
-    expect(outputData.orderNum).toBe('№101');
-  });
-
   // Регрессия «кнопка создания внутреннего заказа ругается на дубликат ключа».
-  // `startProcess` отправляет два события подряд, и токен `StartProcess` движок
-  // публикует между ними: WS-кадр приходит раньше, чем обработчик кнопки кладёт
-  // заказ в список. Тогда заказ заводила ветка «незнакомый экземпляр» подписки, а
-  // обработчик добавлял второй такой же — два узла с одним `key={o.id}` в списке
-  // заказов и в таблицах (см. `handleProductionCreateOrder` в `App.jsx`).
+  // Токен старта движок публикует до ответа HTTP на `StartProcess`: WS-кадр
+  // приходит раньше, чем обработчик кнопки кладёт заказ в список. Тогда заказ
+  // заводила ветка «незнакомый экземпляр» подписки, а обработчик добавлял второй
+  // такой же — два узла с одним `key={o.id}` в списке заказов и в таблицах (см.
+  // `handleProductionCreateOrder` в `App.jsx`).
   it('токен старта, обогнавший ответ HTTP, не удваивает заказ', async () => {
     // React пишет предупреждение о дубликате ключа в `console.error`: спай нужен
     // до первого рендера с дублем, поэтому ставим его в начале теста.
     const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
     openAs('Мастер производства');
 
-    // Второе событие старта «зависает»: движок успевает опубликовать токен
-    // первого, а `setOrders` обработчика ещё не выполнился.
-    let releaseStartStep;
-    mockSendEvent
-      .mockResolvedValueOnce({ ok: true, status: 202 })
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            releaseStartStep = () => resolve({ ok: true, status: 202 });
-          })
-      );
+    // Событие старта «зависает»: движок успевает опубликовать токен, а
+    // `setOrders` обработчика ещё не выполнился.
+    let releaseStart;
+    mockSendEvent.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseStart = () => resolve({ ok: true, status: 202 });
+        })
+    );
 
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
     const [instanceId] = mockSendEvent.mock.calls[0];
 
+    // `StartProcess` называет первый шаг — его движок и активирует.
     emitToken({
       instanceId,
-      elementId: 'StartEvent_Customer',
+      elementId: 'Task_CreatePurchaseOrder',
       state: 'ACTIVE',
       payload: { orderNum: '№101', volume: '100 Л' },
     });
@@ -507,7 +601,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     // Приходит ответ HTTP: заказ уже известен, второй такой же не нужен.
     await act(async () => {
-      releaseStartStep();
+      releaseStart();
     });
 
     // Обработчик дошёл до журнала — значит, `setOrders` уже отработал.
@@ -538,12 +632,11 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     fireEvent.click(screen.getByText(/Сформировать и отправить заказ Поставщику/));
 
-    // 1 — перевод заказчика, 2 и 3 — старт процесса Поставщика (стартовое
-    // событие и первый шаг `Task_SupplierCreateDocs`).
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(3));
+    // 1 — перевод заказчика, 2 — старт процесса Поставщика (одно событие:
+    // `StartProcess` называет первый шаг `Task_SupplierCreateDocs`).
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
     const [custInstanceId, custEvent, custElement] = mockSendEvent.mock.calls[0];
     const [suppInstanceId, suppEvent, suppElement] = mockSendEvent.mock.calls[1];
-    const [, suppStepEvent, suppStepElement] = mockSendEvent.mock.calls[2];
 
     expect(custInstanceId).toBe('inst-cust-supp');
     // У кнопки в демо-схеме записаны только надпись и роль: событие нажатия —
@@ -553,11 +646,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     expect(suppInstanceId).toMatch(/^inst-supp-/);
     expect(suppEvent).toBe('StartProcess');
-    expect(suppElement).toBe('StartEvent_Supplier');
-
-    expect(mockSendEvent.mock.calls[2][0]).toBe(suppInstanceId);
-    expect(suppStepEvent).toBe('CompleteBlock');
-    expect(suppStepElement).toBe('Task_SupplierCreateDocs');
+    expect(suppElement).toBe('Task_SupplierCreateDocs');
   });
 
   it('кабинет показывает только шаги, роль которых в схеме принадлежит пользователю', () => {
@@ -603,12 +692,20 @@ describe('App: интеграция с BPMN Client SDK', () => {
     fireEvent.click(screen.getByText('Руководитель Заказчика'));
     fireEvent.click(screen.getByText('Редактор схемы'));
 
-    // Инспектор узлов получает словарь ролей из приложения.
-    expect(lastProps(mockEditorProps).roleOptions).toEqual(ROLE_CODES);
+    // Инспектор узлов получает словарь ролей из проекта.
+    expect(lastProps(mockEditorProps).roleOptions).toEqual(
+      analyzeProject(defaultProjectXml()).roleCodes
+    );
 
     act(() => {
       lastProps(mockEditorProps).onChange(
-        setElementRole(DEFAULT_CUSTOMER_BPMN_XML, 'Task_QualityControl', 'MANAGER')
+        buildProjectXml([
+          {
+            xml: setElementRole(DEFAULT_CUSTOMER_BPMN_XML, 'Task_QualityControl', 'MANAGER'),
+            participantName: 'Молочный Завод',
+          },
+          { xml: DEFAULT_SUPPLIER_BPMN_XML, participantName: 'ООО «Альпийские Луга»' },
+        ])
       );
     });
 
@@ -646,29 +743,40 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   /* ------------------------------------------------------------------ *
-   * Локальный кэш схем (`src/schemaStore.js`)
+   * Проект в браузере (`src/projectStore.js`)
    * ------------------------------------------------------------------ */
 
   it('схема из браузера подхватывается на старте процесса', async () => {
-    const editedXml = setElementRole(DEFAULT_CUSTOMER_BPMN_XML, 'Task_QualityControl', 'MANAGER');
+    const editedXml = setElementRole(EDITED_CUSTOMER_XML, 'Task_QualityControl', 'MANAGER');
     // Как после F5 с сохранённой копией: правки уже лежат в localStorage.
-    saveSchema('CUSTOMER', editedXml);
+    saveProjectProcess('CUSTOMER', editedXml);
 
     openAs('Мастер производства');
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
     const [, , , outputData] = mockSendEvent.mock.calls[0];
-    expect(outputData.bpmn_xml).toBe(editedXml);
+    const project = listProjects()[0];
+
+    // В движок уходит нарезка процесса проекта, а не исходная строка: роль
+    // шага в ней — та, что сохранена в браузере.
+    expect(project.xml).toContain('Закупка и правка Заказчика');
+    expect(getRoleAssignments(outputData.bpmn_xml).Task_QualityControl).toBe('MANAGER');
+    // В оркестратор уходит нарезка одного процесса, а не проект целиком.
+    expect(outputData.bpmn_xml).not.toContain('<bpmn:process id="Process_SupplierSupply_v1"');
   });
 
   it('сохранённую схему показывает редактор руководителя', () => {
-    saveSchema('CUSTOMER', EDITED_XML);
+    saveProjectProcess('CUSTOMER', EDITED_CUSTOMER_XML);
 
     openAs('Руководитель Заказчика');
     fireEvent.click(screen.getByText('Редактор схемы'));
 
-    expect(lastProps(mockEditorProps).xml).toBe(EDITED_XML);
+    const xml = lastProps(mockEditorProps).xml;
+
+    expect(xml).toContain('Закупка и правка Заказчика');
+    // Редактору отдаётся проект целиком: процесс второй стороны на месте.
+    expect(xml).toContain('Process_SupplierSupply_v1');
     expect(screen.getByTestId('schema-save-state').textContent).toMatch(
       /^✅ Сохранено в \d{2}:\d{2}:\d{2}$/
     );
@@ -677,13 +785,12 @@ describe('App: интеграция с BPMN Client SDK', () => {
   it('кнопка «Сохранить схему» кладёт правки в браузер и меняет бейдж', () => {
     openAs('Руководитель Заказчика');
 
-    // Пока правок нет, копии в браузере тоже нет — используется демо-схема SDK.
-    expect(loadSchema('CUSTOMER')).toBeNull();
-    expect(screen.getByTestId('schema-save-state').textContent).toBe('Схема по умолчанию');
+    // Демо-проект создаётся при первом запуске и сразу сохранён в браузере.
+    expect(screen.getByTestId('schema-save-state').textContent).toMatch(/^✅ Сохранено в /);
 
     fireEvent.click(screen.getByText('Редактор схемы'));
     act(() => {
-      lastProps(mockEditorProps).onChange(EDITED_XML);
+      lastProps(mockEditorProps).onChange(EDITED_PROJECT_XML);
     });
 
     expect(screen.getByTestId('schema-save-state').textContent).toBe(
@@ -692,7 +799,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     fireEvent.click(screen.getByText('Сохранить схему'));
 
-    expect(loadSchema('CUSTOMER')?.xml).toBe(EDITED_XML);
+    expect(listProjects()[0].xml).toBe(EDITED_PROJECT_XML);
     expect(screen.getByTestId('schema-save-state').textContent).toMatch(
       /^✅ Сохранено в \d{2}:\d{2}:\d{2}$/
     );
@@ -701,18 +808,23 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(mockSendEvent).not.toHaveBeenCalled();
   });
 
-  it('кнопка «Демо-схема» возвращает схему SDK и чистит копию', () => {
-    saveSchema('CUSTOMER', EDITED_XML);
+  it('кнопка «Демо-схема» возвращает процесс SDK и сохраняет проект', () => {
+    saveProjectProcess('CUSTOMER', EDITED_CUSTOMER_XML);
 
     openAs('Руководитель Заказчика');
     fireEvent.click(screen.getByText('Редактор схемы'));
-    expect(lastProps(mockEditorProps).xml).toBe(EDITED_XML);
+    expect(lastProps(mockEditorProps).xml).toContain('Закупка и правка Заказчика');
 
     fireEvent.click(screen.getByText('Демо-схема'));
 
-    expect(lastProps(mockEditorProps).xml).toBe(DEFAULT_CUSTOMER_BPMN_XML);
-    expect(loadSchema('CUSTOMER')).toBeNull();
-    expect(screen.getByTestId('schema-save-state').textContent).toBe('Схема по умолчанию');
+    const xml = lastProps(mockEditorProps).xml;
+
+    // Сброс меняет только процесс своего контура: второй остаётся в проекте.
+    expect(xml).not.toContain('Закупка и правка Заказчика');
+    expect(xml).toContain('Process_MilkCustomer_v1');
+    expect(xml).toContain('Process_SupplierSupply_v1');
+    expect(listProjects()[0].xml).not.toContain('Закупка и правка Заказчика');
+    expect(screen.getByTestId('schema-save-state').textContent).toMatch(/^✅ Сохранено в /);
   });
 
   it('правки переживают перезагрузку страницы', () => {
@@ -721,7 +833,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
     fireEvent.click(screen.getByText('Редактор схемы'));
 
     act(() => {
-      lastProps(mockEditorProps).onChange(EDITED_XML);
+      lastProps(mockEditorProps).onChange(EDITED_PROJECT_XML);
     });
     fireEvent.click(screen.getByText('Сохранить схему'));
 
@@ -730,20 +842,37 @@ describe('App: интеграция с BPMN Client SDK', () => {
     openAs('Руководитель Заказчика');
     fireEvent.click(screen.getByText('Редактор схемы'));
 
-    expect(lastProps(mockEditorProps).xml).toBe(EDITED_XML);
+    expect(lastProps(mockEditorProps).xml).toBe(EDITED_PROJECT_XML);
   });
 
   it('деплой схемы обновляет копию в браузере', async () => {
     openAs('Руководитель Поставщика');
     fireEvent.click(screen.getByText('Редактор схемы'));
 
+    // Правка процесса второй стороны: проект остаётся проектом из двух процессов.
+    const shippedXml = setElementRole(
+      DEFAULT_SUPPLIER_BPMN_XML,
+      'Task_SupplierShipment',
+      'SUPPLIER_EXECUTIVE'
+    );
+
     act(() => {
-      lastProps(mockEditorProps).onChange(EDITED_VALID_XML);
+      lastProps(mockEditorProps).onChange(
+        buildProjectXml([
+          { xml: DEFAULT_CUSTOMER_BPMN_XML, participantName: 'Молочный Завод' },
+          { xml: shippedXml, participantName: 'ООО «Альпийские Луга»' },
+        ])
+      );
     });
 
     fireEvent.click(screen.getByText(/Задеплоить BPMN/));
 
-    await waitFor(() => expect(loadSchema('SUPPLIER')?.xml).toBe(EDITED_VALID_XML));
+    await waitFor(() => expect(mockDeploySchema).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(getRoleAssignments(listProjects()[0].xml).Task_SupplierShipment).toBe(
+        'SUPPLIER_EXECUTIVE'
+      )
+    );
     await waitFor(() =>
       expect(screen.getByTestId('schema-save-state').textContent).toMatch(/^✅ Сохранено в /)
     );
@@ -756,7 +885,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   // Надпись, роль, событие и узлы кнопки живут в схеме: правка блока меняет
   // кабинет без правок кода (см. README, «Кнопки участников»).
   it('кнопка берётся из схемы: правка надписи и события меняет кабинет', async () => {
-    saveSchema(
+    saveProjectProcess(
       'CUSTOMER',
       setElementActions(DEFAULT_CUSTOMER_BPMN_XML, 'Task_CreatePurchaseOrder', [
         {
@@ -795,7 +924,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   it('роль кнопки из схемы решает, кто её видит', () => {
     // Роль инициатора объявлена в самой кнопке стартового события: переносим её
     // на менеджера закупок — кнопку видит он, а не производство.
-    saveSchema(
+    saveProjectProcess(
       'CUSTOMER',
       setElementActions(DEFAULT_CUSTOMER_BPMN_XML, 'StartEvent_Customer', [
         {
@@ -823,19 +952,20 @@ describe('App: интеграция с BPMN Client SDK', () => {
   it('схема без кнопок участников не показывает действий', () => {
     // Схема совместима с движком, но `act:userAction` в ней нет: кабинет
     // показывает только ожидание — нажимать нечего.
-    saveSchema('CUSTOMER', EDITED_VALID_XML);
+    saveProjectProcess('CUSTOMER', XML_WITHOUT_ACTIONS);
 
     openAs('Менеджер закупок');
 
     emitToken({
       instanceId: 'inst-cust-no-actions',
-      elementId: 'Task_Edited',
+      elementId: 'Task_QualityControl',
       state: 'ACTIVE',
       payload: { orderNum: '№901' },
     });
 
     expect(screen.getByText(/Кабинет: Менеджер закупок/)).toBeTruthy();
     expect(screen.queryByText(/Сформировать и отправить заказ Поставщику/)).toBeNull();
+    expect(screen.queryByText(/Выписать пропуск на КПП/)).toBeNull();
   });
 
   // Блок, добавленный в редакторе вместе с кнопкой, работает без правок кода:
@@ -843,7 +973,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   // только двигает токен, а событие и узел для этого доводит схема
   // (`schemaStepActions` + `handleSchemaStepAction`).
   it('блок, добавленный в схеме после ОТК, показывает кнопку своей роли', async () => {
-    saveSchema('CUSTOMER', XML_WITH_QUALITY_STEP);
+    saveProjectProcess('CUSTOMER', XML_WITH_QUALITY_STEP);
 
     openAs('Специалист ОТК');
 
@@ -873,7 +1003,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   it('шаг схемы без обработчика виден только на своём узле и только своей роли', () => {
     // Роль кнопки (`role`) сильнее роли узла (`potentialOwner` = `MANAGER`):
     // кнопку на шаге менеджера закупок получает охрана КПП.
-    saveSchema(
+    saveProjectProcess(
       'CUSTOMER',
       setElementActions(DEFAULT_CUSTOMER_BPMN_XML, 'Task_WaitForSupplierShipment', [
         {
@@ -913,7 +1043,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   it('кнопка шага из схемы умеет сигнал второй стороне (`counterpartEvent`)', async () => {
-    saveSchema(
+    saveProjectProcess(
       'SUPPLIER',
       setElementActions(DEFAULT_SUPPLIER_BPMN_XML, 'Task_SupplierShipment', [
         {
@@ -964,7 +1094,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
     // У конечного события связей нет: куда идти после нажатия — неизвестно, а
     // движок токен двигает именно узлом события. Кнопки такой шаг не получает:
     // вместо нажатия «в никуда» кабинет объясняет, чего не хватает в схеме.
-    saveSchema(
+    saveProjectProcess(
       'CUSTOMER',
       setElementActions(DEFAULT_CUSTOMER_BPMN_XML, 'EndEvent_Customer', [
         {
@@ -1000,7 +1130,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
     openAs('Мастер производства');
     fireEvent.click(screen.getAllByText(/Создать внутренний заказ на 100 л/)[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
 
     const [instanceId, , , outputData] = mockSendEvent.mock.calls[0];
 
@@ -1108,5 +1238,92 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     expect(loadRuns()).toEqual([]);
     expect(screen.getByTestId('metrics-empty')).toBeTruthy();
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Проекты: загруженный BPMN играется без правок кода
+   * ------------------------------------------------------------------ */
+
+  it('проект из списка открывается со своими ролями и играется по схеме', async () => {
+    // Первый проект — сохранённая копия демо-проекта, второй — «загруженный»
+    // BPMN склада: другой процесс, другая роль, другая кнопка старта.
+    saveProjectProcess('CUSTOMER', EDITED_CUSTOMER_XML);
+    createProject({ name: 'Склад', xml: STORE_PROJECT_XML });
+
+    render(<App />);
+    fireEvent.click(screen.getByText('Проекты'));
+
+    expect(screen.getByText('Склад')).toBeTruthy();
+    const openButtons = screen.getAllByText('Открыть');
+    expect(openButtons).toHaveLength(2);
+
+    // Открываем второй проект: вход собирается из его каталога ролей.
+    fireEvent.click(openButtons[1]);
+    fireEvent.click(screen.getByText('Кладовщик'));
+
+    expect(screen.getByText(/Кабинет: Кладовщик/)).toBeTruthy();
+
+    fireEvent.click(screen.getAllByText('Принять поставку')[0]);
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
+
+    const [instanceId, eventName, startElementId, outputData] = mockSendEvent.mock.calls[0];
+
+    expect(instanceId).toMatch(/^inst-cust-/);
+    expect(eventName).toBe('StartProcess');
+    // Первый шаг выведен из схемы: стартовое событие -> задача склада.
+    expect(startElementId).toBe('Task_Store');
+    expect(outputData.bpmn_xml).toContain('Process_Store_v1');
+    expect(outputData.bpmn_xml).not.toContain('Process_MilkCustomer_v1');
+  });
+
+  it('схема без кнопки инициатора запускается по связи стартового события', async () => {
+    createProject({ name: 'Сборка', xml: PICK_PROJECT_XML });
+
+    render(<App />);
+    // Каталога ролей нет: титул карточки — имя из `bpmn:potentialOwner`.
+    fireEvent.click(screen.getByText('PICKER'));
+
+    // Кнопки `createOrder` в схеме нет — кабинет предлагает запуск по схеме.
+    expect(screen.getByText('Запуск по схеме')).toBeTruthy();
+    fireEvent.click(screen.getByText('Запустить процесс'));
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
+
+    const [instanceId, eventName, startElementId, outputData] = mockSendEvent.mock.calls[0];
+
+    expect(instanceId).toMatch(/^inst-cust-/);
+    expect(eventName).toBe('StartProcess');
+    // Токен выводится из единственной исходящей связи стартового события.
+    expect(startElementId).toBe('Task_Pick');
+    expect(outputData.bpmn_xml).toContain('Process_Pick_v1');
+  });
+
+  /**
+   * Демо-проект «Молочный завод» — второй готовый проект SDK рядом с демо-закупкой.
+   * Кнопка в списке проектов создаёт его из `DAIRY_PLANT_PROJECT_XML`, и дальше
+   * приложение работает с ним как с любым загруженным BPMN: вход по каталогу
+   * ролей, кабинет — по кнопкам схемы.
+   */
+  it('кнопка «Молочный завод» создаёт проект из двух процессов', () => {
+    render(<App />);
+    fireEvent.click(screen.getByText('Проекты'));
+    fireEvent.click(screen.getByText('Молочный завод'));
+
+    const project = listProjects().find(
+      (item) => item.name === DAIRY_PLANT_PROJECT_NAME
+    );
+
+    expect(project).toBeTruthy();
+    expect(getProcessIds(project.xml)).toEqual([
+      DAIRY_PLANT_PROCESS_ID,
+      DAIRY_SUPPLIER_PROCESS_ID,
+    ]);
+
+    // Проект сразу открыт: подпись в шапке и роли обоих пулов на входе.
+    expect(screen.getByText(/Проект:/).textContent).toContain(DAIRY_PLANT_PROJECT_NAME);
+    expect(screen.getByText('Директор завода')).toBeTruthy();
+    expect(screen.getByText('Менеджер по продажам')).toBeTruthy();
+    expect(screen.getByText('Менеджер по продажам сырья')).toBeTruthy();
   });
 });

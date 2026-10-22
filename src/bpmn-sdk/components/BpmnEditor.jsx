@@ -26,6 +26,7 @@ import {
   ACTION_MODELE_EXTENSIONS,
   ACTION_TYPE,
 } from '../xml/actionModdle';
+import { ROLE_MODELE_EXTENSIONS } from '../xml/rolesModdle';
 import { EnginePanel } from '../panels/EnginePanel';
 import '../styles/bpmn-sdk.css';
 
@@ -223,12 +224,14 @@ export function BpmnEditor({
 
     const modeler = new Modeler({
       container: containerRef.current,
-      // Без регистрации `trg:processTrigger` и `act:userAction` моделлер не
-      // знает собственные типы и теряет их при `saveXML` (та же ловушка, что и
-      // с `camunda:*`).
+      // Без регистрации `trg:processTrigger`, `act:userAction` и `role:catalog`
+      // моделлер не знает собственные типы и теряет их при `saveXML` (та же
+      // ловушка, что и с `camunda:*`). Каталог ролей — это вход в кабинет:
+      // потеряв его, схема останется без названий ролей.
       moddleExtensions: {
         ...TRIGGER_MODELE_EXTENSIONS,
         ...ACTION_MODELE_EXTENSIONS,
+        ...ROLE_MODELE_EXTENSIONS,
       },
     });
     modelerRef.current = modeler;

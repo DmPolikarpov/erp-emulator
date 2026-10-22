@@ -27,8 +27,10 @@ const {
 const {
   getElementRole,
   getRoleAssignments,
+  getRoleCatalog,
   setElementRole,
 } = require('../bpmn-sdk/xml/bpmnXml');
+const { ROLE_MODELE_EXTENSIONS } = require('../bpmn-sdk/xml/rolesModdle');
 
 /** Роли дефолтной схемы Заказчика: задачи -> роль. */
 const CUSTOMER_ROLES = {
@@ -58,7 +60,9 @@ function modelRoles(rootElement) {
 const warningTexts = (warnings) => warnings.map((warning) => warning.message);
 
 describe('bpmn-moddle: роль исполнителя в схеме', () => {
-  const moddle = new BpmnModdle();
+  // Каталог ролей (`role:catalog`) — расширение, поэтому моделлер создаётся с
+  // дескриптором: без него `bpmn-moddle` не признаёт `role:catalog`.
+  const moddle = new BpmnModdle(ROLE_MODELE_EXTENSIONS);
 
   it('разбирает дефолтные схемы моделью (как их увидит редактор)', async () => {
     const { rootElement, warnings } = await moddle.fromXML(DEFAULT_CUSTOMER_BPMN_XML);
@@ -75,6 +79,25 @@ describe('bpmn-moddle: роль исполнителя в схеме', () => {
 
     expect(getRoleAssignments(saved)).toEqual(CUSTOMER_ROLES);
     expect(saved).toContain('<bpmn:potentialOwner name="QUALITY" />');
+  });
+
+  it('не теряет каталог ролей при пересборке XML из модели (`saveXML`)', async () => {
+    // Каталог — собственный тип `role:*`, поэтому проверяется отдельно от
+    // `bpmn:potentialOwner`: без регистрации дескриптора `saveXML` выбросил бы
+    // его вместе с названиями ролей, и вход в кабинет остался бы без титулов.
+    const { rootElement, warnings } = await moddle.fromXML(DEFAULT_CUSTOMER_BPMN_XML);
+    const { xml: saved } = await moddle.toXML(rootElement);
+
+    expect(warningTexts(warnings)).toEqual([]);
+    expect(getRoleCatalog(saved).map((role) => role.code)).toEqual([
+      'EXECUTIVE',
+      'PRODUCTION',
+      'MANAGER',
+      'SECURITY',
+      'QUALITY',
+    ]);
+    expect(saved).toContain('<role:catalog');
+    expect(saved).toContain('title="Мастер производства"');
   });
 
   it('присвоение и снятие роли моделью доезжают до XML (`handleChangeRole`)', async () => {

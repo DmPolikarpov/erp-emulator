@@ -148,8 +148,8 @@ export const ELEMENT_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
  * Допустимая роль исполнителя (`bpmn:potentialOwner/@name`).
  *
  * Грамматика совпадает с `element_id`: роль попадает в XML-атрибут, и её
- * приходится сравнивать с ролями пользователей (`USERS[].role`) без
- * нормализации регистра.
+ * приходится сравнивать с ролями из схемы (`bpmn:potentialOwner/@name`,
+ * `act:userAction/@role`, `role:catalog/@code`) без нормализации регистра.
  */
 export const ROLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 

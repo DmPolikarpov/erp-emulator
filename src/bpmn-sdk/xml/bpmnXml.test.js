@@ -36,6 +36,7 @@ import {
   normalizeAction,
   normalizePayloadKeys,
   normalizeTrigger,
+  parseActionVariables,
   parseXml,
   renameElementId,
   resolveAction,
@@ -860,7 +861,180 @@ describe('bpmnXml: validateEngineSchema', () => {
   });
 });
 
+/**
+ * Условия шлюза и переменные кнопок (дизайн M1, 7.3–7.4).
+ *
+ * Схема одна и та же, меняется только разметка связей: так каждый тест
+ * проверяет ровно одно правило, а не «схема плохая целиком».
+ */
+describe('bpmnXml: validateEngineSchema — условия шлюза', () => {
+  /** Коды проблем отчёта. */
+  const codes = (problems) => problems.map((problem) => problem.code);
 
+  /** Кнопки входного шага: именно они объявляют переменные условия. */
+  const ACTIONS =
+    '        <act:userAction id="haveStock" label="Хватает" role="SALES" ' +
+    'elementId="Task_Ship" variables="stockSufficient=true" />\n' +
+    '        <act:userAction id="needPurchase" label="Не хватает" role="SALES" ' +
+    'elementId="Task_PO" variables="stockSufficient=false" />';
+
+  /** Условие «Да»: переменная объявлена кнопками `ACTIONS`. */
+  const YES_CONDITION = "${stockSufficient == 'true'}";
+
+  /** Связь шлюза: `text === null` — без `conditionExpression`. */
+  function gatewayFlow(id, name, target, text) {
+    const open =
+      '    <bpmn:sequenceFlow id="' +
+      id +
+      '" name="' +
+      name +
+      '" sourceRef="Gateway_1" targetRef="' +
+      target +
+      '"';
+
+    if (text === null) return open + ' />';
+
+    return (
+      open +
+      '>\n      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">' +
+      text +
+      '</bpmn:conditionExpression>\n    </bpmn:sequenceFlow>'
+    );
+  }
+
+  /**
+   * Схема «старт → проверка → шлюз → две ветки → концы».
+   *
+   * @param {object} [options]
+   * @param {string|null} [options.condition] условие «Да» (`null` — нет).
+   * @param {string|null} [options.defaultCondition] условие default-связи.
+   * @param {string} [options.actions] кнопки узла `Task_Check`.
+   * @param {string} [options.extraFlows] дополнительные связи процесса.
+   * @returns {string} BPMN-схема.
+   */
+  function gatewaySchema({
+    condition = YES_CONDITION,
+    defaultCondition = null,
+    actions = ACTIONS,
+    extraFlows = '',
+  } = {}) {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:act="http://erp.mes/schema/bpmn/action"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_Conditions"
+                  targetNamespace="http://bpmn.io/schema/bpmn">
+  <bpmn:process id="Process_Conditions" isExecutable="true">
+    <bpmn:startEvent id="Start" />
+    <bpmn:userTask id="Task_Check">
+      <bpmn:extensionElements>
+${actions}
+      </bpmn:extensionElements>
+    </bpmn:userTask>
+    <bpmn:exclusiveGateway id="Gateway_1" default="Flow_No" />
+    <bpmn:userTask id="Task_Ship" />
+    <bpmn:userTask id="Task_PO" />
+    <bpmn:endEvent id="End_Ship" />
+    <bpmn:endEvent id="End_PO" />
+    <bpmn:sequenceFlow id="Flow_Start" sourceRef="Start" targetRef="Task_Check" />
+    <bpmn:sequenceFlow id="Flow_Check" sourceRef="Task_Check" targetRef="Gateway_1" />
+${gatewayFlow('Flow_Yes', 'Да', 'Task_Ship', condition)}
+${gatewayFlow('Flow_No', 'Нет', 'Task_PO', defaultCondition)}
+${extraFlows}    <bpmn:sequenceFlow id="Flow_Ship" sourceRef="Task_Ship" targetRef="End_Ship" />
+    <bpmn:sequenceFlow id="Flow_PO" sourceRef="Task_PO" targetRef="End_PO" />
+  </bpmn:process>
+</bpmn:definitions>`;
+  }
+
+  it('условие на «Да» с объявленной переменной принимается', () => {
+    expect(validateEngineSchema(gatewaySchema())).toEqual({ ok: true, problems: [] });
+  });
+
+  it('связки and/or, числа, двойные кавычки и голая переменная — формы 7.2', () => {
+    const actions =
+      '        <act:userAction id="lab" label="Лаборатория" role="QC" ' +
+      'elementId="Task_Ship" variables="labPassed=true; temperature=82" />';
+
+    expect(
+      validateEngineSchema(
+        gatewaySchema({
+          actions,
+          condition: "${labPassed == 'true' and temperature > 80}",
+        })
+      )
+    ).toEqual({ ok: true, problems: [] });
+
+    expect(
+      validateEngineSchema(gatewaySchema({ actions, condition: '${labPassed}' }))
+    ).toEqual({ ok: true, problems: [] });
+    expect(
+      validateEngineSchema(
+        gatewaySchema({ actions, condition: '${labPassed == "true"}' })
+      )
+    ).toEqual({ ok: true, problems: [] });
+  });
+
+  it('условие на default-связи — ошибка: движок возьмёт её как Default', () => {
+    const problems = validateEngineSchema(
+      gatewaySchema({ defaultCondition: "${stockSufficient == 'false'}" })
+    ).problems;
+
+    expect(codes(problems)).toEqual([
+      SCHEMA_PROBLEM.GATEWAY_DEFAULT_FLOW_WITH_CONDITION,
+    ]);
+    expect(problems[0].flowId).toBe('Flow_No');
+  });
+
+  it('связь без условия и без default выигрывает у всех условий — ошибка', () => {
+    const problems = validateEngineSchema(gatewaySchema({ condition: null })).problems;
+
+    expect(codes(problems)).toEqual([SCHEMA_PROBLEM.GATEWAY_FLOW_WITHOUT_CONDITION]);
+    expect(problems[0].flowId).toBe('Flow_Yes');
+  });
+
+  it('грамматика вне 7.2 (not, скобки, "=") — ConditionUnsupported', () => {
+    [
+      '${not stockSufficient}',
+      "${(stockSufficient == 'true')}",
+      "${stockSufficient = 'true'}",
+    ].forEach((condition) => {
+      expect(codes(validateEngineSchema(gatewaySchema({ condition })).problems)).toEqual([
+        SCHEMA_PROBLEM.CONDITION_UNSUPPORTED,
+      ]);
+    });
+  });
+
+  it('переменная без кнопки — GatewayUnknownVariable', () => {
+    const problems = validateEngineSchema(
+      gatewaySchema({ condition: "${packOutcome == 'good'}" })
+    ).problems;
+
+    expect(codes(problems)).toEqual([SCHEMA_PROBLEM.GATEWAY_UNKNOWN_VARIABLE]);
+    expect(problems[0].message).toContain('packOutcome');
+  });
+
+  it('кривые variables кнопки — ActionVariableFormat', () => {
+    // Первая кнопка валидна: она объявляет `stockSufficient`, иначе к ошибке
+    // формата добавилась бы «неизвестная переменная» условия.
+    const actions =
+      '        <act:userAction id="haveStock" label="Хватает" role="SALES" ' +
+      'elementId="Task_Ship" variables="stockSufficient=true" />\n' +
+      '        <act:userAction id="needPurchase" label="Не хватает" role="SALES" ' +
+      'elementId="Task_PO" variables="stockSufficient" />';
+    const problems = validateEngineSchema(gatewaySchema({ actions })).problems;
+
+    expect(codes(problems)).toEqual([SCHEMA_PROBLEM.ACTION_VARIABLE_FORMAT]);
+    expect(problems[0].elementId).toBe('Task_Check');
+  });
+
+  it('вторая исходящая связь задачи — TaskMultipleOutgoing', () => {
+    const extraFlows =
+      '    <bpmn:sequenceFlow id="Flow_Extra" sourceRef="Task_Check" targetRef="Task_Ship" />\n';
+    const problems = validateEngineSchema(gatewaySchema({ extraFlows })).problems;
+
+    expect(codes(problems)).toContain(SCHEMA_PROBLEM.TASK_MULTIPLE_OUTGOING);
+  });
+});
 
 
 /* ------------------------------------------------------------------ *
@@ -878,6 +1052,7 @@ const ACTION = {
   counterpartEvent: '',
   counterpartElementId: '',
   startsProcess: '',
+  variables: '',
 };
 
 describe('bpmnXml: кнопки участников (act:userAction)', () => {
@@ -1167,6 +1342,7 @@ describe('bpmnXml: кнопки участников (act:userAction)', () => {
         counterpartEvent: '',
         counterpartElementId: '',
         startsProcess: '',
+        variables: '',
       },
     ]);
     expect(resolveAction(xml, 'Task_Approve', minimal)).toEqual({
@@ -1201,6 +1377,7 @@ describe('bpmnXml: кнопки участников (act:userAction)', () => {
       counterpartEvent: '',
       counterpartElementId: '',
       startsProcess: '',
+      variables: '',
     });
 
     expect(isValidAction(ACTION)).toBe(true);
@@ -1214,6 +1391,42 @@ describe('bpmnXml: кнопки участников (act:userAction)', () => {
 
     expect(ACTION_ICON_PATTERN.test('Truck')).toBe(true);
     expect(ACTION_ICON_PATTERN.test('truck-2')).toBe(false);
+  });
+
+  it('переменные кнопки: пары ключ=значение и пустое значение', () => {
+    expect(parseActionVariables('')).toEqual({});
+    expect(parseActionVariables(null)).toEqual({});
+    expect(parseActionVariables('stockSufficient=true')).toEqual({
+      stockSufficient: 'true',
+    });
+    expect(parseActionVariables(' a = 1 ; note= ; packOutcome = degraded ')).toEqual({
+      a: '1',
+      note: '',
+      packOutcome: 'degraded',
+    });
+
+    // Ошибки формата: строка не разложится в переменные, и шлюз молча уедет в
+    // default (7.4) — поэтому разбор падает, а не «пропускает мусор».
+    expect(() => parseActionVariables('stockSufficient')).toThrow(/ключ=значение/);
+    expect(() => parseActionVariables('1stock=true')).toThrow(/ключ=значение/);
+    expect(() => parseActionVariables('a=1=2')).toThrow(/ключ=значение/);
+    expect(() => parseActionVariables('a=1;;b=2')).toThrow(/Пустая пара/);
+    expect(() => parseActionVariables('a=1;a=2')).toThrow(/объявлена дважды/);
+  });
+
+  it('пишет и читает variables кнопки, а кривую строку не пропускает', () => {
+    const xml = setElementActions(SIMPLE_BPMN, 'Task_Approve', [
+      { ...ACTION, variables: 'stockSufficient=true; note=' },
+    ]);
+
+    expect(xml).toContain('variables="stockSufficient=true; note="');
+    expect(getElementActions(xml, 'Task_Approve')[0].variables).toBe(
+      'stockSufficient=true; note='
+    );
+    expect(isValidAction({ ...ACTION, variables: 'a=1; a=2' })).toBe(false);
+    expect(() => normalizeAction({ ...ACTION, variables: 'stockSufficient' })).toThrow(
+      /переменные кнопки/
+    );
   });
 
   it('отклоняет недопустимую кнопку, неизвестный узел и пустую схему', () => {

@@ -39,6 +39,13 @@ const {
   TRIGGER_MODELE_EXTENSIONS,
   TRIGGER_TYPE,
 } = require('../bpmn-sdk/xml/triggerModdle');
+const { ROLE_MODELE_EXTENSIONS } = require('../bpmn-sdk/xml/rolesModdle');
+
+/**
+ * Расширения моделлера как у редактора: кроме триггера он знает и каталог
+ * ролей (`role:catalog`), который теперь есть в демо-схемах.
+ */
+const MODELE_EXTENSIONS = { ...TRIGGER_MODELE_EXTENSIONS, ...ROLE_MODELE_EXTENSIONS };
 
 /** Триггер, который заказчик ставит на ожидание отгрузки поставщиком. */
 const TRIGGER = {
@@ -82,7 +89,7 @@ function modelFields(trigger) {
 const warningTexts = (warnings) => warnings.map((warning) => warning.message);
 
 describe('bpmn-moddle: кросс-процессный триггер (trg:processTrigger)', () => {
-  const moddle = new BpmnModdle(TRIGGER_MODELE_EXTENSIONS);
+  const moddle = new BpmnModdle(MODELE_EXTENSIONS);
 
   it('читает триггер, записанный хелпером `setElementTrigger`, без предупреждений', async () => {
     const xml = setElementTrigger(DEFAULT_CUSTOMER_BPMN_XML, TRIGGER_HOST, TRIGGER);
@@ -144,7 +151,7 @@ describe('bpmn-moddle: кросс-процессный триггер (trg:proce
     // сохраняет, но его `$type` — имя тега из XML (`trg:processTrigger`), а не
     // тип moddle (`trg:ProcessTrigger`), поэтому тип «не находится».
     const xml = setElementTrigger(DEFAULT_CUSTOMER_BPMN_XML, TRIGGER_HOST, TRIGGER);
-    const plain = new BpmnModdle();
+    const plain = new BpmnModdle(ROLE_MODELE_EXTENSIONS);
     const { rootElement, warnings } = await plain.fromXML(xml);
     const values = modelHost(rootElement).extensionElements.values;
 

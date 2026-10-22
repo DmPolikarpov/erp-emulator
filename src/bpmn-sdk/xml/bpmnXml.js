@@ -30,6 +30,8 @@ import {
   ACTION_NAMESPACE,
   ACTION_NAMESPACE_PREFIX,
 } from './actionModdle';
+import { ROLE_CATALOG_LOCAL_NAME, ROLE_LOCAL_NAME, ROLE_NAMESPACE } from './rolesModdle';
+import { extractProcessXml } from './projectXml';
 
 /** Суффиксы локальных имён, которые считаются узлами потока управления. */
 export const FLOW_ELEMENT_SUFFIXES = ['Task', 'Event', 'Gateway'];
@@ -666,6 +668,15 @@ export const ACTION_TAG_NAME = ACTION_NAMESPACE_PREFIX + ':' + ACTION_LOCAL_NAME
 export const ACTION_ICON_PATTERN = /^[A-Za-z][A-Za-z0-9]*$/;
 
 /**
+ * Пара переменных кнопки: `ключ=значение`.
+ *
+ * Ключ — имя переменной в терминах EL движка (`[A-Za-z_][A-Za-z0-9_]*`),
+ * значение — строка без `;`, `=` и переводов строки (пустая допустима).
+ * Пробелы по краям пары и вокруг `=` обрезаются.
+ */
+const ACTION_VARIABLE_PAIR_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;=\r\n]*)$/;
+
+/**
  * Проверяет, что узел может быть хостом кнопки участника.
  *
  * Кнопка описывает шаг, который ведёт участник, поэтому хостом может быть
@@ -789,6 +800,54 @@ export function resolveAction(xml, elementId, action) {
 }
 
 /**
+ * Переменные кнопки: `variables="stockSufficient=true;batch="`.
+ *
+ * Формат — пары `ключ=значение` через `;`. Значение всегда строка: так его
+ * видит EL движка (`true`, `degraded`, `9.5`), а число из строки делает только
+ * сравнение `>`/`<`. Пустая строка — «переменных нет» (`{}`), а не ошибка.
+ *
+ * Клиент при нажатии добавляет результат в `output_data` события, поэтому
+ * разбор идёт на клиенте, а не в движке: «кнопка» и «значение ветки» — одно
+ * объявление в схеме (см. дизайн M1, 8.1).
+ *
+ * @param {string} variables Строка `act:userAction/@variables`.
+ * @returns {Object<string, string>} переменные в порядке объявления.
+ * @throws {Error} пустая пара (`;;`), нет `=`, недопустимый ключ, `;`/`=` в
+ *   значении либо повтор ключа (второе значение молча перекрыло бы первое).
+ */
+export function parseActionVariables(variables) {
+  const text = variables == null ? '' : String(variables);
+
+  if (text.trim() === '') return {};
+
+  const parsed = {};
+
+  text.split(';').forEach((pair) => {
+    const trimmed = pair.trim();
+
+    if (trimmed === '') {
+      throw new Error('Пустая пара переменных: "' + text + '".');
+    }
+
+    const hit = ACTION_VARIABLE_PAIR_PATTERN.exec(trimmed);
+
+    if (!hit) {
+      throw new Error(
+        'Переменная кнопки должна быть парой ключ=значение: "' + trimmed + '".'
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(parsed, hit[1])) {
+      throw new Error('Переменная "' + hit[1] + '" объявлена дважды.');
+    }
+
+    parsed[hit[1]] = hit[2].trim();
+  });
+
+  return parsed;
+}
+
+/**
  * Приводит описание кнопки к канонической форме и проверяет поля.
  *
  * Обязательны только те поля, которые из схемы не выводятся: `id` (ключ кнопки)
@@ -864,6 +923,16 @@ export function normalizeAction(action) {
   if (normalized.startsProcess !== '' && !isValidElementId(normalized.startsProcess)) {
     throw new Error(
       'Недопустимый запускаемый процесс кнопки: "' + normalized.startsProcess + '"'
+    );
+  }
+  // Переменные кнопки уходят в `output_data` события и читаются условиями
+  // шлюза: неразобранная строка молча оставила бы ветку без значения, и она
+  // уехала бы в `default`. Поэтому формат проверяется до записи в XML.
+  try {
+    parseActionVariables(normalized.variables);
+  } catch (error) {
+    throw new Error(
+      'Недопустимые переменные кнопки "' + normalized.id + '": ' + error.message
     );
   }
   // Событие второй стороны без узла (и наоборот) — недописанная пара: событие
@@ -1803,6 +1872,12 @@ export const SCHEMA_PROBLEM = {
   DEAD_END: 'DeadEnd',
   EXCLUSIVE_GATEWAY_NO_DEFAULT: 'ExclusiveGatewayNoDefault',
   PARALLEL_GATEWAY_INVALID_SHAPE: 'ParallelGatewayInvalidShape',
+  CONDITION_UNSUPPORTED: 'ConditionUnsupported',
+  GATEWAY_DEFAULT_FLOW_WITH_CONDITION: 'GatewayDefaultFlowWithCondition',
+  GATEWAY_FLOW_WITHOUT_CONDITION: 'GatewayFlowWithoutCondition',
+  GATEWAY_UNKNOWN_VARIABLE: 'GatewayUnknownVariable',
+  ACTION_VARIABLE_FORMAT: 'ActionVariableFormat',
+  TASK_MULTIPLE_OUTGOING: 'TaskMultipleOutgoing',
 };
 
 /**
@@ -1868,18 +1943,98 @@ function isFlowNodeLocalName(localName) {
  *
  * `name="default"` — второй способ пометить связь шлюза «по умолчанию»
  * (первый — атрибут `default` у самого шлюза), движок понимает оба.
+ * `conditionText` нужен валидатору (7.4): по нему проверяется грамматика 7.2, а
+ * `hasCondition` остаётся признаком «условие объявлено» — даже пустое `${}`.
  */
 function readFlowElement(node) {
+  const condition = elementChildren(node).find(
+    (child) => getLocalName(child) === 'conditionExpression'
+  );
+
   return {
     id: node.getAttribute('id') || '',
     sourceRef: node.getAttribute('sourceRef') || '',
     targetRef: node.getAttribute('targetRef') || '',
     isDefault:
       (node.getAttribute('name') || '').toLowerCase() === 'default',
-    hasCondition: elementChildren(node).some(
-      (child) => getLocalName(child) === 'conditionExpression'
-    ),
+    hasCondition: Boolean(condition),
+    conditionText: condition ? (condition.textContent || '').trim() : '',
   };
+}
+
+/** Имя переменной в условиях шлюза (`stockSufficient`). */
+const CONDITION_VARIABLE = '[A-Za-z_][A-Za-z0-9_]*';
+
+/** Литерал в кавычках: `'true'` либо `"true"` (экранирования в EL нет). */
+const CONDITION_LITERAL = /'[^']*'|"[^"]*"/g;
+
+/**
+ * Операнд условия: переменная, число или литерал в кавычках.
+ *
+ * Литералы заменяются на `$0`, `$1`, ... до разбора: `and`/`or` внутри
+ * значения (`note == 'bread and butter'`) не должны считаться оператором.
+ */
+const CONDITION_OPERAND =
+  '(?:' + CONDITION_VARIABLE + '|-?\\d+(?:\\.\\d+)?|\\$\\d+)';
+
+const CONDITION_COMPARISON = new RegExp(
+  '^(' + CONDITION_VARIABLE + ')\\s*(==|!=|>=|<=|>|<)\\s*' + CONDITION_OPERAND + '$'
+);
+
+const CONDITION_BARE_VARIABLE = new RegExp('^(' + CONDITION_VARIABLE + ')$');
+
+/**
+ * Переменные, которые читает условие шлюза.
+ *
+ * Повторяет грамматику `eval_condition` вендора (7.2): сравнение
+ * `переменная оператор операнд`, голая переменная и связки `and`/`or` без
+ * скобок. Всё остальное (скобки, `not`, литерал слева, `=` вместо `==`,
+ * функции) движок не разбирает и молча считает связь ложной — для валидатора
+ * это `null`, то есть «условие не поддерживается».
+ *
+ * @param {string} conditionText Текст `conditionExpression` вместе с обёрткой
+ *   `${...}` — так он записан в схеме.
+ * @returns {string[]|null} имена читаемых переменных либо `null`.
+ */
+function conditionVariables(conditionText) {
+  // В схеме условие записано в обёртке `${...}` (её требует bpmn-js и снимает
+  // компилятор): без обёртки движок условием её не считает.
+  const wrapped = /^\$\{([\s\S]*)\}$/.exec(String(conditionText || '').trim());
+
+  if (!wrapped) return null;
+
+  const expression = wrapped[1].trim();
+
+  if (expression === '') return null;
+
+  const literals = [];
+  const masked = expression.replace(CONDITION_LITERAL, (literal) => {
+    literals.push(literal);
+    return '$' + (literals.length - 1);
+  });
+
+  const variables = [];
+
+  for (const atom of masked.split(/\s+(?:and|or)\s+/)) {
+    const part = atom.trim();
+    const comparison = CONDITION_COMPARISON.exec(part);
+
+    if (comparison) {
+      variables.push(comparison[1]);
+      continue;
+    }
+
+    const bare = CONDITION_BARE_VARIABLE.exec(part);
+
+    if (bare) {
+      variables.push(bare[1]);
+      continue;
+    }
+
+    return null;
+  }
+
+  return variables;
 }
 
 /**
@@ -2029,6 +2184,41 @@ export function validateEngineSchema(xml) {
     }
   });
 
+  // Переменные кнопок: по ним шлюз выбирает ветку, поэтому формат проверяется
+  // до условий — на кривой строке условие не найдёт переменную, и ветка молча
+  // уедет в `default` (дизайн M1, 7.3 п. 5 и 7.4).
+  const declaredVariables = new Set();
+
+  Array.from(doc.getElementsByTagName('*'))
+    .filter((node) => getLocalName(node) === ACTION_LOCAL_NAME)
+    .forEach((node) => {
+      const value = node.getAttribute('variables') || '';
+
+      if (value.trim() === '') return;
+
+      const hostId = extensionOwnerId(node);
+      const host = nodes.get(hostId);
+
+      try {
+        Object.keys(parseActionVariables(value)).forEach((name) =>
+          declaredVariables.add(name)
+        );
+      } catch (error) {
+        problems.push(
+          schemaProblem(
+            SCHEMA_PROBLEM.ACTION_VARIABLE_FORMAT,
+            `Переменные кнопки на узле ${hostId || '(без узла)'}: ${error.message}`,
+            {
+              order: host ? host.order : -1,
+              elementId: hostId,
+              hint: 'Формат — пары ключ=значение через ";", например ' +
+                'variables="stockSufficient=true".',
+            }
+          )
+        );
+      }
+    });
+
   const list = Array.from(nodes.values());
   const starts = list.filter((node) => node.type === 'startEvent');
   const ends = list.filter((node) => node.type === 'endEvent');
@@ -2100,9 +2290,8 @@ export function validateEngineSchema(xml) {
   nodes.forEach((node) => {
     if (node.type === 'exclusiveGateway') {
       const outgoing = node.outgoing;
-      const defaults = outgoing.filter(
-        (flow) => flow.isDefault || flow.id === node.defaultFlowId
-      );
+      const isDefaultFlow = (flow) => flow.isDefault || flow.id === node.defaultFlowId;
+      const defaults = outgoing.filter(isDefaultFlow);
 
       // Движок требует связь по умолчанию, если хотя бы одна исходящая связь
       // шлюза не несёт условия (`conditionExpression`).
@@ -2130,6 +2319,112 @@ export function validateEngineSchema(xml) {
           )
         );
       }
+
+      // Условие на default-связи не действует: `parse_condition` возвращает
+      // `Default` раньше разбора текста (7.1, п. 2), а автор думает, что задал
+      // ветку.
+      outgoing.filter(isDefaultFlow).forEach((flow) => {
+        if (!flow.hasCondition) return;
+
+        problems.push(
+          schemaProblem(
+            SCHEMA_PROBLEM.GATEWAY_DEFAULT_FLOW_WITH_CONDITION,
+            `Связь ${flow.id} шлюза ${node.id} отмечена как default и несёт ` +
+              'условие: движок возьмёт её как ветку по умолчанию и текст ' +
+              'проигнорирует.',
+            {
+              order: flow.order,
+              flowId: flow.id,
+              elementId: node.id,
+              hint: 'У связи может быть только одно из двух: default или ' +
+                'conditionExpression.',
+            }
+          )
+        );
+      });
+
+      // Безусловная связь выигрывает у всех условий (7.1, п. 1): развилка
+      // перестаёт зависеть от переменных, и «Да»/«Нет» ведут в одну ветку.
+      outgoing
+        .filter((flow) => !isDefaultFlow(flow) && !flow.hasCondition)
+        .forEach((flow) => {
+          problems.push(
+            schemaProblem(
+              SCHEMA_PROBLEM.GATEWAY_FLOW_WITHOUT_CONDITION,
+              `У связи ${flow.id} шлюза ${node.id} нет условия, и она не ` +
+                'default: токен всегда пойдёт по ней.',
+              {
+                order: flow.order,
+                flowId: flow.id,
+                elementId: node.id,
+                hint: 'Добавьте conditionExpression или отметьте связь как default.',
+              }
+            )
+          );
+        });
+
+      outgoing
+        .filter((flow) => flow.hasCondition)
+        .forEach((flow) => {
+          const variables = conditionVariables(flow.conditionText);
+
+          if (variables === null) {
+            problems.push(
+              schemaProblem(
+                SCHEMA_PROBLEM.CONDITION_UNSUPPORTED,
+                `Условие связи ${flow.id} не разбирается движком: ` +
+                  `"${flow.conditionText || '${}'}".`,
+                {
+                  order: flow.order,
+                  flowId: flow.id,
+                  elementId: node.id,
+                  hint: 'Движок понимает variable == \'значение\', !=, >, >=, <, ' +
+                    '<=, and, or — без скобок, not, арифметики и функций.',
+                }
+              )
+            );
+            return;
+          }
+
+          variables
+            .filter((name) => !declaredVariables.has(name))
+            .forEach((name) => {
+              problems.push(
+                schemaProblem(
+                  SCHEMA_PROBLEM.GATEWAY_UNKNOWN_VARIABLE,
+                  `Условие связи ${flow.id} читает переменную "${name}", ` +
+                    'которой не выставляет ни одна кнопка процесса: ветка ' +
+                    'недостижима.',
+                  {
+                    order: flow.order,
+                    flowId: flow.id,
+                    elementId: node.id,
+                    hint: 'Добавьте variables="' + name + '=..." кнопке входного шага.',
+                  }
+                )
+              );
+            });
+        });
+    }
+
+    // У задачи одна исходящая связь: `move_token` создаёт по токену на каждую
+    // (7.3, п. 4), то есть вторая связь — неявный AND-split без слияния.
+    if (
+      (node.type === 'userTask' || node.type === 'serviceTask') &&
+      node.outgoing.length > 1
+    ) {
+      problems.push(
+        schemaProblem(
+          SCHEMA_PROBLEM.TASK_MULTIPLE_OUTGOING,
+          `У задачи ${node.id} ${node.outgoing.length} исходящих связи: ` +
+            'движок создаст по токену на каждую.',
+          {
+            order: node.order,
+            elementId: node.id,
+            hint: 'Оставьте одну связь до шлюза и разветвите поток на нём.',
+          }
+        )
+      );
     }
 
     if (node.type === 'parallelGateway') {
@@ -2222,6 +2517,173 @@ export function validateEngineSchema(xml) {
   problems.sort((first, second) => first.order - second.order);
 
   return { ok: problems.length === 0, problems };
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Проект: несколько процессов и каталог ролей в одной схеме
+ * ------------------------------------------------------------------ */
+
+/**
+ * Процессы проекта в порядке документа.
+ *
+ * Подпись дорожки (`participantName`) берётся из `bpmn:participant` проекта:
+ * это название организации, которое видит участник. У одно-процессной схемы
+ * кооперации нет, и подписью остаётся имя процесса.
+ *
+ * @param {string} xml BPMN-схема (проект или обычная схема процесса).
+ * @returns {Array<{id: string, name: string, isExecutable: boolean, participantName: string}>}
+ */
+export function getProjectProcesses(xml) {
+  const doc = parseXml(xml);
+  if (!doc) return [];
+
+  const participants = {};
+  const all = Array.from(doc.getElementsByTagName('*'));
+
+  all
+    .filter((node) => getLocalName(node) === 'participant' && node.getAttribute('processRef'))
+    .forEach((node) => {
+      participants[node.getAttribute('processRef')] = node.getAttribute('name') || '';
+    });
+
+  return all
+    .filter((node) => getLocalName(node) === 'process')
+    .map((node) => {
+      const id = node.getAttribute('id') || '';
+
+      return {
+        id,
+        name: node.getAttribute('name') || id,
+        isExecutable: node.getAttribute('isExecutable') !== 'false',
+        participantName: participants[id] || '',
+      };
+    })
+    .filter((process) => process.id !== '');
+}
+
+/**
+ * Владелец каждого элемента: `{elementId: processId}`.
+ *
+ * Нужен, чтобы разложить роли и кнопки по процессам: в проекте их несколько, и
+ * `bpmn:potentialOwner` сам по себе не говорит, чьему процессу принадлежит шаг.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {Object<string, string>} например `{Task_QualityControl: 'Process_MilkCustomer_v1'}`.
+ */
+export function getElementOwners(xml) {
+  const doc = parseXml(xml);
+  if (!doc) return {};
+
+  const owners = {};
+
+  Array.from(doc.getElementsByTagName('*'))
+    .filter((node) => getLocalName(node) === 'process')
+    .forEach((processNode) => {
+      const processId = processNode.getAttribute('id') || '';
+      if (!processId) return;
+
+      owners[processId] = processId;
+
+      Array.from(processNode.getElementsByTagName('*')).forEach((node) => {
+        const id = node.getAttribute && node.getAttribute('id');
+        if (id) owners[id] = processId;
+      });
+    });
+
+  return owners;
+}
+
+/**
+ * Каталог ролей `role:catalog` процесса (или всех процессов проекта).
+ *
+ * Роль — это титул: `code` адресует шаг (`potentialOwner`/`userAction`), `title`
+ * показывает кабинет. Схема без каталога — не ошибка: клиент возьмёт название
+ * из самого `bpmn:potentialOwner/@name` (см. `analyzeProject` в демо-клиенте).
+ *
+ * @param {string} xml BPMN-схема (проект или процесс).
+ * @param {string} [processId] только этот процесс (`''` — все).
+ * @returns {Array<{processId: string, code: string, title: string, kind: string, icon: string}>}
+ */
+export function getRoleCatalog(xml, processId) {
+  const doc = parseXml(xml);
+  if (!doc) return [];
+
+  const catalog = [];
+
+  Array.from(doc.getElementsByTagName('*'))
+    .filter((node) => getLocalName(node) === 'process')
+    .forEach((processNode) => {
+      const ownerId = processNode.getAttribute('id') || '';
+      if (processId && ownerId !== processId) return;
+
+      Array.from(processNode.getElementsByTagName('*'))
+        .filter((node) => getLocalName(node) === ROLE_CATALOG_LOCAL_NAME)
+        .filter((node) => !node.namespaceURI || node.namespaceURI === ROLE_NAMESPACE)
+        .forEach((catalogNode) => {
+          Array.from(catalogNode.getElementsByTagName('*'))
+            .filter((node) => getLocalName(node) === ROLE_LOCAL_NAME)
+            .forEach((role) => {
+              const code = (role.getAttribute('code') || '').trim();
+              if (!code) return;
+
+              catalog.push({
+                processId: ownerId,
+                code,
+                title: (role.getAttribute('title') || '').trim(),
+                kind: (role.getAttribute('kind') || '').trim(),
+                icon: (role.getAttribute('icon') || '').trim(),
+              });
+            });
+        });
+    });
+
+  return catalog;
+}
+
+/**
+ * Роли, объявленные прямо в кнопках (`act:userAction/@role`).
+ *
+ * У события нет `bpmn:potentialOwner` (спецификация BPMN 2.0 разрешает роль
+ * только Activity), поэтому роль кнопки старта живёт в самой кнопке. Кабинет
+ * должен знать такую роль, даже если её нет в каталоге.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {Array<{elementId: string, role: string, label: string}>}
+ */
+export function getActionRoles(xml) {
+  return listActions(xml)
+    .filter((entry) => entry.action && entry.action.role)
+    .map((entry) => ({
+      elementId: entry.elementId,
+      role: entry.action.role,
+      label: entry.action.label || entry.action.id || '',
+    }));
+}
+
+/**
+ * Проверка проекта: каждый процесс — отдельно, как его увидит движок.
+ *
+ * Оркестратор читает только первый `bpmn:process`, поэтому валидировать проект
+ * целиком бессмысленно: второй процесс для него не существует. Проблемы
+ * помечаются идентификатором процесса, чтобы их можно было объяснить человеку.
+ *
+ * @param {string} projectXml XML проекта.
+ * @returns {{ok: boolean, problems: Array<Object>, processes: Array<Object>}}
+ */
+export function validateProjectSchema(projectXml) {
+  const processes = getProjectProcesses(projectXml);
+  const problems = [];
+
+  processes.forEach((process) => {
+    const report = validateEngineSchema(extractProcessXml(projectXml, process.id));
+
+    report.problems.forEach((problem) => {
+      problems.push({ ...problem, processId: process.id, processName: process.name });
+    });
+  });
+
+  return { ok: problems.length === 0, problems, processes };
 }
 
 
