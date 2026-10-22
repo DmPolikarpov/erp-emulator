@@ -29,8 +29,8 @@ import { buildProjectXml } from '../xml/projectXml';
  *  - каждая задача несёт кнопки `act:userAction` — надпись, иконку, роль и
  *    узел, который станет активным после нажатия. Ветвление нарисовано
  *    `bpmn:exclusiveGateway`: у каждой «Да»-связи есть `conditionExpression`, а
- *    `default` указывает на негативную ветку, поэтому движок M1
- *    (`ENGINE_ROUTING=graph`) выбирает ветку сам. Кнопки объявляют те же
+ *    `default` указывает на негативную ветку, поэтому движок M1 выбирает ветку
+ *    сам. Кнопки объявляют те же
  *    значения через `variables` (`haveStock` → `stockSufficient=true`), так что
  *    `elementId` кнопки и маршрут графа совпадают — это проверяет
  *    `dairyPlant.test.js`;
