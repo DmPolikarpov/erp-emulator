@@ -142,13 +142,19 @@
 
 **Задачи.**
 
-- [ ] Контракт воркера: subject `mes.out.v1.cmd.<system>`, тело — `instance_id`,
+- [x] Контракт воркера: subject `mes.out.v1.cmd.<system>`, тело — `instance_id`,
       `element_id`, `payload`, `idempotency_key`, `deadline`; ответ — `mes.in.v1.erp.response`
-      (`status`, `payload`, `error`).
-- [ ] В движке: `serviceTask` активируется сам (без кнопки); ответ уже двигает по
-      графу (M1, шаг 3), остаются активация задачи и воркер.
-- [ ] Идемпотентность: повторный ответ на ту же пару `(instance_id, element_id)` не двигает
-      токен дважды; ключ — в `execution_history`.
+      (`status`, `payload`, `error`). *(Сделано: `ServiceCommand` в `events.rs`,
+      `nats_client::publish_service_command`, контракт — README §3 и дизайн 10.4.)*
+- [x] В движке: `serviceTask` активируется сам (без кнопки); ответ уже двигает по
+      графу (M1, шаг 3), остаются активация задачи и воркер. *(Сделано:
+      `Outcome.commands` + `runtime::service_commands`; тема — `camunda:topic`,
+      иначе `default`.)*
+- [x] Идемпотентность: повторный ответ на ту же пару `(instance_id, element_id)` не двигает
+      токен дважды; ключ — в `execution_history`. *(Сделано через `consumed_event`:
+      ключ `<instance>:<element>:<token>` приходит в ответе; без ключа повтор
+      гасится отсутствием `Waiting`-токена. Ответ на узел, который сейчас не ждёт,
+      игнорируется — раньше он закрывал соседний через fallback.)*
 - [ ] Ретраи и компенсация вместо мгновенного `FAILED` (огр. 4): `retry_count`, `backoff`,
       `ActionRequiredEvent` — крайний случай.
 - [ ] Демо: `Task_ERP_*` → `bpmn:serviceTask`; кнопки `applyDeviation` / `escalateCritical`
@@ -158,8 +164,10 @@
 **Готово, когда.**
 
 - Падение пастеризации закрывает `Task_ERP_CriticalAlert` ответом мока, `End_ERP_Aborted`
-  наступает без нажатия кнопки.
-- Повторная публикация ответа не меняет состояние.
+  наступает без нажатия кнопки. *(Активация и команда уже есть; ждёт демо-схему
+  и мок-воркер.)*
+- Повторная публикация ответа не меняет состояние. *(Проверяется ключом
+  `idempotency_key`.)*
 - Ответ с `retryable = true` уходит в ретрай, а не в `FAILED`.
 
 **Файлы:** [`main.rs`](../../bpmn-engine/src/main.rs),
