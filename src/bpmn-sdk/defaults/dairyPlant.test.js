@@ -459,6 +459,28 @@ describe('dairyPlant: маршрут кнопок через шлюзы', () => 
   });
 });
 
+describe('dairyPlant: внешние задачи ERP', () => {
+  const ERP_TASKS = ['Task_ERP_HandleDeviation', 'Task_ERP_CriticalAlert'];
+
+  it('объявлены serviceTask с темой erp и ретраями', () => {
+    ERP_TASKS.forEach((taskId) => {
+      const task = elementById(DAIRY_PLANT_PROCESS_XML, taskId);
+
+      expect(task).not.toBeNull();
+      expect(getLocalName(task)).toBe('serviceTask');
+      // Без `camunda:topic` движок ушёл бы в `mes.out.v1.cmd.default`.
+      expect(task.getAttribute('camunda:topic')).toBe('erp');
+      expect(Number(task.getAttribute('camunda:retries'))).toBe(2);
+    });
+  });
+
+  it('не несут кнопок: шаг закрывает воркер, а не человек', () => {
+    const hosts = listActions(DAIRY_PLANT_PROCESS_XML).map(({ elementId }) => elementId);
+
+    ERP_TASKS.forEach((taskId) => expect(hosts).not.toContain(taskId));
+  });
+});
+
 describe('dairyPlant: проект', () => {
   it('собирает кооперацию из двух процессов', () => {
     expect(getProcessIds(DAIRY_PLANT_PROJECT_XML)).toEqual([

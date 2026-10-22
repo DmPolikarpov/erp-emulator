@@ -547,7 +547,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     // Старт — одно событие: `StartProcess` несёт `bpmn_xml` и называет узел
     // первого шага (его схема выводит из кнопки старта, см. `startProcess`).
-    // Второго `CompleteBlock` нет: в режиме графа (`ENGINE_ROUTING=graph`) он
+    // Второго `CompleteBlock` нет: в режиме графа он
     // закрыл бы шаг, который движок только что активировал, и подсветка уехала
     // бы на следующий узел (M1, 10.2 п. 1).
     await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));

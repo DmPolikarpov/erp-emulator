@@ -26,20 +26,21 @@ import { buildProjectXml } from '../xml/projectXml';
  * Как читается результат:
  *
  *  - дорожки (`bpmn:lane`) сохранены: по ним видно, кто ведёт шаг;
- *  - каждая задача несёт кнопки `act:userAction` — надпись, иконку, роль и
- *    узел, который станет активным после нажатия. Ветвление нарисовано
- *    `bpmn:exclusiveGateway`: у каждой «Да»-связи есть `conditionExpression`, а
- *    `default` указывает на негативную ветку, поэтому движок M1
- *    (`ENGINE_ROUTING=graph`) выбирает ветку сам. Кнопки объявляют те же
+ *  - каждая пользовательская задача несёт кнопки `act:userAction` — надпись,
+ *    иконку, роль и узел, который станет активным после нажатия. Ветвление
+ *    нарисовано `bpmn:exclusiveGateway`: у каждой «Да»-связи есть
+ *    `conditionExpression`, а `default` указывает на негативную ветку, поэтому
+ *    движок M1 выбирает ветку сам. Кнопки объявляют те же
  *    значения через `variables` (`haveStock` → `stockSufficient=true`), так что
  *    `elementId` кнопки и маршрут графа совпадают — это проверяет
  *    `dairyPlant.test.js`;
  *  - процессные роли (`role:catalog`) — это вход в кабинет: 9 ролей завода и
  *    3 роли поставщика, руководители (`kind="EXECUTIVE"`) видят схему и метрики;
- *  - служебные задачи ERP (`Task_ERP_*`) объявлены `userTask`, а не
- *    `serviceTask`: у демо-клиента нет воркеров, и токен на `serviceTask`
- *    некому двигать. Контракт воркера — пункт дорожной карты
- *    (`docs/dairy-plant-roadmap.md`).
+ *  - обращения к ERP (`Task_ERP_*`) — это `bpmn:serviceTask` с
+ *    `camunda:topic="erp"`: движок сам публикует команду в
+ *    `mes.out.v1.cmd.erp`, а ответ воркера (`mes.in.v1.erp.response`) двигает
+ *    токен дальше. Кнопок у таких шагов нет — в кабинете видно подсветку узла,
+ *    а результат приходит в `End_ERP_*` без участия человека.
  *
  * Файл не зависит от DOM: это строки и чистая сборка проекта, поэтому модуль
  * работает и в браузере, и в Jest без `jsdom`.
@@ -74,6 +75,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
                   xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
                   xmlns:act="http://erp.mes/schema/bpmn/action"
                   xmlns:role="http://erp.mes/schema/bpmn/roles"
+                  xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                   id="Definitions_DairyPlant"
                   targetNamespace="http://bpmn.io/schema/bpmn">
@@ -429,31 +431,25 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="PRODUCTION" />
     </bpmn:userTask>
 
-    <bpmn:userTask id="Task_ERP_HandleDeviation" name="Обработать отклонение в ERP">
-      <bpmn:extensionElements>
-        <act:userAction id="applyDeviation" label="Скорректировать мощность и завести заявку ТОиР" role="MAINTENANCE" icon="Wrench" elementId="End_ERP_DeviationLogged" />
-      </bpmn:extensionElements>
-      <bpmn:documentation>ERP-L4: корректировка производственного заказа, заявка ТОиР, пересчёт себестоимости партии.</bpmn:documentation>
+    <bpmn:serviceTask id="Task_ERP_HandleDeviation" name="Обработать отклонение в ERP"
+                      camunda:topic="erp" camunda:retries="2">
+      <bpmn:documentation>ERP-L4: корректировка производственного заказа, заявка ТОиР, пересчёт себестоимости партии. Исполняет воркер ERP: команда — mes.out.v1.cmd.erp, ответ — mes.in.v1.erp.response.</bpmn:documentation>
       <bpmn:incoming>SF_T_Esc2</bpmn:incoming>
       <bpmn:outgoing>SF_T_Esc3</bpmn:outgoing>
-      <bpmn:potentialOwner name="MAINTENANCE" />
-    </bpmn:userTask>
+    </bpmn:serviceTask>
 
     <bpmn:endEvent id="End_ERP_DeviationLogged" name="Отклонение закрыто в ERP">
       <bpmn:incoming>SF_T_Esc3</bpmn:incoming>
     </bpmn:endEvent>
 
     <!-- Производство, ряд «авария»: критический отказ требует остановки заказов. -->
-    <bpmn:userTask id="Task_ERP_CriticalAlert" name="Критическая авария в ERP">
-      <bpmn:extensionElements>
-        <act:userAction id="escalateCritical" label="Остановить линию и заказы, уведомить директора" role="DIRECTOR" icon="AlertCircle" elementId="End_ERP_Aborted" />
-      </bpmn:extensionElements>
-      <bpmn:documentation>ERP-L4 / ДИ-РУК-02: остановка заказов, уведомление директора, план восстановления.</bpmn:documentation>
+    <bpmn:serviceTask id="Task_ERP_CriticalAlert" name="Критическая авария в ERP"
+                      camunda:topic="erp" camunda:retries="2">
+      <bpmn:documentation>ERP-L4 / ДИ-РУК-02: остановка заказов, уведомление директора, план восстановления. Исполняет воркер ERP: команда — mes.out.v1.cmd.erp, ответ — mes.in.v1.erp.response.</bpmn:documentation>
       <bpmn:incoming>SF_T_Err2</bpmn:incoming>
       <bpmn:incoming>SF_T5_No</bpmn:incoming>
       <bpmn:outgoing>SF_T_Err3</bpmn:outgoing>
-      <bpmn:potentialOwner name="DIRECTOR" />
-    </bpmn:userTask>
+    </bpmn:serviceTask>
 
     <bpmn:endEvent id="End_ERP_Aborted" name="Производство остановлено">
       <bpmn:incoming>SF_T_Err3</bpmn:incoming>
