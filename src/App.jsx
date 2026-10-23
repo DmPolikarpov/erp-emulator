@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BpmnEditor,
   BpmnViewer,
@@ -57,6 +57,17 @@ import {
   setActiveProjectId,
   updateProject,
 } from './projectStore';
+import {
+  ORDER_STATUS,
+  defaultOrderDraft,
+  formatDueDate,
+  mergeOrders,
+  nextOrderNum,
+  normalizeOrder,
+  orderStatusText,
+  ordersClient,
+  toOrderPayload,
+} from './ordersApi';
 
 // Базовый URL API Gateway: `REACT_APP_GATEWAY_URL` (см. `.env`) либо
 // относительный путь — тогда запросы идут через CRA-прокси (`package.json`).
@@ -685,6 +696,10 @@ export default function App() {
   const [orders, setOrders] = useState([]);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
 
+  // Поля заказа (M4): «Принять заказ клиента» заводит номенклатуру, объём,
+  // жирность, упаковку, срок и контрагента, а не фиксированные «100 Л».
+  const [orderDraft, setOrderDraft] = useState(() => defaultOrderDraft());
+
   const [actionLoading, setActionLoading] = useState({});
   const [actionErrors, setActionErrors] = useState({});
 
@@ -718,6 +733,60 @@ export default function App() {
     }));
     setNotifications(prev => [...newEntries, ...prev]);
   }, []);
+
+  // Экземпляры, уже привязанные к заказу на сервере: повторный WS-кадр не
+  // должен слать второй POST.
+  const attachedInstances = useRef(new Set());
+
+  /**
+   * Привязывает экземпляр процесса к заказу (M4).
+   *
+   * Без этого сервер не знает, какой экземпляр относится к заказу, и после F5
+   * карточка осталась бы без текущих шагов. Ошибка API не блокирует сценарий:
+   * демо работает и с локальным списком.
+   */
+  const attachOrderInstance = useCallback(async (orderNum, org, instanceId) => {
+    if (!orderNum || !instanceId) return;
+
+    const key = `${orderNum}:${org}:${instanceId}`;
+    if (attachedInstances.current.has(key)) return;
+    attachedInstances.current.add(key);
+
+    const result = await ordersClient.attachInstance(orderNum, org, instanceId);
+    const serverOrder = result.ok && result.order ? normalizeOrder(result.order) : null;
+
+    if (!serverOrder) {
+      attachedInstances.current.delete(key);
+      return;
+    }
+
+    setOrders(prev => mergeOrders([serverOrder], prev));
+  }, []);
+
+  // Список заказов живёт на сервере (M4): F5 и второй браузер показывают одни
+  // и те же заказы. Читаем на вход в кабинет, а не на монтирование: после
+  // «Выхода» список очищается, и без повторного чтения он остался бы пустым,
+  // хотя заказы на сервере есть. API может быть недоступен — тогда, как и
+  // раньше, список наполняется событиями WS и живёт только в этой сессии.
+  useEffect(() => {
+    if (!currentUser) return undefined;
+
+    let cancelled = false;
+
+    ordersClient.listOrders().then((result) => {
+      if (cancelled || !result.ok) return;
+
+      const remote = (result.orders || []).map(normalizeOrder).filter(Boolean);
+      if (remote.length === 0) return;
+
+      setOrders(prev => mergeOrders(remote, prev));
+      setSelectedOrderId(prev => prev || remote[0].id);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser]);
 
   /**
    * Сохраняет проект в браузере (`localStorage`).
@@ -796,6 +865,13 @@ export default function App() {
       // «Текущий шаг» — только активация узла: прежний узел движок закрывает
       // событием `COMPLETED` в момент активации следующего (см. `isTokenActive`).
       const isActive = isTokenActive(state);
+
+      // Экземпляр второй стороны создаёт движок по сообщению (M3): привязываем
+      // его к заказу, как только кабинет увидел первый токен — иначе карточка
+      // после F5 не знала бы о процессе поставщика.
+      if (isActive && targetOrderNum && instanceId.startsWith(INSTANCE_PREFIX.SUPPLIER)) {
+        attachOrderInstance(targetOrderNum, 'SUPPLIER', instanceId);
+      }
 
       setOrders(prevOrders => {
         const orderIndex = prevOrders.findIndex(
@@ -890,7 +966,7 @@ export default function App() {
 
       logEvent('SYSTEM', 'ALL', 'Событие Оркестратора', `Инстанс ${instanceId} -> Узел: ${elementId || '—'} [Статус: ${state}]`);
     });
-  }, [socket, logEvent, schemaXml]);
+  }, [socket, logEvent, schemaXml, attachOrderInstance]);
 
   /**
    * Запуск процесса по схеме, когда кнопки инициатора в ней нет.
@@ -905,7 +981,7 @@ export default function App() {
     const xml = schemaXml(org);
     if (!xml) return;
 
-    const orderNum = `№${101 + orders.length}`;
+    const orderNum = nextOrderNum(orders);
     const suffix = Math.random().toString(36).substring(2, 8);
     const instanceId =
       org === 'SUPPLIER'
@@ -959,12 +1035,16 @@ export default function App() {
   };
 
   // 1. ТОЧКА ВХОДА: Создание заказа Производством. Кнопку инициатора — надпись,
-  // роль, событие первого шага — объявляет стартовое событие схемы, поэтому в
-  // коде остались только ключ кнопки и payload заказа.
+  // роль, событие первого шага — объявляет стартовое событие схемы, а поля
+  // заказа (номенклатура, объём, жирность, упаковка, срок, контрагент) — форма
+  // `orderDraft` (M4).
   const handleProductionCreateOrder = async () => {
-    const orderNum = `№${101 + orders.length}`;
+    // Номер продолжаем от максимума известных заказов: после F5 список пришёл с
+    // сервера, и `101 + orders.length` выдал бы занятый бизнес-ключ.
+    const orderNum = nextOrderNum(orders);
     const custInstId = `inst-cust-${Math.random().toString(36).substring(2, 8)}`;
     const createOrder = actionOf('CUSTOMER', ACTION_ID.CREATE_ORDER);
+    const orderPayload = toOrderPayload(orderNum, orderDraft);
 
     // Заказ не заводим, если движок определение не скомпилирует: экземпляра
     // процесса не появится, токенов тоже (`tokens` не пройдёт по внешнему
@@ -987,27 +1067,64 @@ export default function App() {
     setActionLoading(prev => ({ ...prev, [orderNum]: 'Создание заказа в оркестраторе...' }));
     setActionErrors(prev => ({ ...prev, [orderNum]: null }));
 
+    // Заказ сохраняем до старта процесса: карточка должна существовать, когда
+    // движок создаст по ней экземпляр. API может быть недоступен (стенд без
+    // HTTP-шлюза) — тогда заказ остаётся локальным, как до M4.
+    const savedOrder = await ordersClient.createOrder(orderPayload);
+
+    if (!savedOrder.ok && savedOrder.status !== 409) {
+      logEvent(
+        'CUSTOMER',
+        currentUser ? currentUser.role : 'ALL',
+        'Заказ сохранён только в кабинете',
+        savedOrder.details || savedOrder.error || 'API заказов недоступен.',
+        orderNum
+      );
+    }
+
     // Запуск процесса: `StartProcess` называет первый шаг — его узел схема
     // выводит из кнопки старта. Второго события нет: в режиме графа оно
     // закрыло бы первый человеческий шаг (M1, 10.2 п. 1).
     const { start } = await startProcess(custInstId, customerBpmnXml, {
       orderNum,
-      volume: '100 Л',
+      volume: `${orderPayload.volumeLiters} л`,
+      nomenclature: orderPayload.nomenclature,
+      fatContent: orderPayload.fatContent,
+      packaging: orderPayload.packaging,
+      dueDate: orderPayload.dueDate,
+      counterparty: orderPayload.counterparty,
       initiator: actionRoleOf('CUSTOMER', createOrder),
     });
 
     if (start.ok) {
+      // Привязка экземпляра к заказу: после F5 карточка берёт текущий шаг из
+      // `tokens` движка, а не из `useState` этого браузера.
+      const attached = await ordersClient.attachInstance(orderNum, 'CUSTOMER', custInstId);
+      const serverOrder =
+        attached.ok && attached.order ? normalizeOrder(attached.order) : null;
+
       const pendingOrder = {
+        ...(serverOrder || {}),
         id: orderNum,
-        createdAt: new Date().toLocaleTimeString('ru-RU'),
-        volume: '100 Л',
+        orderNum,
+        createdAt: serverOrder
+          ? serverOrder.createdAt
+          : new Date().toLocaleTimeString('ru-RU'),
+        volume: `${orderPayload.volumeLiters} л`,
+        volumeLiters: orderPayload.volumeLiters,
+        nomenclature: orderPayload.nomenclature,
+        fatContent: orderPayload.fatContent,
+        packaging: orderPayload.packaging,
+        dueDate: orderPayload.dueDate,
+        counterparty: orderPayload.counterparty,
+        status: ORDER_STATUS.IN_PROGRESS,
         customerInstanceId: custInstId,
         // Первый шаг процесса — узел из кнопки старта (`act:userAction/@elementId`):
         // `startProcess` уже поставил на него токен в движке, поэтому подсветка и
         // «текущий шаг» сходятся.
         customerActiveElementId: createOrder ? createOrder.action.elementId : '',
         customerProcessState: 'ACTIVE',
-        supplierInstanceId: null,
+        supplierInstanceId: serverOrder ? serverOrder.supplierInstanceId : null,
         documents: null, passData: null, shippedAt: null, entryTime: null, checkedAt: null
       };
       // Заказ мог появиться раньше ответа HTTP: движок публикует токен
@@ -1114,6 +1231,10 @@ export default function App() {
         if (!resSupp.ok) {
           setActionLoading(prev => ({ ...prev, [orderId]: null }));
           setActionErrors(prev => ({ ...prev, [orderId]: `Ошибка создания процесса у ${targetOrg === 'SUPPLIER' ? 'Поставщика' : 'Заказчика'}. Попробуйте еще раз.` }));
+        } else {
+          // Экземпляр создал сам клиент (старый механизм `startsProcess`) —
+          // привязываем его к заказу, чтобы карточка пережила F5.
+          attachOrderInstance(orderId, targetOrg, suppInstId);
         }
       } else {
         // Экземпляр второй стороны создаёт движок: сообщение `PurchaseOrder`
@@ -1833,15 +1954,27 @@ export default function App() {
     return order && (order.checkedAt || order.customerProcessState === 'COMPLETED' || order.customerActiveElementId === 'EndEvent_Customer');
   };
 
+  /**
+   * Подпись «Состояния» в списке заказов производства.
+   *
+   * Локальные артефакты сценария (`documents`, `passData`, `entryTime`) сервер
+   * не хранит: пока браузер ведёт заказ, они точнее пустых полей. После F5 их
+   * нет, и подпись берётся из серверной карточки — статус плюс текущий шаг из
+   * `tokens` (M4), а не догадка «Оформление ТТН» по отсутствию документов.
+   */
   const getOrderStatusText = (order) => {
     if (!order) return '—';
     if (isOrderCompleted(order)) return 'Выполнен (Молоко в производстве)';
-    if (!order.supplierInstanceId) return 'В работе (Рассмотрение Закупки)';
-    if (!order.documents) return 'В работе (Оформление ТТН Поставщиком)';
-    if (!order.shippedAt) return 'В работе (Отгрузка сырья Поставщиком)';
-    if (!order.passData) return 'В работе (Оформление пропуска)';
-    if (!order.entryTime) return 'В работе (Ожидание проезда КПП)';
-    return 'В работе (Лабораторный анализ ОТК)';
+
+    if (order.entryTime) return 'В работе (Лабораторный анализ ОТК)';
+    if (order.passData) return 'В работе (Ожидание проезда КПП)';
+    if (order.shippedAt) return 'В работе (Оформление пропуска)';
+    if (order.documents) return 'В работе (Отгрузка сырья Поставщиком)';
+
+    // Без локальных артефактов шаг знает только движок.
+    const step = order.customerActiveElementId || order.supplierActiveElementId;
+
+    return step ? `${orderStatusText(order)}: ${step}` : orderStatusText(order);
   };
 
   const RenderActionStatus = ({ orderId }) => {
@@ -1869,9 +2002,30 @@ export default function App() {
     );
   };
 
+  /**
+   * Поле формы заказа (M4).
+   *
+   * Подпись видна глазом, `aria-label` — для тестов и скринридеров: у полей нет
+   * `id`, а дублировать разметку ради `htmlFor` незачем.
+   */
+  const OrderField = ({ label, name, type = 'text', min, step }) => (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px', fontWeight: '600', color: '#92400e' }}>
+      {label}
+      <input
+        type={type}
+        min={min}
+        step={step}
+        value={orderDraft[name]}
+        aria-label={`Поле заказа: ${label}`}
+        onChange={(event) => setOrderDraft(prev => ({ ...prev, [name]: event.target.value }))}
+        style={{ padding: '6px 8px', border: '1px solid #fcd34d', borderRadius: '6px', fontSize: '12px', color: '#78350f', backgroundColor: '#fff' }}
+      />
+    </label>
+  );
+
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', backgroundColor: '#f8fafc', minHeight: '100vh', padding: '24px' }}>
-      
+
       <style>{`
         @keyframes spin {
           0% { transform: rotate(0deg); }
@@ -2003,8 +2157,20 @@ export default function App() {
                     <PackageCheck size={18} /> Инициация поставок сырья
                   </h3>
                   <p style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#92400e' }}>
-                    Создание заказа запускает BPMN-процесс закупки в оркестраторе.
+                    Создание заказа запускает BPMN-процесс закупки в оркестраторе. Номер
+                    заказа продолжает список, а карточка сохраняется в БД движка.
                   </p>
+
+                  {/* Поля заказа (M4): заказ — запись в БД, поэтому номенклатуру,
+                      объём и срок вводит пользователь, а не константа «100 Л». */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px', marginBottom: '12px' }}>
+                    <OrderField label="Номенклатура" name="nomenclature" />
+                    <OrderField label="Объём, л" name="volumeLiters" type="number" min={1} step={1} />
+                    <OrderField label="Жирность, %" name="fatContent" type="number" min={0} step={0.1} />
+                    <OrderField label="Упаковка" name="packaging" />
+                    <OrderField label="Срок годности" name="dueDate" type="date" />
+                    <OrderField label="Контрагент" name="counterparty" />
+                  </div>
                   <ActionButton
                     action={createOrderAction.action}
                     onClick={handleProductionCreateOrder}
@@ -2020,7 +2186,9 @@ export default function App() {
                     <thead>
                       <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#64748b' }}>
                         <th style={{ padding: '8px 12px' }}>№ Заказа</th>
+                        <th style={{ padding: '8px 12px' }}>Номенклатура</th>
                         <th style={{ padding: '8px 12px' }}>Объем</th>
+                        <th style={{ padding: '8px 12px' }}>Срок</th>
                         <th style={{ padding: '8px 12px' }}>Состояние</th>
                       </tr>
                     </thead>
@@ -2030,7 +2198,9 @@ export default function App() {
                         return (
                           <tr key={o.id} onClick={() => setSelectedOrderId(o.id)} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', backgroundColor: o.id === selectedOrderId ? '#fef3c7' : '#fff' }}>
                             <td style={{ padding: '8px 12px', fontWeight: 'bold' }}>{o.id}</td>
+                            <td style={{ padding: '8px 12px' }}>{o.nomenclature || '—'}</td>
                             <td style={{ padding: '8px 12px' }}>{o.volume}</td>
+                            <td style={{ padding: '8px 12px' }}>{formatDueDate(o.dueDate)}</td>
                             <td style={{ padding: '8px 12px' }}>
                               <span style={{ padding: '4px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: '600', backgroundColor: completed ? '#dcfce7' : '#fef3c7', color: completed ? '#15803d' : '#b45309', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                                 {completed ? <CheckCircle2 size={12}/> : <Clock size={12}/>}
@@ -2041,7 +2211,7 @@ export default function App() {
                         );
                       })}
                       {orders.length === 0 && (
-                        <tr><td colSpan={3} style={{ padding: '12px', textAlign: 'center', color: '#94a3b8' }}>Заказов не создано</td></tr>
+                        <tr><td colSpan={5} style={{ padding: '12px', textAlign: 'center', color: '#94a3b8' }}>Заказов не создано</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -2076,7 +2246,10 @@ export default function App() {
                     <thead>
                       <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#64748b' }}>
                         <th style={{ padding: '8px 12px' }}>Заказ</th>
+                        <th style={{ padding: '8px 12px' }}>Номенклатура</th>
                         <th style={{ padding: '8px 12px' }}>Инстанс</th>
+                        <th style={{ padding: '8px 12px' }}>Текущий шаг</th>
+                        <th style={{ padding: '8px 12px' }}>Срок</th>
                         <th style={{ padding: '8px 12px' }}>Статус</th>
                       </tr>
                     </thead>
@@ -2084,7 +2257,12 @@ export default function App() {
                       {orders.map(o => (
                         <tr key={o.id} onClick={() => setSelectedOrderId(o.id)} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', backgroundColor: o.id === selectedOrderId ? '#eff6ff' : '#fff' }}>
                           <td style={{ padding: '8px 12px', fontWeight: 'bold' }}>{o.id}</td>
+                          <td style={{ padding: '8px 12px' }}>{o.nomenclature || '—'}</td>
                           <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: '#64748b' }}>{currentUser.org === 'CUSTOMER' ? o.customerInstanceId : (o.supplierInstanceId || '—')}</td>
+                          <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: '#64748b' }}>
+                            {(currentUser.org === 'CUSTOMER' ? o.customerActiveElementId : o.supplierActiveElementId) || '—'}
+                          </td>
+                          <td style={{ padding: '8px 12px' }}>{formatDueDate(o.dueDate)}</td>
                           <td style={{ padding: '8px 12px' }}>
                             <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '11px', backgroundColor: '#dcfce7', color: '#166534' }}>
                               {currentUser.org === 'CUSTOMER' ? o.customerProcessState : o.supplierProcessState}

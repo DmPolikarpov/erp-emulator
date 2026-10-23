@@ -225,9 +225,40 @@ jest.mock('./vendor/bpmn-sdk', () => {
   };
 });
 
+/**
+ * API заказов (M4) подменяется целиком: тесты кабинета проверяют сценарий, а не
+ * сеть. `jest.requireActual` оставляет чистые функции (`normalizeOrder`,
+ * `mergeOrders`, `nextOrderNum`, …) настоящими.
+ *
+ * Функции создаются внутри фабрики: `App` импортируется статически, и ссылка на
+ * `const` из фабрики оказалась бы в temporal dead zone (Jest поднимает
+ * `jest.mock` выше импортов).
+ */
+jest.mock('./ordersApi', () => {
+  const actual = jest.requireActual('./ordersApi');
+
+  return {
+    ...actual,
+    ordersClient: {
+      listOrders: jest.fn(),
+      getOrder: jest.fn(),
+      createOrder: jest.fn(),
+      attachInstance: jest.fn(),
+    },
+  };
+});
+
+const {
+  listOrders: mockListOrders,
+  getOrder: mockGetOrder,
+  createOrder: mockCreateOrder,
+  attachInstance: mockAttachInstance,
+} = jest.requireMock('./ordersApi').ordersClient;
+
 /* ------------------------------------------------------------------ *
  * Вспомогательные функции
  * ------------------------------------------------------------------ */
+
 
 /** Доставляет сообщение `token_updated` всем подписчикам сокета. */
 const emitToken = (token) => {
@@ -279,6 +310,13 @@ describe('App: интеграция с BPMN Client SDK', () => {
     // CRA включает `resetMocks`, поэтому поведения задаём перед каждым тестом.
     mockSendEvent.mockResolvedValue({ ok: true, status: 202 });
     mockDeploySchema.mockResolvedValue({ ok: true, status: 202 });
+
+    // API заказов по умолчанию недоступен — стенд без HTTP-шлюза: кабинет
+    // работает на локальном списке, как до M4. Тесты M4 задают ответы сами.
+    mockListOrders.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
+    mockGetOrder.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
+    mockCreateOrder.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
+    mockAttachInstance.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
 
     mockViewerProps.length = 0;
     mockEditorProps.length = 0;
@@ -1376,5 +1414,170 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(screen.getByText('Директор завода')).toBeTruthy();
     expect(screen.getByText('Менеджер по продажам')).toBeTruthy();
     expect(screen.getByText('Менеджер по продажам сырья')).toBeTruthy();
+  });
+
+  /* ------------------------------------------------------------------ *
+   * Заказы как записи БД движка (`src/ordersApi.js`, M4)
+   * ------------------------------------------------------------------ */
+
+  it('создание заказа уходит в API с полями формы (M4)', async () => {
+    createProject({
+      name: 'Молочный завод (M4)',
+      xml: buildProjectXml([
+        { xml: DAIRY_PLANT_PROCESS_XML, participantName: 'Молочный завод' },
+        { xml: DAIRY_SUPPLIER_PROCESS_XML, participantName: 'Поставщик сырья' },
+      ]),
+    });
+
+    mockCreateOrder.mockResolvedValueOnce({
+      ok: true,
+      order: {
+        orderNum: '№101',
+        status: 'NEW',
+        nomenclature: 'Молоко 2,5%',
+        volumeLiters: 250,
+        fatContent: 2.5,
+        packaging: 'ПЭТ 1 л',
+        dueDate: '2026-11-05',
+        counterparty: 'ООО «Тест»',
+        customerProcessState: 'IDLE',
+        supplierProcessState: 'IDLE',
+      },
+    });
+    mockAttachInstance.mockResolvedValueOnce({
+      ok: true,
+      order: {
+        orderNum: '№101',
+        status: 'IN_PROGRESS',
+        nomenclature: 'Молоко 2,5%',
+        volumeLiters: 250,
+        fatContent: 2.5,
+        packaging: 'ПЭТ 1 л',
+        dueDate: '2026-11-05',
+        counterparty: 'ООО «Тест»',
+        customerInstanceId: 'inst-cust-api',
+        customerActiveElementId: 'Task_ReceiveOrder',
+        customerProcessState: 'ACTIVE',
+      },
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByText('Менеджер по продажам'));
+
+    // Форма заказа: «100 Л» без номенклатуры больше нет — поля редактируются.
+    fireEvent.change(screen.getByLabelText('Поле заказа: Номенклатура'), {
+      target: { value: 'Молоко 2,5%' },
+    });
+    fireEvent.change(screen.getByLabelText('Поле заказа: Объём, л'), {
+      target: { value: '250' },
+    });
+    fireEvent.change(screen.getByLabelText('Поле заказа: Жирность, %'), {
+      target: { value: '2.5' },
+    });
+    fireEvent.change(screen.getByLabelText('Поле заказа: Контрагент'), {
+      target: { value: 'ООО «Тест»' },
+    });
+
+    fireEvent.click((await screen.findAllByText('Принять заказ клиента'))[0]);
+
+    await waitFor(() => expect(mockCreateOrder).toHaveBeenCalled());
+
+    const payload = mockCreateOrder.mock.calls[0][0];
+
+    // Контракт сервера — camelCase, числа — числами, а не строками из input.
+    expect(payload.orderNum).toBe('№101');
+    expect(payload.nomenclature).toBe('Молоко 2,5%');
+    expect(payload.volumeLiters).toBe(250);
+    expect(payload.fatContent).toBe(2.5);
+    expect(payload.counterparty).toBe('ООО «Тест»');
+
+    // Экземпляр, который создал движок, привязан к заказу: карточка переживёт F5.
+    await waitFor(() => expect(mockAttachInstance).toHaveBeenCalled());
+    expect(mockAttachInstance.mock.calls[0][0]).toBe('№101');
+    expect(mockAttachInstance.mock.calls[0][1]).toBe('CUSTOMER');
+    expect(mockAttachInstance.mock.calls[0][2]).toMatch(/^inst-cust-/);
+
+    expect((await screen.findAllByText('Молоко 2,5%')).length).toBeGreaterThan(0);
+  });
+
+  it('список заказов приходит с сервера: номенклатура, срок и текущий шаг (M4)', async () => {
+    const serverOrder = {
+      orderNum: '№205',
+      status: 'IN_PROGRESS',
+      nomenclature: 'Кефир 1%',
+      volumeLiters: 300,
+      fatContent: 1,
+      packaging: 'Плёнка 0,5 л',
+      dueDate: '2026-12-01',
+      counterparty: 'ООО «Ромашка»',
+      customerInstanceId: 'inst-cust-205',
+      customerActiveElementId: 'Task_WaitForSupplierShipment',
+      customerProcessState: 'ACTIVE',
+    };
+
+    mockListOrders.mockResolvedValue({ ok: true, orders: [serverOrder] });
+
+    const cabinet = render(<App />);
+    fireEvent.click(screen.getByText('Руководитель Заказчика'));
+
+    expect((await screen.findAllByText('Кефир 1%')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('Task_WaitForSupplierShipment')).length).toBeGreaterThan(0);
+    expect(screen.getByText('01.12.2026')).toBeTruthy();
+
+    // F5: размонтировали кабинет и открыли заново — список приходит с сервера,
+    // а не из `useState`. Ради этого заказы и переехали в БД движка.
+    cabinet.unmount();
+    openAs('Руководитель Заказчика');
+
+    expect((await screen.findAllByText('Кефир 1%')).length).toBeGreaterThan(0);
+  });
+
+  it('экземпляр поставщика привязывается к заказу по первому токену (M4)', async () => {
+    openAs('Руководитель Заказчика');
+
+    emitToken({
+      instanceId: 'inst-cust-777',
+      elementId: 'Task_WaitForSupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№777' },
+    });
+
+    mockAttachInstance.mockResolvedValue({
+      ok: true,
+      order: {
+        orderNum: '№777',
+        status: 'IN_PROGRESS',
+        nomenclature: 'Молоко 3,2%',
+        volumeLiters: 100,
+        customerInstanceId: 'inst-cust-777',
+        customerProcessState: 'ACTIVE',
+        supplierInstanceId: 'inst-supp-777',
+        supplierActiveElementId: 'Task_SupplierCreateDocs',
+        supplierProcessState: 'ACTIVE',
+      },
+    });
+
+    emitToken({
+      instanceId: 'inst-supp-777',
+      elementId: 'Task_SupplierCreateDocs',
+      state: 'ACTIVE',
+      payload: { orderNum: '№777' },
+    });
+
+    await waitFor(() =>
+      expect(mockAttachInstance).toHaveBeenCalledWith('№777', 'SUPPLIER', 'inst-supp-777')
+    );
+
+    // Повторный кадр по тому же экземпляру не шлёт второй POST.
+    emitToken({
+      instanceId: 'inst-supp-777',
+      elementId: 'Task_SupplierCreateDocs',
+      state: 'ACTIVE',
+      payload: { orderNum: '№777' },
+    });
+
+    expect(
+      mockAttachInstance.mock.calls.filter((call) => call[2] === 'inst-supp-777')
+    ).toHaveLength(1);
   });
 });
