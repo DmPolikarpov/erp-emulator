@@ -29,6 +29,7 @@ import {
   DAIRY_SUPPLIER_PROCESS_XML,
 } from './dairyPlant';
 import {
+  getElementTrigger,
   getLocalName,
   getProcessIds,
   getProjectProcesses,
@@ -38,6 +39,7 @@ import {
   listActions,
   parseActionVariables,
   parseXml,
+  resolveAction,
   validateEngineSchema,
   validateProjectSchema,
 } from '../xml/bpmnXml';
@@ -310,7 +312,12 @@ describe('dairyPlant: кнопки и роли', () => {
       actions.forEach(({ elementId, action }) => {
         expect(nodes).toContain(elementId);
         expect(isValidAction(action)).toBe(true);
-        expect(nodes).toContain(action.elementId);
+
+        // `elementId` кнопки необязателен: пусто — цель выводится из единственной
+        // исходящей связи узла (`resolveAction`), так записаны кнопки M3.
+        const target = resolveAction(xml, elementId, action);
+
+        expect(nodes).toContain(target.elementId);
       });
     });
   });
@@ -356,7 +363,7 @@ describe('dairyPlant: кнопки и роли', () => {
     });
   });
 
-  it('связывает пулы теми же полями, что и демо-закупка', () => {
+  it('связывает пулы сообщениями и триггером узла (M3)', () => {
     const sendPo = listActions(DAIRY_PLANT_PROCESS_XML).find(
       ({ action }) => action.id === 'sendToSupplier'
     );
@@ -364,16 +371,29 @@ describe('dairyPlant: кнопки и роли', () => {
       ({ action }) => action.id === 'shipMilk'
     );
 
-    // Завод запускает процесс второй стороны (`startsProcess`).
-    expect(sendPo.action.startsProcess).toBe(DAIRY_SUPPLIER_PROCESS_ID);
+    // Экземпляр поставщика создаёт движок по триггеру throw-события, а не клиент.
+    expect(sendPo.action.startsProcess || '').toBe('');
+    expect(getElementTrigger(DAIRY_PLANT_PROCESS_XML, 'Event_SendPO')).toMatchObject({
+      targetProcessId: DAIRY_SUPPLIER_PROCESS_ID,
+      instancePrefix: 'inst-supp-',
+      firstElementId: 'Task_ConfirmPO',
+      payloadKeys: 'orderNum',
+    });
 
-    // Поставщик сигналит в экземпляр завода (`counterpartEvent`): так в проекте
-    // выражен `bpmn:messageFlow` из исходной схемы.
-    expect(shipMilk.action.counterpartEvent).toBe('milkShipped');
-    expect(shipMilk.action.counterpartElementId).toBe('Task_ReceiveMilk');
-    expect(flowNodeIds(DAIRY_PLANT_PROCESS_XML)).toContain(
-      shipMilk.action.counterpartElementId
+    // Сообщения объявлены на корне схем: иначе `messageRef` не разрешается и
+    // имена отправки/ожидания расходятся.
+    expect(DAIRY_PLANT_PROCESS_XML).toContain(
+      '<bpmn:message id="Message_PurchaseOrder" name="PurchaseOrder" />'
     );
+    expect(DAIRY_SUPPLIER_PROCESS_XML).toContain('name="PurchaseOrderConfirmed"');
+    expect(DAIRY_SUPPLIER_PROCESS_XML).toContain('name="MilkShipped"');
+
+    // Отгрузка больше не сигналит напрямую (`counterpartEvent`): пару
+    // «отправка → ожидание» держит сообщение MilkShipped, а экземпляр завода
+    // движок находит по `orderNum`.
+    expect(shipMilk.action.counterpartEvent || '').toBe('');
+    expect(DAIRY_SUPPLIER_PROCESS_XML).toContain('messageRef="Message_MilkShipped"');
+    expect(flowNodeIds(DAIRY_PLANT_PROCESS_XML)).toContain('Event_MilkShipped');
   });
 });
 

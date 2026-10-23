@@ -19,8 +19,10 @@ import { analyzeProject } from './projectRoles';
 import { createProject, listProjects } from './projectStore';
 import {
   DAIRY_PLANT_PROCESS_ID,
+  DAIRY_PLANT_PROCESS_XML,
   DAIRY_PLANT_PROJECT_NAME,
   DAIRY_SUPPLIER_PROCESS_ID,
+  DAIRY_SUPPLIER_PROCESS_XML,
   DEFAULT_CUSTOMER_BPMN_XML,
   DEFAULT_SUPPLIER_BPMN_XML,
   SOCKET_EVENTS,
@@ -1088,6 +1090,55 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(counterpart[0]).toBe('inst-cust-counterpart');
     expect(counterpart[1]).toBe('SupplierShippedSignal');
     expect(counterpart[2]).toBe('Task_ReceiveDocsAndIssuePass');
+  });
+
+  it('заказ поставщику уходит сообщением: экземпляр второй стороны создаёт движок (M3)', async () => {
+    createProject({
+      name: 'Молочный завод (M3)',
+      xml: buildProjectXml([
+        { xml: DAIRY_PLANT_PROCESS_XML, participantName: 'Молочный завод' },
+        { xml: DAIRY_SUPPLIER_PROCESS_XML, participantName: 'Поставщик сырья' },
+      ]),
+    });
+
+    openAs('Менеджер по продажам');
+    fireEvent.click((await screen.findAllByText('Принять заказ клиента'))[0]);
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalled());
+
+    const orderNum = mockSendEvent.mock.calls[0][3].orderNum;
+    const plantInstanceId = mockSendEvent.mock.calls[0][0];
+
+    // Один токен завода прошёл закупку: шаг отправки активен.
+    emitToken({
+      instanceId: plantInstanceId,
+      elementId: 'Task_SendPO',
+      state: 'ACTIVE',
+      payload: { orderNum },
+    });
+
+    // Кнопку отправки ведёт роль закупки.
+    fireEvent.click(screen.getByText('Выход'));
+    fireEvent.click(screen.getByText('Менеджер по закупкам'));
+
+    mockSendEvent.mockClear();
+    mockDeploySchema.mockClear();
+
+    fireEvent.click((await screen.findAllByText('Отправить заказ поставщику'))[0]);
+
+    // Схема второй стороны задеплоена заранее, а её экземпляр стартует не
+    // клиент: событие одно — закрытие шага завода. Второго `StartProcess`
+    // (`startProcess` поставщика) быть не должно.
+    await waitFor(() => expect(mockDeploySchema).toHaveBeenCalled());
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
+
+    expect(mockDeploySchema.mock.calls[0][0]).toBe('SUPPLIER');
+
+    const [instanceId, eventName, elementId] = mockSendEvent.mock.calls[0];
+
+    expect(instanceId).toBe(plantInstanceId);
+    expect(eventName).toBe('CompleteBlock');
+    expect(elementId).toBe('Event_SendPO');
   });
 
   it('кнопка на блоке без единственной исходящей связи подсказывает про узел', () => {

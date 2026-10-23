@@ -533,7 +533,9 @@ export default function App() {
    * Организация, в схеме которой объявлен процесс (`null`, если такого нет).
    *
    * Нужна кнопке со `startsProcess`: по `bpmn:process/@id` видно, чей это
-   * процесс и какой схемой его запускать.
+   * процесс и какой схемой его запускать. Демо-проект этим полем больше не
+   * пользуется (запуск делает движок по `trg:processTrigger`), механизм
+   * сохранён для старых схем.
    */
   const orgOfProcess = useCallback(
     (processId) => {
@@ -1074,33 +1076,35 @@ export default function App() {
       return;
     }
 
-    const suppInstId = `inst-supp-${Math.random().toString(36).substring(2, 8)}`;
-
     setActionLoading(prev => ({ ...prev, [orderId]: 'Оркестратор передает заказ Поставщику...' }));
     setActionErrors(prev => ({ ...prev, [orderId]: null }));
+
+    // Определение второй стороны должно быть в движке раньше сообщения: экземпляр
+    // поставщика создаёт триггер узла `Event_SendPO`, а не клиент. Деплой —
+    // upsert по `bpmn:process/@id`, поэтому повторная передача безопасна.
+    const deploySupplier = await client.deploySchema('SUPPLIER', supplierBpmnXml);
+
+    if (!deploySupplier.ok) {
+      setActionLoading(prev => ({ ...prev, [orderId]: null }));
+      setActionErrors(prev => ({ ...prev, [orderId]: 'Не удалось задеплоить схему Поставщика: движок не сможет создать его процесс.' }));
+      return;
+    }
 
     const resCust = await client.sendEvent(
       targetOrder.customerInstanceId,
       sendToSupplier.action.event,
       sendToSupplier.action.elementId,
-      { status: 'SENT_TO_SUPPLIER', supplierInstanceId: suppInstId, orderNum: orderId }
+      { status: 'SENT_TO_SUPPLIER', orderNum: orderId }
     );
 
     if (resCust.ok) {
-      // Чей процесс запускать — тоже из схемы: `startsProcess` называет
-      // `bpmn:process/@id`, а как его стартовать, знает кнопка старта той схемы
-      // (`StartProcess` плюс первый шаг, см. `startProcess`).
+      // Старые схемы объявляют запуск второй стороны кнопкой (`startsProcess`):
+      // механизм сохранён. Демо-проект его не использует — экземпляр поставщика
+      // создаёт триггер узла `Event_SendPO` по сообщению PurchaseOrder (M3).
       const targetOrg = orgOfProcess(sendToSupplier.action.startsProcess);
 
-      if (!targetOrg) {
-        logEvent(
-          'SYSTEM',
-          'ALL',
-          'Процесс второй стороны не запущен',
-          `Кнопка «${sendToSupplier.action.label}» не объявила запускаемый процесс (startsProcess): заказ передан, но экземпляра у второй стороны не будет.`,
-          orderId
-        );
-      } else {
+      if (targetOrg) {
+        const suppInstId = `inst-supp-${Math.random().toString(36).substring(2, 8)}`;
         const { start: resSupp } = await startProcess(
           suppInstId,
           schemaXml(targetOrg),
@@ -1111,6 +1115,16 @@ export default function App() {
           setActionLoading(prev => ({ ...prev, [orderId]: null }));
           setActionErrors(prev => ({ ...prev, [orderId]: `Ошибка создания процесса у ${targetOrg === 'SUPPLIER' ? 'Поставщика' : 'Заказчика'}. Попробуйте еще раз.` }));
         }
+      } else {
+        // Экземпляр второй стороны создаёт движок: сообщение `PurchaseOrder`
+        // несёт `trg:processTrigger`, а id экземпляра — `inst-supp-<orderNum>`.
+        logEvent(
+          'CUSTOMER',
+          'ALL',
+          'Заказ отправлен поставщику',
+          `Сообщение PurchaseOrder запускает процесс поставщика по заказу ${orderId}.`,
+          orderId
+        );
       }
     } else {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
@@ -1150,9 +1164,9 @@ export default function App() {
     }
   };
 
-  // 4. Поставщик отгружает сырье. Кнопка на `Task_SupplierShipment` описывает оба
-  // события: своё (`event` на `EndEvent_Supplier`) и сигнал Заказчику
-  // (`counterpartEvent` — он активирует у него `Task_ReceiveDocsAndIssuePass`).
+  // 4. Поставщик отгружает сырье. Кнопка на `Task_ShipMilk` закрывает шаг, а
+  // сообщение `MilkShipped` движок доставляет заводу по `orderNum` (M3):
+  // отдельный `sendEvent` второй стороне больше не нужен.
   const handleSupplierShipment = async (orderId) => {
     const targetOrder = orders.find(o => o.id === orderId);
     if (!targetOrder || !targetOrder.supplierInstanceId) return;
@@ -1165,7 +1179,6 @@ export default function App() {
 
     const shippedAt = new Date().toLocaleTimeString('ru-RU');
 
-    // 1. Финализируем процесс Поставщика
     const resSupp = await client.sendEvent(
       targetOrder.supplierInstanceId,
       shipment.action.event,
@@ -1174,18 +1187,10 @@ export default function App() {
     );
 
     if (resSupp.ok) {
-      // 2. Сигнал в процесс Заказчика — тоже из схемы: пока пара
-      // `counterpartEvent`/`counterpartElementId` не объявлена, заказчик об
-      // отгрузке не узнает (кнопка выписки пропуска у него не появится).
-      if (!shipment.action.counterpartEvent) {
-        logEvent(
-          'SYSTEM',
-          'ALL',
-          'Заказчик не уведомлён об отгрузке',
-          `Кнопка «${shipment.action.label}» не объявила событие второй стороны (counterpartEvent).`,
-          orderId
-        );
-      } else {
+      // Старые схемы объявляют пару `counterpartEvent`/`counterpartElementId`:
+      // сигнал второй стороне шлёт клиент. Демо-проект обходится сообщением
+      // `MilkShipped`, которое движок доставляет заводу по `orderNum` (M3).
+      if (shipment.action.counterpartEvent) {
         const resCust = await client.sendEvent(
           targetOrder.customerInstanceId,
           shipment.action.counterpartEvent,
@@ -1196,6 +1201,14 @@ export default function App() {
         if (!resCust.ok) {
           setActionErrors(prev => ({ ...prev, [orderId]: 'Не удалось передать сигнал об отгрузке Заказчику.' }));
         }
+      } else {
+        logEvent(
+          'SUPPLIER',
+          'ALL',
+          'Партия отгружена',
+          `Сообщение MilkShipped доставит завод по заказу ${orderId}; приёмка начнётся без участия поставщика.`,
+          orderId
+        );
       }
     } else {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));

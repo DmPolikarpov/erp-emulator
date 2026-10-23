@@ -11,14 +11,16 @@ import { buildProjectXml } from '../xml/projectXml';
  *
  * Почему схему пришлось «разложить», а не положить как есть:
  *
- *  - движок разбирает только `startEvent`, `endEvent`, `userTask`,
- *    `serviceTask`, `exclusiveGateway` и `parallelGateway`
- *    (`ENGINE_FLOW_NODE_TYPES`); `sendTask`, `receiveTask`, `subProcess`,
- *    `boundaryEvent`, `intermediateThrowEvent` он не читает, и связи через них
- *    становятся висячими — определение не компилируется целиком;
- *  - `bpmn:messageFlow` между пулами движок не исполняет: обмен между сторонами
- *    идёт событиями оркестратора, поэтому в проекте сообщения заменены
- *    кнопками (`startsProcess`, `counterpartEvent`);
+ *  - движок разбирает `startEvent`, `endEvent`, `userTask`, `serviceTask`,
+ *    `exclusiveGateway`, `parallelGateway` и промежуточные события сообщений
+ *    (`intermediateThrowEvent`/`intermediateCatchEvent` с
+ *    `messageEventDefinition`, см. `ENGINE_FLOW_NODE_TYPES`); `sendTask`,
+ *    `receiveTask`, `subProcess` и `boundaryEvent` он не читает, и связи через
+ *    них становятся висячими — определение не компилируется целиком;
+ *  - обмен между пулами — сообщения (`bpmn:message` + throw/catch) и триггер
+ *    узла `trg:processTrigger` (M3): движок сам создаёт экземпляр поставщика по
+ *    заказу и находит завод по `orderNum`, кнопки `startsProcess` /
+ *    `counterpartEvent` в демо больше не нужны (в SDK остаются для старых схем);
  *  - оркестратор однопроцессный (`bpm_engine_bpmn/src/parser.rs` читает первый
  *    `bpmn:process`), поэтому проект — это `bpmn:collaboration` с двумя
  *    процессами, а в движок уезжает нарезка (`extractProcessXml`).
@@ -76,9 +78,15 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
                   xmlns:act="http://erp.mes/schema/bpmn/action"
                   xmlns:role="http://erp.mes/schema/bpmn/roles"
                   xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
+                  xmlns:trg="http://erp.mes/schema/bpmn/trigger"
                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                   id="Definitions_DairyPlant"
                   targetNamespace="http://bpmn.io/schema/bpmn">
+  <!-- Сообщения обмена: заказ поставщику, его подтверждение и отгрузка молока. -->
+  <bpmn:message id="Message_PurchaseOrder" name="PurchaseOrder" />
+  <bpmn:message id="Message_PurchaseOrderConfirmed" name="PurchaseOrderConfirmed" />
+  <bpmn:message id="Message_MilkShipped" name="MilkShipped" />
+
   <bpmn:process id="Process_Dairy" name="Молочный завод: заказ, производство, отгрузка" isExecutable="true">
     <bpmn:extensionElements>
       <role:catalog id="RoleCatalog_Dairy">
@@ -109,12 +117,14 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
         <bpmn:flowNodeRef>Task_CreatePO</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Task_ApprovePO</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Task_SendPO</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_SendPO</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Task_WaitPOConfirmed</bpmn:flowNodeRef>
       </bpmn:lane>
 
       <bpmn:lane id="Lane_QC" name="Приёмка и лаборатория">
         <bpmn:documentation>ДИ-ПРИЁМ-01 / ДИ-ЛАБ-01: приёмка молочного сырья, отбор проб, право отказа партии по ГОСТ.</bpmn:documentation>
         <bpmn:flowNodeRef>Task_ReceiveMilk</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_MilkShipped</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Task_AcceptMilk</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Task_AnalyzeMilk</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Gateway_Quality</bpmn:flowNodeRef>
@@ -221,23 +231,44 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 
     <bpmn:userTask id="Task_SendPO" name="Отправить заказ поставщику">
       <bpmn:extensionElements>
-        <act:userAction id="sendToSupplier" label="Отправить заказ поставщику" role="PURCHASE" icon="Send" elementId="Task_WaitPOConfirmed" startsProcess="Process_Supplier" />
+        <act:userAction id="sendToSupplier" label="Отправить заказ поставщику" role="PURCHASE" icon="Send" />
       </bpmn:extensionElements>
-      <bpmn:documentation>СОП-06: отправка через EDI / e-mail и запуск процесса поставщика (startsProcess).</bpmn:documentation>
+      <bpmn:documentation>СОП-06: отправка через EDI / e-mail; сообщение PurchaseOrder запускает процесс поставщика (trg:processTrigger).</bpmn:documentation>
       <bpmn:incoming>SF8</bpmn:incoming>
       <bpmn:outgoing>SF9</bpmn:outgoing>
       <bpmn:potentialOwner name="PURCHASE" />
     </bpmn:userTask>
 
-    <bpmn:userTask id="Task_WaitPOConfirmed" name="Ожидание подтверждения заказа">
+    <!-- Заказ уходит сообщением; триггер узла запускает процесс поставщика. -->
+    <bpmn:intermediateThrowEvent id="Event_SendPO" name="Заказ отправлен поставщику">
       <bpmn:extensionElements>
-        <act:userAction id="poConfirmed" label="Подтверждение получено" role="PURCHASE" icon="PackageCheck" elementId="Task_ReceiveMilk" />
+        <trg:processTrigger targetProcessId="Process_Supplier"
+                            instancePrefix="inst-supp-"
+                            startElementId="Task_SendPO"
+                            firstElementId="Task_ConfirmPO"
+                            payloadKeys="orderNum" />
       </bpmn:extensionElements>
-      <bpmn:documentation>СОП-П-01 со стороны завода: сверка объёмов, сроков и цены с подтверждением поставщика.</bpmn:documentation>
+      <bpmn:documentation>Сообщение PurchaseOrder: движок создаёт экземпляр Process_Supplier и переносит orderNum.</bpmn:documentation>
       <bpmn:incoming>SF9</bpmn:incoming>
+      <bpmn:outgoing>SF9_Message</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_PurchaseOrder" />
+    </bpmn:intermediateThrowEvent>
+
+    <!-- Подтверждение приходит сообщением от поставщика, кнопки у шага нет. -->
+    <bpmn:intermediateCatchEvent id="Task_WaitPOConfirmed" name="Ожидание подтверждения заказа">
+      <bpmn:documentation>СОП-П-01 со стороны завода: ждём PurchaseOrderConfirmed от процесса поставщика.</bpmn:documentation>
+      <bpmn:incoming>SF9_Message</bpmn:incoming>
       <bpmn:outgoing>SF10</bpmn:outgoing>
-      <bpmn:potentialOwner name="PURCHASE" />
-    </bpmn:userTask>
+      <bpmn:messageEventDefinition messageRef="Message_PurchaseOrderConfirmed" />
+    </bpmn:intermediateCatchEvent>
+
+    <!-- Партия молока отгружена: сообщение поставщика активирует приёмку. -->
+    <bpmn:intermediateCatchEvent id="Event_MilkShipped" name="Молоко отгружено">
+      <bpmn:documentation>Сообщение MilkShipped: поставщик отгрузил партию, завод переходит к приёмке.</bpmn:documentation>
+      <bpmn:incoming>SF10</bpmn:incoming>
+      <bpmn:outgoing>SF10_Message</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_MilkShipped" />
+    </bpmn:intermediateCatchEvent>
 
     <!-- Приёмка и лаборатория -->
     <bpmn:userTask id="Task_ReceiveMilk" name="Принять партию молока">
@@ -245,7 +276,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
         <act:userAction id="acceptTruck" label="Проверить ТТН, пломбы и температуру" role="QC" icon="Truck" elementId="Task_AcceptMilk" />
       </bpmn:extensionElements>
       <bpmn:documentation>СОП-07: приём машины с сырьём, проверка ТТН, пломб и температуры.</bpmn:documentation>
-      <bpmn:incoming>SF10</bpmn:incoming>
+      <bpmn:incoming>SF10_Message</bpmn:incoming>
       <bpmn:outgoing>SF11</bpmn:outgoing>
       <bpmn:potentialOwner name="QC" />
     </bpmn:userTask>
@@ -482,8 +513,10 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="SF7" sourceRef="Task_CreatePO" targetRef="Task_ApprovePO" />
     <bpmn:sequenceFlow id="SF8" sourceRef="Task_ApprovePO" targetRef="Task_SendPO" />
-    <bpmn:sequenceFlow id="SF9" sourceRef="Task_SendPO" targetRef="Task_WaitPOConfirmed" />
-    <bpmn:sequenceFlow id="SF10" sourceRef="Task_WaitPOConfirmed" targetRef="Task_ReceiveMilk" />
+    <bpmn:sequenceFlow id="SF9" sourceRef="Task_SendPO" targetRef="Event_SendPO" />
+    <bpmn:sequenceFlow id="SF9_Message" sourceRef="Event_SendPO" targetRef="Task_WaitPOConfirmed" />
+    <bpmn:sequenceFlow id="SF10" sourceRef="Task_WaitPOConfirmed" targetRef="Event_MilkShipped" />
+    <bpmn:sequenceFlow id="SF10_Message" sourceRef="Event_MilkShipped" targetRef="Task_ReceiveMilk" />
     <bpmn:sequenceFlow id="SF11" sourceRef="Task_ReceiveMilk" targetRef="Task_AcceptMilk" />
     <bpmn:sequenceFlow id="SF12" sourceRef="Task_AcceptMilk" targetRef="Task_AnalyzeMilk" />
     <bpmn:sequenceFlow id="SF13" sourceRef="Task_AnalyzeMilk" targetRef="Gateway_Quality" />
@@ -581,8 +614,23 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmndi:BPMNShape id="Task_SendPO_di" bpmnElement="Task_SendPO">
         <dc:Bounds x="1060" y="220" width="110" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_SendPO_di" bpmnElement="Event_SendPO">
+        <dc:Bounds x="1180" y="242" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1156" y="285" width="85" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="Task_WaitPOConfirmed_di" bpmnElement="Task_WaitPOConfirmed">
-        <dc:Bounds x="1210" y="220" width="140" height="80" />
+        <dc:Bounds x="1240" y="242" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1195" y="285" width="126" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_MilkShipped_di" bpmnElement="Event_MilkShipped">
+        <dc:Bounds x="1340" y="242" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1321" y="285" width="74" height="14" />
+        </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
 
       <bpmndi:BPMNShape id="Task_ReceiveMilk_di" bpmnElement="Task_ReceiveMilk">
@@ -737,12 +785,20 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF9_di" bpmnElement="SF9">
         <di:waypoint x="1170" y="260" />
-        <di:waypoint x="1210" y="260" />
+        <di:waypoint x="1180" y="260" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF9_Message_di" bpmnElement="SF9_Message">
+        <di:waypoint x="1216" y="260" />
+        <di:waypoint x="1240" y="260" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF10_di" bpmnElement="SF10">
-        <di:waypoint x="1350" y="260" />
-        <di:waypoint x="1385" y="260" />
-        <di:waypoint x="1385" y="370" />
+        <di:waypoint x="1276" y="260" />
+        <di:waypoint x="1340" y="260" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF10_Message_di" bpmnElement="SF10_Message">
+        <di:waypoint x="1358" y="278" />
+        <di:waypoint x="1358" y="410" />
+        <di:waypoint x="1360" y="410" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF11_di" bpmnElement="SF11">
         <di:waypoint x="1470" y="410" />
@@ -875,10 +931,11 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
  * (`CONTOUR_ORDER`): `role:catalog` даёт карточки входа, а исполнители шагов
  * назначены `bpmn:potentialOwner`.
  *
- * Отгрузка объявляет `counterpartEvent="milkShipped"`: событие уходит в
- * экземпляр завода и активирует у него `Task_ReceiveMilk` — так в проекте
- * выражен `bpmn:messageFlow` исходной схемы (`Task_ShipMilk` → `Task_ReceiveMilk`),
- * который движок не исполняет.
+ * Отгрузка отправляет сообщение `MilkShipped`: движок находит экземпляр
+ * завода по `orderNum` и активирует у него приёмку (`Task_ReceiveMilk`) — так в
+ * проекте выражен `bpmn:messageFlow` исходной схемы (`Task_ShipMilk` →
+ * `Task_ReceiveMilk`). Подтверждение заказа уходит сообщением
+ * `PurchaseOrderConfirmed` в `Event_ConfirmPO`.
  */
 export const DAIRY_SUPPLIER_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
@@ -889,6 +946,10 @@ export const DAIRY_SUPPLIER_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?
                   xmlns:role="http://erp.mes/schema/bpmn/roles"
                   id="Definitions_DairySupplier"
                   targetNamespace="http://bpmn.io/schema/bpmn">
+  <!-- Сообщения обмена с заводом: подтверждение заказа и отгрузка молока. -->
+  <bpmn:message id="Message_PurchaseOrderConfirmed" name="PurchaseOrderConfirmed" />
+  <bpmn:message id="Message_MilkShipped" name="MilkShipped" />
+
   <bpmn:process id="Process_Supplier" name="Поставщик сырья: подтверждение и отгрузка" isExecutable="true">
     <bpmn:extensionElements>
       <role:catalog id="RoleCatalog_DairySupplier">
@@ -907,7 +968,7 @@ export const DAIRY_SUPPLIER_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?
 
     <bpmn:userTask id="Task_ConfirmPO" name="Подтвердить заказ и оформить документы">
       <bpmn:extensionElements>
-        <act:userAction id="confirmSupplierOrder" label="Подтвердить объём и сроки, оформить ТТН/УПД" role="SUPPLIER_MANAGER" icon="FileText" elementId="Task_ShipMilk" />
+        <act:userAction id="confirmSupplierOrder" label="Подтвердить объём и сроки, оформить ТТН/УПД" role="SUPPLIER_MANAGER" icon="FileText" />
       </bpmn:extensionElements>
       <bpmn:documentation>СОП-П-01: сверка объёмов, сроков и цены; оформление ТТН и УПД на партию.</bpmn:documentation>
       <bpmn:incoming>SF_S1</bpmn:incoming>
@@ -915,23 +976,41 @@ export const DAIRY_SUPPLIER_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?
       <bpmn:potentialOwner name="SUPPLIER_MANAGER" />
     </bpmn:userTask>
 
+    <!-- Подтверждение уходит заводу сообщением: оно будит catch на его стороне. -->
+    <bpmn:intermediateThrowEvent id="Event_ConfirmPO" name="Заказ подтверждён">
+      <bpmn:documentation>Сообщение PurchaseOrderConfirmed: завод продолжает маршрут с приёмки молока.</bpmn:documentation>
+      <bpmn:incoming>SF_S2</bpmn:incoming>
+      <bpmn:outgoing>SF_S2_Message</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_PurchaseOrderConfirmed" />
+    </bpmn:intermediateThrowEvent>
+
     <bpmn:userTask id="Task_ShipMilk" name="Отгрузить молоко">
       <bpmn:extensionElements>
-        <act:userAction id="shipMilk" label="Погрузить и передать перевозчику" role="SUPPLIER_DISPATCHER" icon="Truck" elementId="End_Supplier" counterpartEvent="milkShipped" counterpartElementId="Task_ReceiveMilk" />
+        <act:userAction id="shipMilk" label="Погрузить и передать перевозчику" role="SUPPLIER_DISPATCHER" icon="Truck" />
       </bpmn:extensionElements>
-      <bpmn:documentation>СОП-П-02: погрузка, пломбирование, холодовая цепь; событие отгрузки уходит заводу.</bpmn:documentation>
-      <bpmn:incoming>SF_S2</bpmn:incoming>
+      <bpmn:documentation>СОП-П-02: погрузка, пломбирование, холодовая цепь; сообщение MilkShipped уходит заводу.</bpmn:documentation>
+      <bpmn:incoming>SF_S2_Message</bpmn:incoming>
       <bpmn:outgoing>SF_S3</bpmn:outgoing>
       <bpmn:potentialOwner name="SUPPLIER_DISPATCHER" />
     </bpmn:userTask>
 
-    <bpmn:endEvent id="End_Supplier" name="Заказ отгружен">
+    <!-- Отгрузка завершает процесс поставщика и будит приёмку на заводе. -->
+    <bpmn:intermediateThrowEvent id="Event_ShipMilk" name="Молоко отгружено">
+      <bpmn:documentation>Сообщение MilkShipped: партия передана перевозчику.</bpmn:documentation>
       <bpmn:incoming>SF_S3</bpmn:incoming>
+      <bpmn:outgoing>SF_S3_Message</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_MilkShipped" />
+    </bpmn:intermediateThrowEvent>
+
+    <bpmn:endEvent id="End_Supplier" name="Заказ отгружен">
+      <bpmn:incoming>SF_S3_Message</bpmn:incoming>
     </bpmn:endEvent>
 
     <bpmn:sequenceFlow id="SF_S1" sourceRef="Start_Supplier" targetRef="Task_ConfirmPO" />
-    <bpmn:sequenceFlow id="SF_S2" sourceRef="Task_ConfirmPO" targetRef="Task_ShipMilk" />
-    <bpmn:sequenceFlow id="SF_S3" sourceRef="Task_ShipMilk" targetRef="End_Supplier" />
+    <bpmn:sequenceFlow id="SF_S2" sourceRef="Task_ConfirmPO" targetRef="Event_ConfirmPO" />
+    <bpmn:sequenceFlow id="SF_S2_Message" sourceRef="Event_ConfirmPO" targetRef="Task_ShipMilk" />
+    <bpmn:sequenceFlow id="SF_S3" sourceRef="Task_ShipMilk" targetRef="Event_ShipMilk" />
+    <bpmn:sequenceFlow id="SF_S3_Message" sourceRef="Event_ShipMilk" targetRef="End_Supplier" />
   </bpmn:process>
 
   <bpmndi:BPMNDiagram id="BPMNDiagram_DairySupplier">
@@ -945,13 +1024,25 @@ export const DAIRY_SUPPLIER_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?
       <bpmndi:BPMNShape id="Task_ConfirmPO_di" bpmnElement="Task_ConfirmPO">
         <dc:Bounds x="230" y="60" width="140" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_ConfirmPO_di" bpmnElement="Event_ConfirmPO">
+        <dc:Bounds x="380" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="361" y="125" width="74" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="Task_ShipMilk_di" bpmnElement="Task_ShipMilk">
         <dc:Bounds x="420" y="60" width="110" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="End_Supplier_di" bpmnElement="End_Supplier">
-        <dc:Bounds x="580" y="82" width="36" height="36" />
+      <bpmndi:BPMNShape id="Event_ShipMilk_di" bpmnElement="Event_ShipMilk">
+        <dc:Bounds x="540" y="82" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="562" y="125" width="72" height="14" />
+          <dc:Bounds x="518" y="125" width="80" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Supplier_di" bpmnElement="End_Supplier">
+        <dc:Bounds x="600" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="582" y="125" width="72" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
 
@@ -961,11 +1052,19 @@ export const DAIRY_SUPPLIER_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF_S2_di" bpmnElement="SF_S2">
         <di:waypoint x="370" y="100" />
+        <di:waypoint x="380" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF_S2_Message_di" bpmnElement="SF_S2_Message">
+        <di:waypoint x="416" y="100" />
         <di:waypoint x="420" y="100" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF_S3_di" bpmnElement="SF_S3">
         <di:waypoint x="530" y="100" />
-        <di:waypoint x="580" y="100" />
+        <di:waypoint x="540" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF_S3_Message_di" bpmnElement="SF_S3_Message">
+        <di:waypoint x="576" y="100" />
+        <di:waypoint x="600" y="100" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
