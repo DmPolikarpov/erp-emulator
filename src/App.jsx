@@ -7,6 +7,7 @@ import {
   DEFAULT_GATEWAY_URL,
   DEFAULT_PROJECT_BPMN_XML,
   DEFAULT_SUPPLIER_BPMN_XML,
+  DAIRY_CLIENT_PROCESS_XML,
   DAIRY_PLANT_PROJECT_NAME,
   DAIRY_PLANT_PROJECT_XML,
   ENGINE_EVENTS,
@@ -48,6 +49,15 @@ import {
   loadRuns,
 } from './metricsStore';
 import {
+  DEFAULT_METRICS_LIMIT,
+  DEFAULT_SLA_MINUTES,
+  clearMetricsCache,
+  loadMetricsCache,
+  metricsClient,
+  saveMetricsCache,
+  toPanelRuns,
+} from './metricsApi';
+import {
   MEMORY_PROJECT_ID,
   createProject,
   deleteProject,
@@ -78,10 +88,13 @@ const API_BASE_URL = DEFAULT_GATEWAY_URL;
  *
  * В проекте нарезки процессов строятся из общей схемы (`extractProcessXml`),
  * а сброс одного контура возвращает его демо-процесс (`replaceProcessXml`).
+ * Клиент сбрасывается в свою каталожную схему (`DAIRY_CLIENT_PROCESS_XML`, M5):
+ * отдельного «демо закупки» у третьего контура нет.
  */
 const DEFAULT_SCHEMA_BY_ORG = {
   CUSTOMER: DEFAULT_CUSTOMER_BPMN_XML,
   SUPPLIER: DEFAULT_SUPPLIER_BPMN_XML,
+  CLIENT: DAIRY_CLIENT_PROCESS_XML,
 };
 
 /**
@@ -221,21 +234,18 @@ function ActionButton({ action, onClick, style }) {
 }
 
 /**
- * Токены обеих сторон в одной подсветке.
+ * Токены контуров в одной подсветке.
  *
- * Просмотрщик показывает проект целиком (оба процесса), а токены приходят по
- * экземплярам: у Заказчика и Поставщика они разные. Карта `elementId → state`
- * у сторон не пересекается (идентификаторы узлов в BPMN уникальны), поэтому
- * карты просто складываются.
+ * Просмотрщик показывает проект целиком (все процессы), а токены приходят по
+ * экземплярам: у Заказчика, Поставщика и Клиента они разные. Карта
+ * `elementId → state` у сторон не пересекается (идентификаторы узлов в BPMN
+ * уникальны), поэтому карты просто складываются.
  *
- * @param {Object} customerTokens токены экземпляра Заказчика.
- * @param {Object} supplierTokens токены экземпляра Поставщика.
+ * @param {...Object} contourTokens карты токенов контуров (`tokensFor`).
  * @returns {Object<string, string>} общая карта подсветки.
  */
-const mergeTokens = (customerTokens, supplierTokens) => ({
-  ...(customerTokens || {}),
-  ...(supplierTokens || {}),
-});
+const mergeTokens = (...contourTokens) =>
+  contourTokens.reduce((merged, tokens) => ({ ...merged, ...(tokens || {}) }), {});
 
 /**
  * Двигал ли токен «текущий шаг» процесса.
@@ -257,22 +267,90 @@ const nextProcessState = (currentState, state) =>
   state === TOKEN_STATES.COMPLETED ? currentState : state || currentState;
 
 /**
+ * Поля заказа, которыми кабинет ведёт контур.
+ *
+ * Заказ один, а контуров три: у каждого свой экземпляр процесса и свой активный
+ * узел, поэтому карточка хранит три набора полей. Имена совпадают с контрактом
+ * API (`orders.rs`): `clientInstanceId`, `clientActiveElementId`,
+ * `clientProcessState` появились в M5 вместе с третьим пулом клиента.
+ */
+const CONTOUR_FIELDS = {
+  CUSTOMER: {
+    instance: 'customerInstanceId',
+    active: 'customerActiveElementId',
+    state: 'customerProcessState',
+  },
+  SUPPLIER: {
+    instance: 'supplierInstanceId',
+    active: 'supplierActiveElementId',
+    state: 'supplierProcessState',
+  },
+  CLIENT: {
+    instance: 'clientInstanceId',
+    active: 'clientActiveElementId',
+    state: 'clientProcessState',
+  },
+};
+
+/** Контуры заказа в порядке процессов проекта (`CONTOUR_ORDER`). */
+const CONTOUR_KEYS = Object.keys(CONTOUR_FIELDS);
+
+/** Поля контура; неизвестный контур трактуется как заказчик. */
+const fieldsOf = (org) => CONTOUR_FIELDS[org] || CONTOUR_FIELDS.CUSTOMER;
+
+/** Экземпляр процесса заказа в контуре (`''` — заказ в контур не попадал). */
+const instanceOf = (order, org) => (order ? order[fieldsOf(org).instance] || '' : '');
+
+/**
+ * Все контуры «выключены»: карточка заведена, но ни один процесс не стартовал.
+ *
+ * Нужно при первом заполнении карточки: поля второго и третьего контуров иначе
+ * остались бы `undefined`, и таблицы показали бы `undefined` вместо `IDLE`.
+ */
+const EMPTY_CONTOURS = CONTOUR_KEYS.reduce((patch, org) => {
+  const fields = CONTOUR_FIELDS[org];
+
+  return {
+    ...patch,
+    [fields.instance]: null,
+    [fields.active]: null,
+    [fields.state]: 'IDLE',
+  };
+}, {});
+
+/** Поля контура, в который заказ попал: экземпляр, активный узел и состояние. */
+const contourPatch = (org, instanceId, activeElementId, state = 'ACTIVE') => {
+  const fields = fieldsOf(org);
+
+  return {
+    [fields.instance]: instanceId,
+    [fields.active]: activeElementId,
+    [fields.state]: state,
+  };
+};
+
+/** Подписи контуров в заголовках панели: «BPMN Схема: <контур>». */
+const CONTOUR_TITLES = {
+  CUSTOMER: 'Заказчика',
+  SUPPLIER: 'Поставщика',
+  CLIENT: 'Клиента',
+};
+
+/**
  * Контур экземпляра по префиксу его идентификатора (`''` — экземпляр не наш).
  *
- * Метрика процесса считается по схеме своего контура: у Заказчика и Поставщика
- * схемы разные, и конечный узел у них свой. Префикс — тот же признак, по
- * которому подписка на токены уже раскладывает заказы по сторонам
+ * Метрика процесса считается по схеме своего контура: у Заказчика, Поставщика и
+ * Клиента схемы разные, и конечный узел у каждого свой. Префикс — тот же признак,
+ * по которому подписка на токены уже раскладывает заказы по сторонам
  * (`INSTANCE_PREFIX`).
  *
  * @param {string} instanceId идентификатор экземпляра (`inst-cust-*`).
- * @returns {'CUSTOMER'|'SUPPLIER'|''} код контура.
+ * @returns {'CUSTOMER'|'SUPPLIER'|'CLIENT'|''} код контура.
  */
 const orgOfInstance = (instanceId) => {
   if (typeof instanceId !== 'string') return '';
-  if (instanceId.startsWith(INSTANCE_PREFIX.CUSTOMER)) return 'CUSTOMER';
-  if (instanceId.startsWith(INSTANCE_PREFIX.SUPPLIER)) return 'SUPPLIER';
 
-  return '';
+  return CONTOUR_KEYS.find((org) => instanceId.startsWith(INSTANCE_PREFIX[org])) || '';
 };
 
 /**
@@ -390,17 +468,47 @@ const resolveActionEntry = (xml, entry) => ({
 /**
  * Активный узел заказа в контуре организации.
  *
- * «Текущий шаг» у сторон свой: у Заказчика и Поставщика разные экземпляры
- * процесса, и токен в каждом свой — `customerActiveElementId` /
- * `supplierActiveElementId`. Пусто означает «заказ в этот контур ещё не попал»
- * (например, процесс Поставщика не запускали).
+ * «Текущий шаг» у сторон свой: у Заказчика, Поставщика и Клиента разные
+ * экземпляры процесса, и токен в каждом свой — `customerActiveElementId`,
+ * `supplierActiveElementId`, `clientActiveElementId`. Пусто означает «заказ в
+ * этот контур ещё не попал» (например, процесс Клиента не запускали).
  *
  * @param {Object|null} order заказ из списка (`orders`).
- * @param {'CUSTOMER'|'SUPPLIER'} org чей контур.
+ * @param {'CUSTOMER'|'SUPPLIER'|'CLIENT'} org чей контур.
  * @returns {string} идентификатор узла активного токена (`''`, если его нет).
  */
 const activeStepOf = (order, org) =>
-  (org === 'SUPPLIER' ? order?.supplierActiveElementId : order?.customerActiveElementId) || '';
+  (order ? order[fieldsOf(org).active] : '') || '';
+
+/**
+ * Экземпляр второй стороны для сигнала (`counterpartEvent`).
+ *
+ * Контуров три, а кнопка схемы называет одно событие: сигнал уходит в первый
+ * чужой контур, в котором заказ уже живёт. Порядок контуров — порядок процессов
+ * проекта, поэтому у поставщика сигнал уходит заводу, а у клиента — тоже заводу:
+ * обмен клиента идёт с заводом, а не с поставщиком сырья.
+ *
+ * @param {Object|null} order заказ.
+ * @param {'CUSTOMER'|'SUPPLIER'|'CLIENT'} org контур отправителя.
+ * @returns {string} экземпляр второй стороны (`''` — сигнал отправлять некуда).
+ */
+const counterpartInstanceOf = (order, org) =>
+  CONTOUR_KEYS.filter((key) => key !== org).map((key) => instanceOf(order, key)).find(Boolean) || '';
+
+/**
+ * Текст отказа шлюза для карточки заказа (M6).
+ *
+ * Проверка прав отвечает **403** с причиной («Роль WAREHOUSE не может
+ * завершить шаг Task_SalesConfirmation: нужна роль SALES»); `httpClient`
+ * кладёт её в `details`. Для остальных ошибок (сеть, 5xx) остаётся прежний
+ * текст: «попробуйте ещё раз» там честнее, чем код статуса.
+ *
+ * @param {{status?: number, error?: string, details?: (string|null)}|null} res
+ * @param {string} fallback сообщение по умолчанию.
+ * @returns {string}
+ */
+const eventFailure = (res, fallback) =>
+  (res && res.status === 403 && (res.details || res.error)) || fallback;
 
 export default function App() {
   // Проект — одна BPMN-схема с процессами обеих сторон. Правки редактора живут
@@ -425,30 +533,58 @@ export default function App() {
 
   // Нарезки процессов: движок адресует только первый `bpmn:process`, поэтому
   // деплой, старт и метрики работают с процессом контура, а не с проектом.
-  const customerProcess = processes.find((process) => process.org === 'CUSTOMER') || null;
-  const supplierProcess = processes.find((process) => process.org === 'SUPPLIER') || null;
+  // Процесса контура в схеме может не быть (загруженный BPMN без третьего пула) —
+  // тогда нарезка пустая, а не «первый процесс проекта».
+  const processOf = useCallback(
+    (org) => processes.find((process) => process.org === org) || null,
+    [processes]
+  );
+
+  const customerProcess = processOf('CUSTOMER');
+  const supplierProcess = processOf('SUPPLIER');
+  const clientProcess = processOf('CLIENT');
 
   const customerBpmnXml = useMemo(
-    () => extractProcessXml(projectXml, customerProcess ? customerProcess.id : ''),
+    () => (customerProcess ? extractProcessXml(projectXml, customerProcess.id) : ''),
     [projectXml, customerProcess]
   );
   const supplierBpmnXml = useMemo(
-    () => extractProcessXml(projectXml, supplierProcess ? supplierProcess.id : ''),
+    () => (supplierProcess ? extractProcessXml(projectXml, supplierProcess.id) : ''),
     [projectXml, supplierProcess]
+  );
+  // Третий контур (M5): процесс клиента. Пустая строка — проект ведёт только
+  // завод и поставщика, и кабинет клиента просто нечем отыгрывать.
+  const clientBpmnXml = useMemo(
+    () => (clientProcess ? extractProcessXml(projectXml, clientProcess.id) : ''),
+    [projectXml, clientProcess]
   );
 
   // SDK: HTTP-клиент API Gateway и WS-подписка на токены процесса
   // (реконнект, парсинг кадров и жизненный цикл соединения — внутри SDK).
   const { client, socket, connected: wsConnected } = useBpmnEngine();
 
+  // Роль сессии (M6) — не только фильтр кнопок: шлюз проверяет её на каждом
+  // событии, а движок — ещё раз по схеме. Клиент живёт дольше сессии, поэтому
+  // роль обновляем эффектом: вход, выход и смена роли в карточке проекта.
+  useEffect(() => {
+    client.actor = currentUser ? currentUser.role : '';
+  }, [client, currentUser]);
+
   // Токены по всем экземплярам процесса — источник подсветки узлов на схеме.
   const { tokensFor } = useProcessTokens(socket, []);
 
-  /** Схема стороны (`CUSTOMER`/`SUPPLIER`) — источник назначений ролей. */
-  const schemaXml = useCallback(
-    (org) => (org === 'SUPPLIER' ? supplierBpmnXml : customerBpmnXml),
-    [supplierBpmnXml, customerBpmnXml]
+  /** Схемы контуров: источник назначений ролей, кнопок и деплоя. */
+  const schemaXmlByOrg = useMemo(
+    () => ({
+      CUSTOMER: customerBpmnXml,
+      SUPPLIER: supplierBpmnXml,
+      CLIENT: clientBpmnXml,
+    }),
+    [customerBpmnXml, supplierBpmnXml, clientBpmnXml]
   );
+
+  /** Схема стороны (`CUSTOMER`/`SUPPLIER`/`CLIENT`). */
+  const schemaXml = useCallback((org) => schemaXmlByOrg[org] || '', [schemaXmlByOrg]);
 
   /**
    * Совместимость текущей схемы с движком оркестратора.
@@ -461,9 +597,8 @@ export default function App() {
   const engineProblems = useMemo(() => {
     if (!currentUser) return [];
 
-    const xml = currentUser.org === 'SUPPLIER' ? supplierBpmnXml : customerBpmnXml;
-    return validateEngineSchema(xml).problems;
-  }, [currentUser, supplierBpmnXml, customerBpmnXml]);
+    return validateEngineSchema(schemaXml(currentUser.org)).problems;
+  }, [currentUser, schemaXml]);
 
   /** Роль исполнителя узла по схеме (`''` — роль не назначена). */
   const roleOf = useCallback(
@@ -479,11 +614,17 @@ export default function App() {
    */
   const customerActions = useMemo(() => listActions(customerBpmnXml), [customerBpmnXml]);
   const supplierActions = useMemo(() => listActions(supplierBpmnXml), [supplierBpmnXml]);
+  const clientActions = useMemo(() => listActions(clientBpmnXml), [clientBpmnXml]);
 
-  /** Кнопки организации (`CUSTOMER`/`SUPPLIER`) — из её собственной схемы. */
+  /** Кнопки контура — из его собственной схемы. */
   const actionsOf = useCallback(
-    (org) => (org === 'SUPPLIER' ? supplierActions : customerActions),
-    [customerActions, supplierActions]
+    (org) => {
+      if (org === 'SUPPLIER') return supplierActions;
+      if (org === 'CLIENT') return clientActions;
+
+      return customerActions;
+    },
+    [customerActions, supplierActions, clientActions]
   );
 
   /**
@@ -551,12 +692,13 @@ export default function App() {
   const orgOfProcess = useCallback(
     (processId) => {
       if (!processId) return null;
-      if (getProcessIds(supplierBpmnXml).includes(processId)) return 'SUPPLIER';
-      if (getProcessIds(customerBpmnXml).includes(processId)) return 'CUSTOMER';
 
-      return null;
+      return (
+        CONTOUR_KEYS.find((org) => getProcessIds(schemaXmlByOrg[org]).includes(processId)) ||
+        null
+      );
     },
-    [customerBpmnXml, supplierBpmnXml]
+    [schemaXmlByOrg]
   );
 
   /**
@@ -565,17 +707,17 @@ export default function App() {
    *
    * Кросс-процессный триггер (`trg:processTrigger/@targetProcessId`) запускает
    * процесс соседа по цепочке, а не свой: у Заказчика подсказываются процессы
-   * из схемы Поставщика и наоборот. Значения берутся из схемы, а не из списка
-   * в коде, чтобы переименование процесса в редакторе сразу попадало в подсказки
-   * (движок сверяет их с `bpmn:process/@id`).
+   * из схем Поставщика и Клиента, у Поставщика — Заказчика и Клиента и так
+   * далее. Значения берутся из схемы, а не из списка в коде, чтобы переименование
+   * процесса в редакторе сразу попадало в подсказки (движок сверяет их с
+   * `bpmn:process/@id`).
    */
-  const customerTriggerTargets = useMemo(
-    () => getProcessIds(supplierBpmnXml),
-    [supplierBpmnXml]
-  );
-  const supplierTriggerTargets = useMemo(
-    () => getProcessIds(customerBpmnXml),
-    [customerBpmnXml]
+  const triggerTargetsOf = useCallback(
+    (org) =>
+      CONTOUR_KEYS.filter((key) => key !== org).flatMap((key) =>
+        getProcessIds(schemaXmlByOrg[key])
+      ),
+    [schemaXmlByOrg]
   );
 
   /**
@@ -585,9 +727,9 @@ export default function App() {
    * событии — её собственное поле `role` (`act:userAction/@role`, у событий нет
    * `resourceRole`). Перераспределить шаг между ролями можно в редакторе схемы,
    * и интерфейс поедет за ней. Организация берётся из её собственной схемы: у
-   * Заказчика и Поставщика свои процессы и свои назначения.
+   * Заказчика, Поставщика и Клиента свои процессы и свои назначения.
    *
-   * @param {'CUSTOMER'|'SUPPLIER'} org чья схема.
+   * @param {'CUSTOMER'|'SUPPLIER'|'CLIENT'} org чья схема.
    * @param {string[]} actionIds ключи кнопок (`ACTION_ID`).
    * @returns {boolean}
    */
@@ -706,8 +848,54 @@ export default function App() {
   // Метрики запусков процессов: читаем из хранилища один раз при монтировании,
   // а дальше состояние всегда перечитывается из него же (`loadRuns`): так кэш в
   // React не может разойтись с сохранённым — иначе после F5 руководитель увидел
-  // бы устаревшую инфографику.
+  // бы устаревшую инфографику. Это **запасной** источник: основной — серверные
+  // метрики ниже (M7), одинаковые у всех клиентов.
   const [processRuns, setProcessRuns] = useState(() => loadRuns());
+
+  // Серверные метрики (M7): цифры считает движок по Postgres
+  // (`bpmn-engine/src/metrics.rs`), поэтому у второго клиента панель не пуста, а
+  // F5 не меняет числа. Ответ кэшируется в браузере (`metricsApi.js`), чтобы
+  // панель рисовалась сразу и не пустела при недоступном шлюзе.
+  const [serverMetrics, setServerMetrics] = useState(() => loadMetricsCache());
+  const [metricsError, setMetricsError] = useState(null);
+
+  /** Перечитывает метрики у движка (`GET /api/v1/metrics` через шлюз). */
+  const refreshMetrics = useCallback(async () => {
+    const result = await metricsClient.load({
+      limit: DEFAULT_METRICS_LIMIT,
+      slaMinutes: DEFAULT_SLA_MINUTES,
+    });
+
+    if (!result.ok) {
+      setMetricsError(
+        result.details ? `${result.error} (${result.details})` : result.error
+      );
+      return;
+    }
+
+    saveMetricsCache(result.metrics);
+    setServerMetrics({ metrics: result.metrics, savedAt: new Date().toISOString() });
+    setMetricsError(null);
+  }, []);
+
+  // Панель руководителя читает сервер при открытии кабинета, а не только после
+  // собственных запусков: иначе «у руководителя пусто» и остаётся.
+  useEffect(() => {
+    refreshMetrics();
+  }, [refreshMetrics]);
+
+  // `orgOfProcess` (выше) даёт контур по `bpmn:process/@id`: в ответе движка
+  // контура нет, он известен только кабинету.
+  const serverPanelRuns = useMemo(
+    () => toPanelRuns(serverMetrics && serverMetrics.metrics, { orgOf: orgOfProcess }),
+    [serverMetrics, orgOfProcess]
+  );
+
+  // Сервер — источник правды; локальная метрика остаётся запасным вариантом,
+  // пока шлюз не ответил ни разу (стенд без HTTP-API).
+  const panelRuns = serverPanelRuns.length > 0 ? serverPanelRuns : processRuns;
+  const panelSource =
+    serverPanelRuns.length > 0 ? (metricsError ? 'cache' : 'server') : 'local';
 
   const [notifications, setNotifications] = useState([
     {
@@ -761,6 +949,20 @@ export default function App() {
     }
 
     setOrders(prev => mergeOrders([serverOrder], prev));
+  }, []);
+
+  /**
+   * Отмечает привязку, которую кабинет сделал сам — на старте процесса.
+   *
+   * Экземпляр, запущенный из кабинета, придёт ещё и токеном по WS (подписка
+   * привязывает экземпляры всех трёх контуров). Без отметки подписка отправила бы
+   * повторный POST на каждый первый токен, а ответ сервера перезаписал бы
+   * карточку своей копией.
+   */
+  const markInstanceAttached = useCallback((orderNum, org, instanceId) => {
+    if (!orderNum || !instanceId) return;
+
+    attachedInstances.current.add(`${orderNum}:${org}:${instanceId}`);
   }, []);
 
   // Список заказов живёт на сервере (M4): F5 и второй браузер показывают одни
@@ -865,18 +1067,23 @@ export default function App() {
       // «Текущий шаг» — только активация узла: прежний узел движок закрывает
       // событием `COMPLETED` в момент активации следующего (см. `isTokenActive`).
       const isActive = isTokenActive(state);
+      // Контур экземпляра по префиксу: по нему токен попадает в свои поля заказа.
+      const tokenOrg = orgOfInstance(instanceId);
 
-      // Экземпляр второй стороны создаёт движок по сообщению (M3): привязываем
-      // его к заказу, как только кабинет увидел первый токен — иначе карточка
-      // после F5 не знала бы о процессе поставщика.
-      if (isActive && targetOrderNum && instanceId.startsWith(INSTANCE_PREFIX.SUPPLIER)) {
-        attachOrderInstance(targetOrderNum, 'SUPPLIER', instanceId);
+      // Экземпляры второй и третьей стороны создаёт движок по сообщению (M3/M5):
+      // привязываем их к заказу, как только кабинет увидел первый токен — иначе
+      // карточка после F5 не знала бы о процессе поставщика или клиента.
+      // Контур завода тоже привязывается: его экземпляр заводит клиент триггером
+      // `Event_SendOrder` (`trg:processTrigger`), и карточка появляется раньше,
+      // чем у завода будет свой `customerInstanceId`. Повтор кадра не шлёт второй
+      // POST — экземпляры дедуплицируются (`attachedInstances`).
+      if (isActive && targetOrderNum && tokenOrg) {
+        attachOrderInstance(targetOrderNum, tokenOrg, instanceId);
       }
 
       setOrders(prevOrders => {
         const orderIndex = prevOrders.findIndex(
-          o => o.customerInstanceId === instanceId ||
-               o.supplierInstanceId === instanceId ||
+          o => CONTOUR_KEYS.some((key) => instanceOf(o, key) === instanceId) ||
                (targetOrderNum && o.id === targetOrderNum)
         );
 
@@ -884,19 +1091,22 @@ export default function App() {
           const updatedOrders = prevOrders.map((order, idx) => {
             if (idx !== orderIndex) return order;
 
-            const isCustomer = order.customerInstanceId === instanceId;
-            const isSupplier = order.supplierInstanceId === instanceId ||
-                               instanceId.startsWith(INSTANCE_PREFIX.SUPPLIER);
+            // Контур токена: точная привязка экземпляра к карточке, иначе префикс
+            // (поставщик и клиент появляются движком раньше привязки к заказу).
+            const boundContour =
+              CONTOUR_KEYS.find((key) => instanceOf(order, key) === instanceId) || '';
+            const contour = boundContour || tokenOrg;
+            const fields = CONTOUR_FIELDS[contour];
+
+            if (!fields) return { ...order, ...payloadData };
 
             return {
               ...order,
-              supplierInstanceId: isSupplier ? instanceId : order.supplierInstanceId,
+              [fields.instance]: instanceId,
               // Активный узел двигает только ACTIVE: COMPLETED прежнего узла
               // иначе откатил бы «текущий шаг» назад.
-              customerActiveElementId: isCustomer && isActive ? (elementId || order.customerActiveElementId) : order.customerActiveElementId,
-              customerProcessState: isCustomer ? nextProcessState(order.customerProcessState, state) : order.customerProcessState,
-              supplierActiveElementId: isSupplier && isActive ? (elementId || order.supplierActiveElementId) : order.supplierActiveElementId,
-              supplierProcessState: isSupplier ? nextProcessState(order.supplierProcessState, state) : order.supplierProcessState,
+              [fields.active]: isActive ? (elementId || order[fields.active]) : order[fields.active],
+              [fields.state]: nextProcessState(order[fields.state], state),
               ...payloadData
             };
           });
@@ -911,25 +1121,23 @@ export default function App() {
         // Заказ заводим только по активации узла: `COMPLETED` приходит и для
         // экземпляров, которые этот клиент не начинал (например, страница
         // открыта посреди процесса) — «заказ-призрак» из него не нужен.
+        // Чужие контуры заказ не заводят: поставщика и клиента движок стартует
+        // по уже заведённой карточке.
         if (!isActive) {
           return prevOrders;
         }
 
-        if (instanceId.startsWith(INSTANCE_PREFIX.SUPPLIER)) {
+        if (tokenOrg && tokenOrg !== 'CUSTOMER') {
           return prevOrders;
         }
 
         const newOrderNum = targetOrderNum || `Заказ-${instanceId.slice(-6)}`;
         const newOrder = {
+          ...EMPTY_CONTOURS,
           id: newOrderNum,
           createdAt: new Date().toLocaleTimeString('ru-RU'),
           volume: payloadData.volume || '100 Л',
-          customerInstanceId: instanceId,
-          customerActiveElementId: elementId,
-          customerProcessState: state || 'ACTIVE',
-          supplierInstanceId: null,
-          supplierActiveElementId: null,
-          supplierProcessState: 'IDLE',
+          ...contourPatch('CUSTOMER', instanceId, elementId, state || 'ACTIVE'),
           ...payloadData
         };
         setActionLoading(prev => ({ ...prev, [newOrderNum]: null }));
@@ -942,7 +1150,7 @@ export default function App() {
       // По экземпляру, который этот клиент не начинал (страница открыта посреди
       // процесса), метрики не будет: время выполнения оказалось бы выдуманным.
       if (isActive) {
-        const runOrg = orgOfInstance(instanceId);
+        const runOrg = tokenOrg;
 
         if (runOrg && isProcessFinished(schemaXml(runOrg), elementId)) {
           const finishedRun = completeRun(instanceId, {
@@ -953,6 +1161,9 @@ export default function App() {
 
           if (finishedRun) {
             setProcessRuns(loadRuns());
+            // Сервер считает те же цифры по Postgres: перечитываем, чтобы
+            // инфографика руководителя обновилась без F5 и у второго клиента.
+            refreshMetrics();
             logEvent(
               runOrg,
               'ALL',
@@ -966,7 +1177,7 @@ export default function App() {
 
       logEvent('SYSTEM', 'ALL', 'Событие Оркестратора', `Инстанс ${instanceId} -> Узел: ${elementId || '—'} [Статус: ${state}]`);
     });
-  }, [socket, logEvent, schemaXml, attachOrderInstance]);
+  }, [socket, logEvent, schemaXml, attachOrderInstance, refreshMetrics]);
 
   /**
    * Запуск процесса по схеме, когда кнопки инициатора в ней нет.
@@ -983,11 +1194,9 @@ export default function App() {
 
     const orderNum = nextOrderNum(orders);
     const suffix = Math.random().toString(36).substring(2, 8);
-    const instanceId =
-      org === 'SUPPLIER'
-        ? `${INSTANCE_PREFIX.SUPPLIER}${suffix}`
-        : `${INSTANCE_PREFIX.CUSTOMER}${suffix}`;
-    const isCustomer = org === 'CUSTOMER';
+    // Префикс экземпляра — признак контура: по нему подписка на токены и метрики
+    // узнают, чьей схемой считать процесс (`INSTANCE_PREFIX`).
+    const instanceId = `${INSTANCE_PREFIX[org] || INSTANCE_PREFIX.CUSTOMER}${suffix}`;
 
     setActionLoading(prev => ({ ...prev, [orderNum]: 'Запуск процесса в оркестраторе...' }));
     setActionErrors(prev => ({ ...prev, [orderNum]: null }));
@@ -1003,22 +1212,29 @@ export default function App() {
     const declaration = startStepOf(xml) || synthStartStep(xml);
     const activeElementId = declaration ? declaration.action.elementId : '';
 
+    // Поставщик и клиент живут в общей БД заказов: без карточки завод не увидит
+    // заказ, а после F5 нечего будет показать. Заказчика это не касается — его
+    // точку входа заводит `handleProductionCreateOrder`.
+    if (org !== 'CUSTOMER') {
+      const orderPayload = toOrderPayload(orderNum, orderDraft);
+
+      await ordersClient.createOrder(orderPayload);
+      const attached = await ordersClient.attachInstance(orderNum, org, instanceId);
+      if (attached.ok) markInstanceAttached(orderNum, org, instanceId);
+    }
+
     setOrders(prev => {
-      if (prev.some((order) => order.customerInstanceId === instanceId || order.supplierInstanceId === instanceId)) {
+      if (prev.some((order) => CONTOUR_KEYS.some((key) => instanceOf(order, key) === instanceId))) {
         return prev;
       }
 
       return [
         {
+          ...EMPTY_CONTOURS,
           id: orderNum,
           createdAt: new Date().toLocaleTimeString('ru-RU'),
           volume: '—',
-          customerInstanceId: isCustomer ? instanceId : null,
-          customerActiveElementId: isCustomer ? activeElementId : null,
-          customerProcessState: isCustomer ? 'ACTIVE' : 'IDLE',
-          supplierInstanceId: isCustomer ? null : instanceId,
-          supplierActiveElementId: isCustomer ? null : activeElementId,
-          supplierProcessState: isCustomer ? 'IDLE' : 'ACTIVE',
+          ...contourPatch(org, instanceId, activeElementId),
         },
         ...prev,
       ];
@@ -1100,6 +1316,7 @@ export default function App() {
       // Привязка экземпляра к заказу: после F5 карточка берёт текущий шаг из
       // `tokens` движка, а не из `useState` этого браузера.
       const attached = await ordersClient.attachInstance(orderNum, 'CUSTOMER', custInstId);
+      if (attached.ok) markInstanceAttached(orderNum, 'CUSTOMER', custInstId);
       const serverOrder =
         attached.ok && attached.order ? normalizeOrder(attached.order) : null;
 
@@ -1118,12 +1335,14 @@ export default function App() {
         dueDate: orderPayload.dueDate,
         counterparty: orderPayload.counterparty,
         status: ORDER_STATUS.IN_PROGRESS,
-        customerInstanceId: custInstId,
         // Первый шаг процесса — узел из кнопки старта (`act:userAction/@elementId`):
         // `startProcess` уже поставил на него токен в движке, поэтому подсветка и
         // «текущий шаг» сходятся.
-        customerActiveElementId: createOrder ? createOrder.action.elementId : '',
-        customerProcessState: 'ACTIVE',
+        ...contourPatch(
+          'CUSTOMER',
+          custInstId,
+          createOrder ? createOrder.action.elementId : ''
+        ),
         supplierInstanceId: serverOrder ? serverOrder.supplierInstanceId : null,
         documents: null, passData: null, shippedAt: null, entryTime: null, checkedAt: null
       };
@@ -1136,7 +1355,7 @@ export default function App() {
         // Экземпляр процесса — точнее номера: заказ мог быть заведён по токену
         // с этим же `orderNum`, но из другого источника.
         const index = prev.findIndex(
-          o => o.customerInstanceId === custInstId || o.id === orderNum
+          o => instanceOf(o, 'CUSTOMER') === custInstId || o.id === orderNum
         );
 
         if (index === -1) return [pendingOrder, ...prev];
@@ -1164,6 +1383,133 @@ export default function App() {
       setActionErrors(prev => ({ ...prev, [orderNum]: 'Произошла ошибка при запуске заказа. Попробуйте еще раз.' }));
     }
   };
+  /**
+   * 1.1 ТОЧКА ВХОДА КЛИЕНТА (M5): заказ готовой продукции заводу.
+   *
+   * Третий контур — такой же участник обмена, как завод и поставщик: клиент
+   * заводит карточку заказа, стартует свой процесс (`Process_Client`) и первым
+   * делом подтверждает заказ. Шаги после старта кабинет не разбирает поимённо —
+   * их рисует `schemaStepActions` из кнопок схемы (`confirmClientOrder`).
+   *
+   * Экземпляр завода кабинет не запускает: подтверждение уходит throw-событием
+   * `Event_SendOrder`, и по его триггеру (`trg:processTrigger`) движок сам
+   * создаёт `Process_Dairy` с тем же `orderNum` — этап 2 M5.
+   *
+   * Порядок тот же, что у производства: карточка сохраняется до старта процесса,
+   * чтобы движок создавал экземпляр по существующему заказу, а `attachInstance`
+   * привязывает его к заказу для F5.
+   */
+  const handleClientPlaceOrder = async () => {
+    const org = 'CLIENT';
+    const orderNum = nextOrderNum(orders);
+    const clientInstId = `${INSTANCE_PREFIX.CLIENT}${Math.random().toString(36).substring(2, 8)}`;
+    const startStep = startStepOf(clientBpmnXml);
+    const orderPayload = toOrderPayload(orderNum, orderDraft);
+
+    // Схему клиента движок должен принять целиком: иначе экземпляра процесса не
+    // появится, токенов тоже, и в списке остался бы «заказ-призрак».
+    const problems = validateEngineSchema(clientBpmnXml).problems;
+
+    if (problems.length > 0) {
+      const lines = schemaProblemLines(problems);
+      logEvent(
+        org,
+        currentUser ? currentUser.role : 'ALL',
+        'Заказ клиента не создан: движок не примет схему',
+        lines.join(' '),
+        orderNum
+      );
+      alert(`Схема Клиента несовместима с движком:\n${lines.join('\n')}`);
+      return;
+    }
+
+    setActionLoading(prev => ({ ...prev, [orderNum]: 'Создание заказа в оркестраторе...' }));
+    setActionErrors(prev => ({ ...prev, [orderNum]: null }));
+
+    // API заказов может быть недоступен (стенд без HTTP-шлюза) — тогда заказ
+    // остаётся локальным, как и у производства.
+    const savedOrder = await ordersClient.createOrder(orderPayload);
+
+    if (!savedOrder.ok && savedOrder.status !== 409) {
+      logEvent(
+        org,
+        currentUser ? currentUser.role : 'ALL',
+        'Заказ сохранён только в кабинете',
+        savedOrder.details || savedOrder.error || 'API заказов недоступен.',
+        orderNum
+      );
+    }
+
+    const { start } = await startProcess(clientInstId, clientBpmnXml, {
+      orderNum,
+      volume: `${orderPayload.volumeLiters} л`,
+      nomenclature: orderPayload.nomenclature,
+      fatContent: orderPayload.fatContent,
+      packaging: orderPayload.packaging,
+      dueDate: orderPayload.dueDate,
+      counterparty: orderPayload.counterparty,
+      initiator: actionRoleOf(org, startStep),
+    });
+
+    if (!start.ok) {
+      setActionLoading(prev => ({ ...prev, [orderNum]: null }));
+      setActionErrors(prev => ({ ...prev, [orderNum]: 'Не удалось запустить процесс клиента. Попробуйте еще раз.' }));
+      return;
+    }
+
+    // Привязка экземпляра к заказу: после F5 карточка берёт текущий шаг из
+    // `tokens` движка, а не из `useState` этого браузера.
+    const attached = await ordersClient.attachInstance(orderNum, org, clientInstId);
+    if (attached.ok) markInstanceAttached(orderNum, org, clientInstId);
+    const serverOrder = attached.ok && attached.order ? normalizeOrder(attached.order) : null;
+
+    const pendingOrder = {
+      ...EMPTY_CONTOURS,
+      ...(serverOrder || {}),
+      id: orderNum,
+      orderNum,
+      createdAt: serverOrder
+        ? serverOrder.createdAt
+        : new Date().toLocaleTimeString('ru-RU'),
+      volume: `${orderPayload.volumeLiters} л`,
+      volumeLiters: orderPayload.volumeLiters,
+      nomenclature: orderPayload.nomenclature,
+      fatContent: orderPayload.fatContent,
+      packaging: orderPayload.packaging,
+      dueDate: orderPayload.dueDate,
+      counterparty: orderPayload.counterparty,
+      status: ORDER_STATUS.IN_PROGRESS,
+      // Первый шаг — узел из кнопки старта: `startProcess` уже поставил на него
+      // токен в движке, поэтому подсветка и «текущий шаг» сходятся.
+      ...contourPatch(org, clientInstId, startStep ? startStep.action.elementId : ''),
+      documents: null, passData: null, shippedAt: null, entryTime: null, checkedAt: null,
+    };
+
+    // Заказ мог появиться раньше ответа HTTP: движок публикует токен `StartProcess`
+    // до ответа шлюза, и WS-кадр успевает первым (см. подписку на токены).
+    setOrders(prev => {
+      const index = prev.findIndex(
+        o => instanceOf(o, org) === clientInstId || o.id === orderNum
+      );
+
+      if (index === -1) return [pendingOrder, ...prev];
+
+      // Состояние из WS свежее ответа HTTP — оно и остаётся.
+      return prev.map((order, idx) =>
+        idx === index ? { ...pendingOrder, ...order, id: orderNum } : order
+      );
+    });
+    setSelectedOrderId(orderNum);
+
+    const notifyRoles = [
+      currentUser ? currentUser.role : '',
+      actionRoleOf(org, startStep),
+    ].filter(Boolean);
+
+    logEvent(org, notifyRoles, 'Заказ клиента оформлен', `Запущен процесс клиента для ${orderNum}`, orderNum);
+  };
+
+
 
   // 2. Менеджер закупок передаёт заказ Поставщику: событие и узел ожидания
   // объявлены кнопкой на блоке `Task_CreatePurchaseOrder`, а запуск процесса
@@ -1221,7 +1567,7 @@ export default function App() {
       const targetOrg = orgOfProcess(sendToSupplier.action.startsProcess);
 
       if (targetOrg) {
-        const suppInstId = `inst-supp-${Math.random().toString(36).substring(2, 8)}`;
+        const suppInstId = `${INSTANCE_PREFIX[targetOrg] || INSTANCE_PREFIX.SUPPLIER}${Math.random().toString(36).substring(2, 8)}`;
         const { start: resSupp } = await startProcess(
           suppInstId,
           schemaXml(targetOrg),
@@ -1249,7 +1595,7 @@ export default function App() {
       }
     } else {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
-      setActionErrors(prev => ({ ...prev, [orderId]: 'Произошла ошибка при отправке в оркестратор. Попробуйте еще раз.' }));
+      setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(resCust, 'Произошла ошибка при отправке в оркестратор. Попробуйте еще раз.') }));
     }
   };
 
@@ -1281,7 +1627,7 @@ export default function App() {
 
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
-      setActionErrors(prev => ({ ...prev, [orderId]: 'Произошла ошибка при сохранении документов. Попробуйте еще раз.' }));
+      setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(res, 'Произошла ошибка при сохранении документов. Попробуйте еще раз.') }));
     }
   };
 
@@ -1333,7 +1679,7 @@ export default function App() {
       }
     } else {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
-      setActionErrors(prev => ({ ...prev, [orderId]: 'Произошла ошибка при подтверждении отгрузки. Попробуйте еще раз.' }));
+      setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(resSupp, 'Произошла ошибка при подтверждении отгрузки. Попробуйте еще раз.') }));
     }
   };
 
@@ -1364,7 +1710,7 @@ export default function App() {
 
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
-      setActionErrors(prev => ({ ...prev, [orderId]: 'Произошла ошибка при выписке пропуска. Попробуйте еще раз.' }));
+      setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(res, 'Произошла ошибка при выписке пропуска. Попробуйте еще раз.') }));
     }
   };
 
@@ -1390,7 +1736,7 @@ export default function App() {
 
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
-      setActionErrors(prev => ({ ...prev, [orderId]: 'Произошла ошибка при регистрации въезда. Попробуйте еще раз.' }));
+      setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(res, 'Произошла ошибка при регистрации въезда. Попробуйте еще раз.') }));
     }
   };
 
@@ -1416,7 +1762,7 @@ export default function App() {
 
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
-      setActionErrors(prev => ({ ...prev, [orderId]: 'Произошла ошибка при подтверждении ОТК. Попробуйте еще раз.' }));
+      setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(res, 'Произошла ошибка при подтверждении ОТК. Попробуйте еще раз.') }));
     }
   };
 
@@ -1428,7 +1774,7 @@ export default function App() {
     if (!order) return;
 
     const org = currentUser.org;
-    const instanceId = org === 'SUPPLIER' ? order.supplierInstanceId : order.customerInstanceId;
+    const instanceId = instanceOf(order, org);
     const stepName = entry.stepName || entry.action.id;
 
     if (!instanceId) return;
@@ -1469,7 +1815,7 @@ export default function App() {
 
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [order.id]: null }));
-      setActionErrors(prev => ({ ...prev, [order.id]: `Произошла ошибка на шаге «${stepName}». Попробуйте еще раз.` }));
+      setActionErrors(prev => ({ ...prev, [order.id]: eventFailure(res, `Произошла ошибка на шаге «${stepName}». Попробуйте еще раз.`) }));
       return;
     }
 
@@ -1487,7 +1833,7 @@ export default function App() {
       );
     }
 
-    const counterpartInstanceId = org === 'SUPPLIER' ? order.customerInstanceId : order.supplierInstanceId;
+    const counterpartInstanceId = counterpartInstanceOf(order, org);
 
     if (entry.action.counterpartEvent && counterpartInstanceId) {
       const counterpartRes = await client.sendEvent(
@@ -1509,10 +1855,16 @@ export default function App() {
    * Чистится именно хранилище браузера, а не состояние React: метрика — не
    * журнал событий, и её данные не должны всплывать после F5. Проект лежит под
    * другим ключом (`src/projectStore.js`) и очисткой не затрагивается.
+   *
+   * Кнопка нужна только в режиме локальной метрики и кэша: когда панель рисует
+   * ответ сервера, цифры ему не принадлежат, и «очистить» их из браузера нельзя.
    */
   const handleClearMetrics = () => {
     clearRuns();
+    clearMetricsCache();
     setProcessRuns([]);
+    setServerMetrics(null);
+    setMetricsError(null);
 
     logEvent('SYSTEM', 'ALL', 'Метрики очищены', 'Сохранённые метрики выполненных процессов удалены из браузера.');
   };
@@ -1770,7 +2122,7 @@ export default function App() {
 
               return (
                 <div key={process.id}>
-                  <div style={{ fontSize: '11px', color: process.org === 'SUPPLIER' ? '#166534' : '#1e3a8a', fontWeight: 'bold', marginBottom: '4px' }}>
+                  <div style={{ fontSize: '11px', color: process.org === 'SUPPLIER' ? '#166534' : process.org === 'CLIENT' ? '#5b21b6' : '#1e3a8a', fontWeight: 'bold', marginBottom: '4px' }}>
                     {index + 1}. {CONTOUR_LABELS[process.org]} ({process.orgName}):
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginBottom: '10px' }}>
@@ -1809,9 +2161,10 @@ export default function App() {
    *
    * Ключи — из `ACTION_ID`, всё остальное (надпись, иконка, роль, событие,
    * узлы) берётся из схемы. Ветки кабинета сравнивают «текущий шаг» заказа
-   * (`customerActiveElementId`/`supplierActiveElementId`) с узлом-хостом кнопки:
-   * кнопка показывается там, где её объявили в схеме. Кнопки, чьих ключей в
-   * `ACTION_ID` нет, ветки не рисуют — их собирает `schemaStepActions`.
+   * (`customerActiveElementId`/`supplierActiveElementId`/`clientActiveElementId`)
+   * с узлом-хостом кнопки: кнопка показывается там, где её объявили в схеме.
+   * Кнопки, чьих ключей в `ACTION_ID` нет, ветки не рисуют — их собирает
+   * `schemaStepActions`.
    */
   const createOrderAction = actionOf('CUSTOMER', ACTION_ID.CREATE_ORDER);
   const sendToSupplierAction = actionOf('CUSTOMER', ACTION_ID.SEND_TO_SUPPLIER);
@@ -1823,6 +2176,20 @@ export default function App() {
 
   /** Инициатор запуска: роль объявлена в самой кнопке стартового события. */
   const canCreateOrder = Boolean(createOrderAction) && currentUser.role === actionRoleOf('CUSTOMER', createOrderAction);
+
+  /**
+   * Кнопка старта процесса клиента (M5).
+   *
+   * У третьего контура ключ кнопки в `ACTION_ID` не заводится: кабинет не
+   * собирает для неё payload, а только заводит заказ и стартует процесс. Схему
+   * это не ограничивает — кнопку старта берём из неё (`getStartAction`), поэтому
+   * переименование в редакторе сразу попадает в кабинет.
+   */
+  const clientStartStep = currentUser.org === 'CLIENT' ? startStepOf(clientBpmnXml) : null;
+
+  /** Оформить заказ клиента может роль, объявленная в кнопке старта клиента. */
+  const canPlaceClientOrder =
+    Boolean(clientStartStep) && currentUser.role === actionRoleOf('CLIENT', clientStartStep);
 
   /**
    * Шаги схемы, которых кабинет не знает поимённо.
@@ -1933,12 +2300,12 @@ export default function App() {
    * Кнопка «Демо-схема»: возвращает демо-процесс своего контура.
    *
    * Проект остаётся проектом: меняется только процесс текущей организации, а
-   * процесс второй стороны не трогается — иначе сброс одной стороны ломал бы
-   * связи `startsProcess`/`counterpartEvent` другой.
+   * процессы других сторон не трогаются — иначе сброс одной стороны ломал бы
+   * связи `startsProcess`/`counterpartEvent` остальных.
    */
   const handleResetSchema = () => {
     const defaultXml = DEFAULT_SCHEMA_BY_ORG[currentOrg];
-    const process = currentOrg === 'SUPPLIER' ? supplierProcess : customerProcess;
+    const process = processOf(currentOrg);
 
     if (!defaultXml || !process) return;
 
@@ -2130,8 +2497,11 @@ export default function App() {
 
             {/* Запуск процесса для схемы без кнопки инициатора: загруженный BPMN
                 может не объявлять `act:userAction` на стартовом событии, но
-                экземпляр всё равно нужен — иначе шаги кабинета не подсветятся. */}
-            {!createOrderAction && (
+                экземпляр всё равно нужен — иначе шаги кабинета не подсветятся.
+                У клиента своя точка входа (заказ готовой продукции, ниже):
+                без карточки заказа его процесс заводу нечего обслуживать. */}
+            {((!createOrderAction && currentUser.org !== 'CLIENT') ||
+              (currentUser.org === 'CLIENT' && !clientStartStep)) && (
               <div style={{ padding: '16px', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', marginBottom: '16px' }}>
                 <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#1e40af', display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <Play size={18} /> Запуск по схеме
@@ -2145,6 +2515,76 @@ export default function App() {
                 >
                   <Play size={16} /> Запустить процесс
                 </button>
+              </div>
+            )}
+
+            {/* 0. РОЛЬ: КЛИЕНТ (M5). Третий пул сам заводит заказ на готовую
+                продукцию: карточка сохраняется в БД движка, процесс стартует
+                кнопкой `placeClientOrder` из стартового события схемы. Дальше
+                шаги клиента (`confirmClientOrder`, приёмка) рисует сама схема. */}
+            {currentUser.org === 'CLIENT' && clientStartStep && (
+              <div>
+                <div style={{ padding: '16px', backgroundColor: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '8px', marginBottom: '16px' }}>
+                  <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#5b21b6', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <PlusCircle size={18} /> Заказ готовой продукции
+                  </h3>
+                  <p style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#5b21b6' }}>
+                    Заказ уходит заводу сообщением ClientOrder: номер заказа — общий
+                    бизнес-ключ трёх контуров, поэтому завод найдёт заказ без ссылок на экземпляр.
+                  </p>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px', marginBottom: '12px' }}>
+                    <OrderField label="Номенклатура" name="nomenclature" />
+                    <OrderField label="Объём, л" name="volumeLiters" type="number" min={1} step={1} />
+                    <OrderField label="Жирность, %" name="fatContent" type="number" min={0} step={0.1} />
+                    <OrderField label="Упаковка" name="packaging" />
+                    <OrderField label="Срок годности" name="dueDate" type="date" />
+                    <OrderField label="Контрагент" name="counterparty" />
+                  </div>
+
+                  {canPlaceClientOrder ? (
+                    <ActionButton
+                      action={clientStartStep.action}
+                      onClick={handleClientPlaceOrder}
+                      style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 18px', backgroundColor: '#7c3aed', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+                    />
+                  ) : (
+                    <p style={{ margin: 0, fontSize: '12px', color: '#6d28d9' }}>
+                      Оформить заказ может роль «{actionRoleOf('CLIENT', clientStartStep)}»: так объявлено в кнопке стартового события схемы.
+                    </p>
+                  )}
+
+                  {currentOrder && <RenderActionStatus orderId={currentOrder.id} />}
+                </div>
+
+                <h4 style={{ fontSize: '13px', color: '#334155', marginBottom: '8px' }}>Заказы клиента:</h4>
+                <div style={{ border: '1px solid #e2e8f0', borderRadius: '6px', overflow: 'hidden' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', textAlign: 'left' }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#64748b' }}>
+                        <th style={{ padding: '8px 12px' }}>Заказ</th>
+                        <th style={{ padding: '8px 12px' }}>Номенклатура</th>
+                        <th style={{ padding: '8px 12px' }}>Текущий шаг</th>
+                        <th style={{ padding: '8px 12px' }}>Состояние</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orders.filter(order => instanceOf(order, 'CLIENT')).map(order => (
+                        <tr key={order.id} onClick={() => setSelectedOrderId(order.id)} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', backgroundColor: order.id === selectedOrderId ? '#f5f3ff' : '#fff' }}>
+                          <td style={{ padding: '8px 12px', fontWeight: 'bold' }}>{order.id}</td>
+                          <td style={{ padding: '8px 12px' }}>{order.nomenclature || '—'}</td>
+                          <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: '#64748b' }}>{activeStepOf(order, 'CLIENT') || '—'}</td>
+                          <td style={{ padding: '8px 12px' }}>{order[fieldsOf('CLIENT').state] || '—'}</td>
+                        </tr>
+                      ))}
+                      {orders.filter(order => instanceOf(order, 'CLIENT')).length === 0 && (
+                        <tr>
+                          <td colSpan={4} style={{ padding: '10px 12px', color: '#94a3b8' }}>Заказов пока нет.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
 
@@ -2231,13 +2671,22 @@ export default function App() {
                   </p>
                 </div>
 
-                {/* Инфографика по процессам: руководитель видит время выполнения
-                    завершённых запусков — метрика живёт в браузере
-                    (`src/metricsStore.js`), поэтому её видно и после F5. */}
+                {/* Инфографика по процессам: цифры считает движок
+                    (`GET /api/v1/metrics`), поэтому их видят все клиенты и после
+                    F5; ответ кэшируется в браузере (`src/metricsApi.js`). */}
                 <MetricsPanel
-                  runs={processRuns}
+                  runs={panelRuns}
                   preferredOrg={currentUser.org}
-                  onClear={handleClearMetrics}
+                  source={panelSource}
+                  processMetrics={
+                    panelSource === 'local' ? null : serverMetrics.metrics.processes
+                  }
+                  generatedAt={
+                    panelSource === 'local' ? '' : serverMetrics.metrics.generatedAt
+                  }
+                  error={metricsError}
+                  onRefresh={refreshMetrics}
+                  onClear={panelSource === 'local' ? handleClearMetrics : null}
                 />
 
                 <h4 style={{ fontSize: '13px', color: '#334155', marginBottom: '8px' }}>Все заказы в контуре {currentUser.orgName}:</h4>
@@ -2258,14 +2707,14 @@ export default function App() {
                         <tr key={o.id} onClick={() => setSelectedOrderId(o.id)} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', backgroundColor: o.id === selectedOrderId ? '#eff6ff' : '#fff' }}>
                           <td style={{ padding: '8px 12px', fontWeight: 'bold' }}>{o.id}</td>
                           <td style={{ padding: '8px 12px' }}>{o.nomenclature || '—'}</td>
-                          <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: '#64748b' }}>{currentUser.org === 'CUSTOMER' ? o.customerInstanceId : (o.supplierInstanceId || '—')}</td>
+                          <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: '#64748b' }}>{instanceOf(o, currentOrg) || '—'}</td>
                           <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: '#64748b' }}>
-                            {(currentUser.org === 'CUSTOMER' ? o.customerActiveElementId : o.supplierActiveElementId) || '—'}
+                            {activeStepOf(o, currentOrg) || '—'}
                           </td>
                           <td style={{ padding: '8px 12px' }}>{formatDueDate(o.dueDate)}</td>
                           <td style={{ padding: '8px 12px' }}>
                             <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '11px', backgroundColor: '#dcfce7', color: '#166534' }}>
-                              {currentUser.org === 'CUSTOMER' ? o.customerProcessState : o.supplierProcessState}
+                              {o[fieldsOf(currentOrg).state] || '—'}
                             </span>
                           </td>
                         </tr>
@@ -2498,7 +2947,7 @@ export default function App() {
                <div>
                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '12px' }}>
                    <h3 style={{ margin: 0, fontSize: '15px', color: '#1e293b' }}>
-                     BPMN Схема: {currentUser.org === 'CUSTOMER' ? 'Заказчика' : 'Поставщика'} {currentOrder ? `[Заказ ${currentOrder.id}]` : ''}
+                     BPMN Схема: {CONTOUR_TITLES[currentUser.org] || CONTOUR_LABELS[currentUser.org]} {currentOrder ? `[Заказ ${currentOrder.id}]` : ''}
                    </h3>
 
                    {/* Кэш схемы в браузере: сохранение и подпись состояния копии */}
@@ -2528,7 +2977,7 @@ export default function App() {
                    </div>
 
                    <button 
-                     onClick={() => deployBpmnSchema(currentUser.org, currentUser.org === 'CUSTOMER' ? customerBpmnXml : supplierBpmnXml)} 
+                     onClick={() => deployBpmnSchema(currentUser.org, currentSchemaXml)} 
                      disabled={isDeploying} 
                      style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', backgroundColor: '#0284c7', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '12px' }}
                    >
@@ -2587,32 +3036,29 @@ export default function App() {
 
                  {!currentSchemaXml ? (
                    <p style={{ fontSize: '13px', color: '#b45309', margin: 0 }}>
-                     В проекте нет процесса для этого контура: добавьте второй процесс или откройте другой проект.
+                     В проекте нет процесса для этого контура: добавьте процесс контура или откройте другой проект.
                    </p>
                  ) : schemaMode === 'edit' ? (
-                   /* Редактор правит проект целиком: второй процесс виден на холсте,
+                   /* Редактор правит проект целиком: все процессы видны на холсте,
                       а роли и триггеры подсказываются из всей схемы. */
                    <BpmnEditor
                      xml={projectXml}
                      onChange={setProjectXml}
                      roleOptions={analysis.roleCodes}
-                     triggerTargets={currentOrg === 'CUSTOMER' ? customerTriggerTargets : supplierTriggerTargets}
+                     triggerTargets={triggerTargetsOf(currentOrg)}
                      height={520}
                    />
                  ) : (
                    /* Просмотрщик показывает проект, поэтому подсветка собирается из
-                      токенов обоих экземпляров: у сторон свои узлы и свои токены. */
+                      токенов всех экземпляров: у сторон свои узлы и свои токены. */
                    <BpmnViewer
                      xml={projectXml}
                      tokens={mergeTokens(
-                       tokensFor(currentOrder?.customerInstanceId),
-                       tokensFor(currentOrder?.supplierInstanceId)
+                       tokensFor(instanceOf(currentOrder, 'CUSTOMER')),
+                       tokensFor(instanceOf(currentOrder, 'SUPPLIER')),
+                       tokensFor(instanceOf(currentOrder, 'CLIENT'))
                      )}
-                     activeElementId={
-                       currentOrg === 'SUPPLIER'
-                         ? currentOrder?.supplierActiveElementId
-                         : currentOrder?.customerActiveElementId
-                     }
+                     activeElementId={activeStepOf(currentOrder, currentOrg)}
                      height={520}
                    />
                  )}

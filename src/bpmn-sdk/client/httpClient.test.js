@@ -251,4 +251,32 @@ describe('httpClient: GatewayClient.sendEvent', () => {
 
     expect(fetchImpl.mock.calls[0][0]).toContain('/instances/inst%20cust%2F1/events');
   });
+
+  /**
+   * Роль сессии (M6): шлюз проверяет её на каждом событии, поэтому клиент
+   * обязан отправлять её и заголовком (её читает шлюз), и полем тела (его
+   * читает движок, если событие ушло мимо шлюза).
+   */
+  it('передаёт роль сессии заголовком и полем тела (M6)', async () => {
+    const fetchImpl = jest.fn(async () => createResponse());
+    const client = new GatewayClient('/api/v1/process/instances', { fetchImpl });
+
+    client.actor = 'SALES';
+    await client.sendEvent('inst-cust-1', 'StartProcess');
+
+    const [, init] = fetchImpl.mock.calls[0];
+    expect(init.headers['X-Actor-Role']).toBe('SALES');
+    expect(JSON.parse(init.body).actor).toBe('SALES');
+  });
+
+  it('без роли запрос остаётся прежним', async () => {
+    const fetchImpl = jest.fn(async () => createResponse());
+    const client = new GatewayClient('/api/v1/process/instances', { fetchImpl });
+
+    await client.sendEvent('inst-cust-1', 'StartProcess');
+
+    const [, init] = fetchImpl.mock.calls[0];
+    expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+    expect(JSON.parse(init.body)).not.toHaveProperty('actor');
+  });
 });

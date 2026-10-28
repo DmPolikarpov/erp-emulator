@@ -4,23 +4,39 @@
  * Панель показывает по одной карточке на процесс: сколько запусков завершено,
  * среднее/минимальное/максимальное время выполнения и столбики последних
  * запусков. Данные приходят готовыми записями
- * ([`src/metricsStore.js`](metricsStore.js)); панель ничего не знает про
- * движок и хранилище — так её можно рисовать и по метрикам из другого
- * источника.
+ * ([`src/metricsStore.js`](metricsStore.js) или [`src/metricsApi.js`](metricsApi.js));
+ * панель ничего не знает про движок и хранилище — так её можно рисовать и по
+ * метрикам из другого источника.
  *
- * Пока измеряется одно — время выполнения; остальные метрики добавляются
- * плитками (`MetricTile`), а не переделкой макета.
+ * Источник данных виден руководителю подписью (`source`) и не меняет макет:
+ *  - `server` — ответ движка (`GET /api/v1/metrics`), одинаковый у всех
+ *    клиентов; тогда же показываются серверные плитки («Ожидание шага», «SLA»,
+ *    «Брак»), если пришёл `processMetrics`;
+ *  - `cache` — последний ответ сервера из `localStorage` (шлюз не ответил, но
+ *    цифры не выдуманы браузером);
+ *  - `local` — метрики этого браузера (`beginRun`/`completeRun`), пока API
+ *    недоступен совсем.
  *
  * @param {Object} props
- * @param {Array<Object>} [props.runs] записи запусков (`loadRuns`).
+ * @param {Array<Object>} [props.runs] записи запусков (`loadRuns`,
+ *   `metricsApi.toPanelRuns`).
  * @param {string} [props.preferredOrg] контур пользователя — его процесс первым.
  * @param {() => void} [props.onClear] обработчик кнопки «Очистить» (`null` —
  *   кнопки нет).
  * @param {number} [props.maxBars] сколько последних запусков рисовать.
+ * @param {'server'|'cache'|'local'} [props.source] откуда числа.
+ * @param {Record<string, Object>|Array<Object>} [props.processMetrics] агрегаты
+ *   процессов из ответа движка (`processes` или `processId` → `ProcessMetrics`);
+ *   добавляют серверные плитки.
+ * @param {string} [props.generatedAt] момент расчёта на сервере (`generatedAt`).
+ * @param {string|null} [props.error] причина, по которой показан кэш/локальные
+ *   данные (`null` — сервер ответил).
+ * @param {(() => void)|null} [props.onRefresh] обработчик кнопки «Обновить»
+ *   (`null` — кнопки нет).
  */
 
 import React, { useMemo } from 'react';
-import { BarChart2, Clock, Trash2 } from 'lucide-react';
+import { BarChart2, Clock, RefreshCw, Trash2 } from 'lucide-react';
 
 import {
   BAR_HEIGHT_PX,
@@ -37,6 +53,21 @@ import {
 const ORG_LABELS = {
   CUSTOMER: 'Заказчик',
   SUPPLIER: 'Поставщик',
+  CLIENT: 'Клиент',
+};
+
+/** Подписи источника чисел в шапке панели. */
+const SOURCE_LABELS = {
+  server: 'с сервера',
+  cache: 'кэш сервера',
+  local: 'этот браузер',
+};
+
+/** Цвет подписи источника: сервер — рабочий режим, кэш — предупреждение. */
+const SOURCE_COLORS = {
+  server: '#15803d',
+  cache: '#b45309',
+  local: '#64748b',
 };
 
 /** Высота области столбиков, px: самый высокий столбик плюс подпись над ним. */
@@ -73,13 +104,31 @@ function MetricTile({ label, value }) {
 }
 
 /**
+ * Доля брака в процентах для плитки.
+ *
+ * `null` — сервер не знает конечных узлов брака (`defectNodes` не заданы):
+ * показываем прочерк, а не «0 %», иначе отсутствие данных выглядело бы как
+ * идеальное качество.
+ *
+ * @param {number|null|undefined} share доля 0..1 из `ProcessMetrics.defectShare`.
+ * @returns {string} значение плитки.
+ */
+function defectShareText(share) {
+  if (typeof share !== 'number' || !Number.isFinite(share) || share < 0) return '—';
+
+  return `${Math.round(share * 100)}%`;
+}
+
+/**
  * Карточка одного процесса: подпись, плитки метрик и столбики запусков.
  *
  * @param {Object} props
  * @param {Object} props.group карточка из `groupRunsByProcess`.
  * @param {number} props.maxBars сколько последних запусков рисовать.
+ * @param {Object|null} [props.serverMetrics] агрегаты процесса из ответа
+ *   движка (`ProcessMetrics`): добавляют плитки ожидания, SLA и брака.
  */
-function ProcessMetricsCard({ group, maxBars }) {
+function ProcessMetricsCard({ group, maxBars, serverMetrics = null }) {
   const { summary } = group;
   const bars = recentCompletedRuns(group.runs, maxBars);
   const title = group.processName || group.processId || 'Процесс без имени';
@@ -127,6 +176,21 @@ function ProcessMetricsCard({ group, maxBars }) {
         <MetricTile label="Максимум" value={formatDuration(summary.maxMs)} />
         {summary.activeCount > 0 && (
           <MetricTile label="В работе" value={String(summary.activeCount)} />
+        )}
+        {/* Серверные разрезы (M7): показываются, когда панель рисует ответ
+            движка, — по ним видно истёкший SLA без консоли. */}
+        {serverMetrics && (
+          <>
+            <MetricTile
+              label="Ожидание шага"
+              value={formatDuration(serverMetrics.averageStepMs)}
+            />
+            <MetricTile
+              label="SLA"
+              value={`${serverMetrics.slaRuns || 0} / ${serverMetrics.slaSteps || 0}`}
+            />
+            <MetricTile label="Брак" value={defectShareText(serverMetrics.defectShare)} />
+          </>
         )}
       </div>
 
@@ -216,12 +280,33 @@ export function MetricsPanel({
   preferredOrg = '',
   onClear = null,
   maxBars = MAX_BARS,
+  source = 'local',
+  processMetrics = null,
+  generatedAt = '',
+  error = null,
+  onRefresh = null,
 }) {
   const groups = useMemo(
     () => groupRunsByProcess(runs, { preferredOrg }),
     [runs, preferredOrg]
   );
   const summary = useMemo(() => summarizeRuns(runs), [runs]);
+  // Агрегаты движка приходят списком `processes`; карточке нужен свой по
+  // `processId`. Пустой объект вместо `undefined` — чтобы не проверять его в JSX.
+  const metricsByProcess = useMemo(() => {
+    const list = Array.isArray(processMetrics)
+      ? processMetrics
+      : processMetrics && typeof processMetrics === 'object'
+        ? Object.values(processMetrics)
+        : [];
+
+    return list.reduce((map, item) => {
+      if (item && item.processId) map[item.processId] = item;
+      return map;
+    }, {});
+  }, [processMetrics]);
+  const sourceLabel = SOURCE_LABELS[source] || SOURCE_LABELS.local;
+  const generatedTime = formatRunTime(generatedAt);
 
   return (
     <section
@@ -271,6 +356,53 @@ export function MetricsPanel({
             {summary.activeCount > 0 ? ` · в работе: ${summary.activeCount}` : ''}
           </span>
 
+          <span
+            data-testid="metrics-source"
+            data-source={source}
+            title={
+              source === 'server'
+                ? 'Числа посчитаны движком по Postgres — они одинаковы у всех клиентов'
+                : source === 'cache'
+                  ? 'Последний ответ сервера из кэша браузера: шлюз сейчас не ответил'
+                  : 'Метрики этого браузера: серверные метрики недоступны'
+            }
+            style={{
+              fontSize: '10px',
+              fontWeight: '600',
+              padding: '2px 6px',
+              borderRadius: '10px',
+              backgroundColor: '#fff',
+              border: '1px solid #e2e8f0',
+              color: SOURCE_COLORS[source] || SOURCE_COLORS.local,
+            }}
+          >
+            {sourceLabel}
+            {generatedTime && source !== 'local' ? ` · ${generatedTime}` : ''}
+          </span>
+
+          {onRefresh && (
+            <button
+              type="button"
+              data-testid="metrics-refresh"
+              onClick={onRefresh}
+              title="Пересчитать метрики на сервере"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                padding: '4px 8px',
+                fontSize: '11px',
+                color: '#1d4ed8',
+                backgroundColor: '#fff',
+                border: '1px solid #bfdbfe',
+                borderRadius: '6px',
+                cursor: 'pointer',
+              }}
+            >
+              <RefreshCw size={12} /> Обновить
+            </button>
+          )}
+
           {onClear && (
             <button
               type="button"
@@ -296,6 +428,18 @@ export function MetricsPanel({
         </div>
       </div>
 
+      {error && (
+        <p
+          data-testid="metrics-error"
+          style={{ margin: '10px 0 0 0', fontSize: '11px', color: '#b45309' }}
+        >
+          Серверные метрики недоступны: {error}{' '}
+          {source === 'cache'
+            ? 'Показан последний ответ сервера из кэша.'
+            : 'Показаны метрики этого браузера.'}
+        </p>
+      )}
+
       {groups.length === 0 ? (
         <p
           data-testid="metrics-empty"
@@ -306,7 +450,12 @@ export function MetricsPanel({
         </p>
       ) : (
         groups.map((group) => (
-          <ProcessMetricsCard key={group.key} group={group} maxBars={maxBars} />
+          <ProcessMetricsCard
+            key={group.key}
+            group={group}
+            maxBars={maxBars}
+            serverMetrics={group.processId ? metricsByProcess[group.processId] || null : null}
+          />
         ))
       )}
 
@@ -314,8 +463,9 @@ export function MetricsPanel({
         data-testid="metrics-note"
         style={{ margin: '10px 0 0 0', fontSize: '10px', color: '#94a3b8' }}
       >
-        Метрика считается от старта экземпляра до токена на конечном узле и хранится
-        в браузере этого клиента.
+        {source === 'local'
+          ? 'Метрика считается от старта экземпляра до токена на конечном узле и хранится в браузере этого клиента.'
+          : 'Цифры считает движок по Postgres: они одинаковы у всех клиентов и после F5. Ответ кэшируется в браузере, чтобы панель не пустела при недоступном шлюзе.'}
       </p>
     </section>
   );

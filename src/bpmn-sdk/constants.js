@@ -67,18 +67,27 @@ export const ENGINE_ELEMENTS = {
   PROCESS_DEPLOYMENT: 'Process_Deployment',
 };
 
-/** Префиксы идентификаторов экземпляров процессов. */
+/**
+ * Префиксы идентификаторов экземпляров процессов.
+ *
+ * Контуры идут в порядке `CONTOUR_ORDER` кабинета (`projectRoles.js`):
+ * Заказчик, Поставщик, Клиент. Префикс — единственный признак, по которому
+ * подписка на токены раскладывает экземпляры по сторонам (`orgOfInstance`),
+ * поэтому третий контур называется здесь, а не угадывается по схеме.
+ */
 export const INSTANCE_PREFIX = {
   CUSTOMER: 'inst-cust-',
   SUPPLIER: 'inst-supp-',
+  CLIENT: 'inst-client-',
   DEPLOY: 'inst-deploy-',
   DEFINITION: 'inst-def-',
 };
 
-/** Организации (стороны обмена). */
+/** Организации (стороны обмена); порядок — как у `INSTANCE_PREFIX`. */
 export const ORG_TYPES = {
   CUSTOMER: 'CUSTOMER',
   SUPPLIER: 'SUPPLIER',
+  CLIENT: 'CLIENT',
 };
 
 /* ------------------------------------------------------------------ *

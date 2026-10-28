@@ -16,10 +16,12 @@
  *  - руководитель (`EXECUTIVE`) определяется каталогом; в схеме без каталога
  *    руководителем считается роль, владеющая кнопкой старта процесса.
  *
- * Кабинет двух-контурный (Заказчик и Поставщик) — это следствие логики заказов
- * в `App.jsx`, а не BPMN. Поэтому первые два процесса проекта получают контуры
- * `CUSTOMER` и `SUPPLIER`, а остальные в кабинет не попадают (о чём сообщает
- * `problems`).
+ * Кабинет трёх-контурный (Заказчик, Поставщик и Клиент) — это следствие логики
+ * заказов в `App.jsx`, а не BPMN. Поэтому первые три процесса проекта получают
+ * контуры `CUSTOMER`, `SUPPLIER` и `CLIENT`, а остальные в кабинет не попадают
+ * (о чём сообщает `problems`). Клиентский контур появился в M5: завод работает
+ * не только с поставщиком, но и с клиентом, который заказывает готовую
+ * продукцию.
  */
 
 import {
@@ -33,12 +35,13 @@ import {
 import { DEFAULT_PASSWORD, ROLE_ICONS, roleIcon } from './roleIcons';
 
 /** Контуры кабинета в порядке процессов проекта. */
-export const CONTOUR_ORDER = ['CUSTOMER', 'SUPPLIER'];
+export const CONTOUR_ORDER = ['CUSTOMER', 'SUPPLIER', 'CLIENT'];
 
 /** Подписи контуров в интерфейсе. */
 export const CONTOUR_LABELS = {
   CUSTOMER: 'ЗАКАЗЧИК',
   SUPPLIER: 'ПОСТАВЩИК',
+  CLIENT: 'КЛИЕНТ',
 };
 
 /** Сколько процессов кабинет умеет вести одновременно. */
@@ -129,9 +132,10 @@ export function analyzeProject(projectXml) {
   }
 
   if (allProcesses.length > MAX_PROJECT_PROCESSES) {
+    const contours = CONTOUR_ORDER.map((org) => CONTOUR_LABELS[org] || org).join(', ');
     problems.push(
       `В схеме ${allProcesses.length} процессов, а кабинет ведёт ${MAX_PROJECT_PROCESSES} ` +
-        '(Заказчик и Поставщик). Остальные процессы остаются в схеме, но в кабинете недоступны.'
+        `(${contours}). Остальные процессы остаются в схеме, но в кабинете недоступны.`
     );
   }
 

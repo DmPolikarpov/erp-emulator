@@ -24,8 +24,9 @@ export function toInstanceIdList(instanceIds) {
 /**
  * Накапливает состояния токенов по экземплярам процессов.
  *
- * Подписка одна на всё приложение: WS-шлюз широковещательный и отдаёт
- * события всех экземпляров сразу, поэтому фильтрация выполняется здесь.
+ * Подписка одна на всё приложение. Если экземпляры известны, хук объявляет их
+ * шлюзу (`socket.subscribe`, M7) — тот не присылает чужие; локальная проверка
+ * остаётся страховкой на случай, когда фильтр появился позже соединения.
  *
  * @param {import('../client/wsClient').StatusSocket|null} socket
  * @param {string|string[]} [instanceIds] интересующие экземпляры;
@@ -54,6 +55,13 @@ export function useProcessTokens(socket, instanceIds, options = {}) {
     if (!socket) return undefined;
 
     const filter = idsKey ? idsKey.split('|') : [];
+
+    // M7: если экземпляры известны, о них узнаёт и шлюз — чужие события он
+    // отсекает до отправки. Проверка ниже остаётся страховкой: фильтр мог
+    // появиться уже после открытия соединения.
+    if (filter.length > 0 && typeof socket.subscribe === 'function') {
+      socket.subscribe({ instanceIds: filter });
+    }
 
     return socket.on(SOCKET_EVENTS.TOKEN, (message) => {
       if (!includeDeployInstances && isDeployInstanceId(message.instanceId)) return;

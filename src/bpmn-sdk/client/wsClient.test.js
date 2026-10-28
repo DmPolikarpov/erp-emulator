@@ -328,3 +328,66 @@ describe('wsClient: переподключение', () => {
     expect(socket.connected).toBe(true);
   });
 });
+describe('wsClient: серверные фильтры (M7)', () => {
+  it('запоминает фильтры до открытия и отправляет их после open', () => {
+    const socket = createSocket();
+
+    socket.connect();
+    expect(socket.subscribe({ instanceIds: ['inst-1', 'inst-2'], role: ' OPERATOR ' })).toBe(
+      false
+    );
+    expect(FakeWebSocket.last.sent).toEqual([]);
+
+    FakeWebSocket.last.open();
+
+    expect(FakeWebSocket.last.sent).toEqual([
+      JSON.stringify({
+        type: 'subscribe',
+        instanceIds: ['inst-1', 'inst-2'],
+        role: 'OPERATOR',
+      }),
+    ]);
+  });
+
+  it('восстанавливает фильтры после переподключения', () => {
+    const socket = createSocket();
+    socket.connect();
+    FakeWebSocket.last.open();
+
+    expect(socket.subscribe({ instanceIds: ['inst-1'] })).toBe(true);
+    expect(FakeWebSocket.last.sent).toHaveLength(1);
+
+    FakeWebSocket.last.serverClose();
+    jest.advanceTimersByTime(1000);
+    FakeWebSocket.last.open();
+
+    expect(FakeWebSocket.last.sent).toEqual([
+      JSON.stringify({ type: 'subscribe', instanceIds: ['inst-1'], role: '' }),
+    ]);
+  });
+
+  it('unsubscribe снимает фильтры', () => {
+    const socket = createSocket();
+    socket.connect();
+    FakeWebSocket.last.open();
+
+    socket.subscribe({ instanceIds: 'inst-9' });
+    socket.unsubscribe();
+
+    expect(socket.filters).toEqual({ instanceIds: [], role: '' });
+    expect(FakeWebSocket.last.sent.map((frame) => JSON.parse(frame))).toEqual([
+      { type: 'subscribe', instanceIds: ['inst-9'], role: '' },
+      { type: 'subscribe', instanceIds: [], role: '' },
+    ]);
+  });
+
+  it('без подписки клиент ничего не отправляет и получает всё', () => {
+    const socket = createSocket();
+    socket.connect();
+    FakeWebSocket.last.open();
+
+    expect(socket.filters).toBeNull();
+    expect(FakeWebSocket.last.sent).toEqual([]);
+  });
+});
+

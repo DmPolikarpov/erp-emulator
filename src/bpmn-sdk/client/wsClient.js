@@ -58,6 +58,8 @@ export class StatusSocket {
 
     this.socket = null;
     this.socketHandlers = null;
+    /** Серверные фильтры подписки (M7); `null` — клиент ничего не объявлял. */
+    this.filters = null;
     this.status = SOCKET_STATUS.CLOSED;
     this.shouldReconnect = false;
     this.attempts = 0;
@@ -180,11 +182,58 @@ export class StatusSocket {
     this.emit(SOCKET_EVENTS.STATUS, status);
   }
 
+  /**
+   * Объявляет серверные фильтры подписки (M7).
+   *
+   * Шлюз отсекает чужие экземпляры **до** отправки: без этого каждая вкладка
+   * получает события всех процессов. Фильтры восстанавливаются после
+   * переподключения — иначе после обрыва клиент молча получил бы всё.
+   *
+   * @param {Object} [filters]
+   * @param {string|string[]} [filters.instanceIds] интересующие экземпляры;
+   *   пусто — все.
+   * @param {string} [filters.role] роль сессии (заявленная, не аутентификация).
+   * @returns {boolean} удалось ли отправить фильтры сейчас.
+   */
+  subscribe(filters = {}) {
+    const source = filters && typeof filters === 'object' ? filters : {};
+    const list = Array.isArray(source.instanceIds)
+      ? source.instanceIds
+      : source.instanceIds
+        ? [source.instanceIds]
+        : [];
+
+    this.filters = {
+      instanceIds: list
+        .filter((id) => typeof id === 'string' && id.length > 0)
+        .map((id) => id.trim()),
+      role: typeof source.role === 'string' ? source.role.trim() : '',
+    };
+
+    return this.sendFilters();
+  }
+
+  /** Снимает серверные фильтры: клиент снова получает все экземпляры. */
+  unsubscribe() {
+    this.filters = { instanceIds: [], role: '' };
+    return this.sendFilters();
+  }
+
+  /** Отправляет текущие фильтры, если соединение открыто. */
+  sendFilters() {
+    if (!this.filters || this.status !== SOCKET_STATUS.OPEN) return false;
+
+    return this.send({ type: 'subscribe', ...this.filters });
+  }
+
   handleOpen(socket) {
     if (socket !== this.socket) return;
 
     this.attempts = 0;
     this.setStatus(SOCKET_STATUS.OPEN);
+
+    // После реконнекта шлюз ничего не помнит о подписке этого клиента.
+    this.sendFilters();
   }
 
   handleMessage(socket, event) {

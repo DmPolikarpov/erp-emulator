@@ -15,12 +15,15 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 import App from './App';
 import { beginRun, completeRun, loadRuns } from './metricsStore';
+import { saveMetricsCache } from './metricsApi';
 import { analyzeProject } from './projectRoles';
 import { createProject, listProjects } from './projectStore';
 import {
+  DAIRY_CLIENT_PROCESS_ID,
   DAIRY_PLANT_PROCESS_ID,
   DAIRY_PLANT_PROCESS_XML,
   DAIRY_PLANT_PROJECT_NAME,
+  DAIRY_PLANT_PROJECT_XML,
   DAIRY_SUPPLIER_PROCESS_ID,
   DAIRY_SUPPLIER_PROCESS_XML,
   DEFAULT_CUSTOMER_BPMN_XML,
@@ -248,12 +251,31 @@ jest.mock('./ordersApi', () => {
   };
 });
 
+/**
+ * API метрик (M7) подменяется так же, как заказы: панель руководителя ходит в
+ * шлюз при открытии кабинета, а тесты проверяют сценарий, а не сеть. Чистые
+ * функции модуля (`toPanelRuns`, кэш) остаются настоящими — им нужен только
+ * `localStorage`, который в jsdom есть.
+ */
+jest.mock('./metricsApi', () => {
+  const actual = jest.requireActual('./metricsApi');
+
+  return {
+    ...actual,
+    metricsClient: {
+      load: jest.fn(),
+    },
+  };
+});
+
 const {
   listOrders: mockListOrders,
   getOrder: mockGetOrder,
   createOrder: mockCreateOrder,
   attachInstance: mockAttachInstance,
 } = jest.requireMock('./ordersApi').ordersClient;
+
+const { load: mockLoadMetrics } = jest.requireMock('./metricsApi').metricsClient;
 
 /* ------------------------------------------------------------------ *
  * Вспомогательные функции
@@ -317,6 +339,11 @@ describe('App: интеграция с BPMN Client SDK', () => {
     mockGetOrder.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
     mockCreateOrder.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
     mockAttachInstance.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
+
+    // API метрик по умолчанию тоже недоступен — стенд без HTTP-шлюза: панель
+    // руководителя показывает метрики этого браузера (как до M7). Тесты M7
+    // задают ответ сервера сами.
+    mockLoadMetrics.mockResolvedValue({ ok: false, error: 'API метрик недоступен.' });
 
     mockViewerProps.length = 0;
     mockEditorProps.length = 0;
@@ -1330,6 +1357,125 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   /* ------------------------------------------------------------------ *
+   * Серверные метрики (`src/metricsApi.js`, M7)
+   * ------------------------------------------------------------------ */
+
+  /** Ответ движка: один завершённый запуск процесса заказчика. */
+  const serverMetricsResponse = () => ({
+    ok: true,
+    generatedAt: '2026-10-26T10:00:00.000Z',
+    slaMinutes: 30,
+    precisionMs: 1000,
+    defectEndEvents: [],
+    processes: [
+      {
+        processId: 'Process_MilkCustomer_v1',
+        processName: 'Закупка и приемка сырого молока',
+        runs: 1,
+        completed: 1,
+        active: 0,
+        terminated: 0,
+        averageCycleMs: 600000,
+        averageStepMs: 420000,
+        slaRuns: 1,
+        slaSteps: 1,
+        openSteps: 0,
+        defectRuns: 0,
+        defectShare: null,
+        lastRuns: [
+          {
+            instanceId: 'inst-cust-server',
+            startedAt: '2026-10-26T09:50:00.000Z',
+            finishedAt: '2026-10-26T10:00:00.000Z',
+            durationMs: 600000,
+            status: 'COMPLETED',
+            lastNode: 'EndEvent_Customer',
+            finishedBy: 'legacy',
+            slaBreached: true,
+            breachedSteps: [],
+          },
+        ],
+      },
+    ],
+    steps: [],
+    roles: [],
+    totals: { instances: 1, runs: 1, steps: 1, openSteps: 0, events: 0, definitions: 1 },
+    warnings: [],
+  });
+
+  /** Значение плитки метрики по её подписи. */
+  const tileText = (label) => {
+    const tile = screen
+      .getAllByTestId('metrics-tile')
+      .find((node) => node.dataset.label === label);
+
+    return tile ? tile.textContent : null;
+  };
+
+  it('панель руководителя показывает цифры сервера, а не копию браузера', async () => {
+    mockLoadMetrics.mockResolvedValue({
+      ok: true,
+      status: 200,
+      metrics: serverMetricsResponse(),
+    });
+
+    // Локальная метрика — по другому экземпляру и на 7 секунд: если панель
+    // возьмёт её, числа разойдутся с серверными (там 10 минут).
+    beginRun({
+      id: 'inst-cust-local',
+      org: 'CUSTOMER',
+      processId: 'Process_MilkCustomer_v1',
+      processName: 'Закупка и приемка сырого молока',
+      startedAt: '2026-10-12T10:00:00.000Z',
+    });
+    completeRun('inst-cust-local', { finishedAt: '2026-10-12T10:00:07.000Z' });
+
+    openAs('Руководитель Заказчика');
+
+    await waitFor(() =>
+      expect(screen.getByTestId('metrics-source').dataset.source).toBe('server')
+    );
+
+    const card = screen.getByTestId('metrics-process');
+
+    expect(screen.getByTestId('metrics-source').textContent).toContain('с сервера');
+    expect(card.dataset.processId).toBe('Process_MilkCustomer_v1');
+    expect(card.textContent).toContain('Закупка и приемка сырого молока');
+    expect(card.textContent).toContain('Заказчик');
+
+    // Столбик один — серверный запуск: локальная копия браузера не подмешалась.
+    const bars = screen.getAllByTestId('metrics-bar');
+
+    expect(bars).toHaveLength(1);
+    expect(bars[0].dataset.runId).toBe('inst-cust-server');
+
+    // Забывать серверные цифры из браузера нечем — кнопки «Очистить» нет.
+    expect(screen.queryByTestId('metrics-clear')).toBeNull();
+
+    // Истёкший SLA виден без консоли: разрезы движка.
+    expect(tileText('SLA')).toContain('1 / 1');
+    expect(tileText('Ожидание шага')).toContain('7 мин');
+  });
+
+  it('после F5 без шлюза панель показывает кэш последнего ответа сервера', async () => {
+    saveMetricsCache(serverMetricsResponse());
+    mockLoadMetrics.mockResolvedValue({ ok: false, error: 'API метрик недоступен.' });
+
+    openAs('Руководитель Заказчика');
+
+    await waitFor(() => expect(screen.getByTestId('metrics-error')).toBeTruthy());
+
+    expect(screen.getByTestId('metrics-source').dataset.source).toBe('cache');
+    expect(screen.getByTestId('metrics-error').textContent).toContain(
+      'API метрик недоступен'
+    );
+    expect(screen.getAllByTestId('metrics-bar')).toHaveLength(1);
+    expect(screen.getByTestId('metrics-process').dataset.processId).toBe(
+      'Process_MilkCustomer_v1'
+    );
+  });
+
+  /* ------------------------------------------------------------------ *
    * Проекты: загруженный BPMN играется без правок кода
    * ------------------------------------------------------------------ */
 
@@ -1394,7 +1540,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
    * приложение работает с ним как с любым загруженным BPMN: вход по каталогу
    * ролей, кабинет — по кнопкам схемы.
    */
-  it('кнопка «Молочный завод» создаёт проект из двух процессов', () => {
+  it('кнопка «Молочный завод» создаёт проект из трёх процессов', () => {
     render(<App />);
     fireEvent.click(screen.getByText('Проекты'));
     fireEvent.click(screen.getByText('Молочный завод'));
@@ -1407,14 +1553,238 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(getProcessIds(project.xml)).toEqual([
       DAIRY_PLANT_PROCESS_ID,
       DAIRY_SUPPLIER_PROCESS_ID,
+      DAIRY_CLIENT_PROCESS_ID,
     ]);
 
-    // Проект сразу открыт: подпись в шапке и роли обоих пулов на входе.
+    // Проект сразу открыт: подпись в шапке и роли всех трёх пулов на входе.
     expect(screen.getByText(/Проект:/).textContent).toContain(DAIRY_PLANT_PROJECT_NAME);
     expect(screen.getByText('Директор завода')).toBeTruthy();
     expect(screen.getByText('Менеджер по продажам')).toBeTruthy();
     expect(screen.getByText('Менеджер по продажам сырья')).toBeTruthy();
+    expect(screen.getByText('Менеджер клиента')).toBeTruthy();
   });
+  /**
+   * Третий контур (M5): клиент ведёт заказ сам.
+   *
+   * Проверяется вся цепочка кабинета: карточка уходит в API заказов, экземпляр
+   * стартует с префиксом `inst-client-`, привязывается к заказу третьим контуром,
+   * а шаг подтверждения приходит из кнопки схемы (не из кода кабинета).
+   */
+  it('клиент оформляет заказ и ведёт шаг подтверждения (M5)', async () => {
+    createProject({ name: 'Молочный завод (M5)', xml: DAIRY_PLANT_PROJECT_XML });
+
+    mockCreateOrder.mockResolvedValueOnce({
+      ok: true,
+      order: { orderNum: '№101', status: 'NEW' },
+    });
+    mockAttachInstance.mockImplementationOnce(async (orderNum, org, instanceId) => ({
+      ok: true,
+      order: {
+        orderNum,
+        status: 'IN_PROGRESS',
+        clientInstanceId: instanceId,
+        clientProcessState: 'ACTIVE',
+      },
+    }));
+
+    openAs('Менеджер клиента');
+
+    expect(screen.getByText(/Заказ готовой продукции/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText(/Оформить заказ заводу/));
+
+    await waitFor(() => expect(mockCreateOrder).toHaveBeenCalledTimes(1));
+    expect(mockCreateOrder.mock.calls[0][0]).toMatchObject({ orderNum: '№101' });
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
+    const [instanceId, eventName, startElementId, outputData] = mockSendEvent.mock.calls[0];
+
+    expect(instanceId).toMatch(/^inst-client-/);
+    expect(eventName).toBe('StartProcess');
+    expect(startElementId).toBe('Task_ConfirmOrder');
+    expect(outputData.orderNum).toBe('№101');
+
+    // Привязка идёт третьим контуром: по ней карточка живёт после F5.
+    await waitFor(() =>
+      expect(mockAttachInstance).toHaveBeenCalledWith('№101', 'CLIENT', instanceId)
+    );
+
+    // Токен на первом шаге клиента показывает кнопку из его схемы.
+    emitToken({
+      instanceId,
+      elementId: 'Task_ConfirmOrder',
+      state: 'ACTIVE',
+      payload: { orderNum: '№101' },
+    });
+
+    expect(screen.getByText(/Подтвердить номенклатуру/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText(/Подтвердить номенклатуру/));
+
+    // Шаг закрывается парой «событие + узел» из схемы: `Event_SendOrder` — throw
+    // сообщения ClientOrder, поэтому дальше процесс ждёт подтверждения завода.
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+    const [stepInstanceId, stepEvent, stepElementId] = mockSendEvent.mock.calls[1];
+
+    expect(stepInstanceId).toBe(instanceId);
+    expect(stepEvent).toBe('CompleteBlock');
+    expect(stepElementId).toBe('Event_SendOrder');
+  });
+
+  /**
+   * Приём заказа заводом (M5): экземпляр `Process_Dairy` создаёт движок по
+   * триггеру `Event_SendOrder`, поэтому завода в этот момент в кабинете нет —
+   * карточка уже заведена клиентом, а привязку делает подписка на токены.
+   * Без неё после F5 у завода не было бы текущего шага, и сценарий обрывался бы.
+   */
+  it('экземпляр завода из сообщения клиента привязывается к заказу (M5)', async () => {
+    createProject({ name: 'Молочный завод (M5, приём)', xml: DAIRY_PLANT_PROJECT_XML });
+
+    mockAttachInstance.mockResolvedValue({
+      ok: true,
+      order: {
+        orderNum: '№102',
+        status: 'IN_PROGRESS',
+        clientInstanceId: 'inst-client-102',
+        clientActiveElementId: 'Event_OrderConfirmed',
+        clientProcessState: 'ACTIVE',
+        customerInstanceId: 'inst-cust-102',
+        customerActiveElementId: 'Task_ReceiveOrder',
+        customerProcessState: 'ACTIVE',
+      },
+    });
+
+    openAs('Менеджер клиента');
+
+    emitToken({
+      instanceId: 'inst-cust-102',
+      elementId: 'Task_ReceiveOrder',
+      state: 'ACTIVE',
+      payload: { orderNum: '№102' },
+    });
+
+    await waitFor(() =>
+      expect(mockAttachInstance).toHaveBeenCalledWith('№102', 'CUSTOMER', 'inst-cust-102')
+    );
+
+    // Серверная карточка слилась со списком: у клиента виден его собственный шаг
+    // из ответа `attachInstance` — значит, привязка завода не «потеряла» заказ.
+    expect((await screen.findAllByText('Event_OrderConfirmed')).length).toBeGreaterThan(0);
+
+    // Повторный кадр того же экземпляра не шлёт второй POST.
+    emitToken({
+      instanceId: 'inst-cust-102',
+      elementId: 'Task_ReceiveOrder',
+      state: 'ACTIVE',
+      payload: { orderNum: '№102' },
+    });
+
+    expect(
+      mockAttachInstance.mock.calls.filter((call) => call[2] === 'inst-cust-102')
+    ).toHaveLength(1);
+  });
+
+  /**
+   * Вторая половина круга (M5): `OrderConfirmed` и `GoodsShipped` приходят
+   * токенами того же экземпляра клиента, который стартовал заказ. Карточка
+   * обязана перерисовать шаг по каждому сообщению — иначе сценарий «зависает»
+   * на `Event_SendOrder`. Отправку заказа проверяет тест выше, здесь — приём.
+   *
+   * Адрес кнопки приёмки берётся не из схемы, а из единственной исходящей
+   * связи (`resolveAction`): в действии `acceptGoods` нет `elementId`, и
+   * закрывает заказ узел `End_Client`.
+   */
+  it('сообщения завода двигают шаг клиента до приёмки (M5)', async () => {
+    createProject({ name: 'Молочный завод (M5, ответы)', xml: DAIRY_PLANT_PROJECT_XML });
+
+    // Заказ сохраняется в API: карточка не должна появиться «только в кабинете»,
+    // иначе тест проверял бы ветку деградации, а не сценарий M5.
+    mockCreateOrder.mockResolvedValueOnce({ ok: true, order: { status: 'NEW' } });
+
+    openAs('Менеджер клиента');
+
+    fireEvent.click(screen.getByText(/Оформить заказ заводу/));
+
+    // Экземпляр клиента стартует из кабинета: по его токенам движок и пришлёт
+    // ответы завода, поэтому в тесте берём настоящий идентификатор и номер
+    // заказа из отправленного payload.
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
+    const [instanceId] = mockSendEvent.mock.calls[0];
+    const payload = { orderNum: mockCreateOrder.mock.calls[0][0].orderNum };
+
+    expect(instanceId).toMatch(/^inst-client-/);
+
+    // Завод подтвердил заказ (MF2): клиент ждёт отгрузку.
+    emitToken({ instanceId, elementId: 'Event_OrderConfirmed', state: 'ACTIVE', payload });
+
+    expect((await screen.findAllByText('Event_OrderConfirmed')).length).toBeGreaterThan(0);
+
+    // Завод отгрузил (MF6): токен перешёл на второе catch-событие.
+    emitToken({ instanceId, elementId: 'Event_GoodsShipped', state: 'ACTIVE', payload });
+
+    expect((await screen.findAllByText('Event_GoodsShipped')).length).toBeGreaterThan(0);
+
+    // Партия у клиента: шаг приёмки с кнопкой из схемы клиента.
+    emitToken({ instanceId, elementId: 'Task_AcceptGoods', state: 'ACTIVE', payload });
+
+    const callsBefore = mockSendEvent.mock.calls.length;
+    fireEvent.click(await screen.findByText(/Принять партию по УПД/));
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(callsBefore + 1));
+    const [stepInstanceId, stepEvent, stepElementId] = mockSendEvent.mock.calls[callsBefore];
+
+    expect(stepInstanceId).toBe(instanceId);
+    expect(stepEvent).toBe('CompleteBlock');
+    expect(stepElementId).toBe('End_Client');
+  });
+  /**
+   * Роль сессии уходит в шлюз (M6): по `X-Actor-Role` движок сверяет
+   * `bpmn:potentialOwner` шага, поэтому роль — состояние клиента, а не только
+   * фильтр кнопок. Клиент живёт дольше сессии, отсюда эффект на `currentUser`.
+   */
+  it('клиент шлёт роль сессии после входа (M6)', async () => {
+    createProject({ name: 'Молочный завод (M6, роль)', xml: DAIRY_PLANT_PROJECT_XML });
+
+    openAs('Менеджер клиента');
+
+    await waitFor(() => expect(mockEngine.client.actor).toBe('CLIENT'));
+  });
+
+  /**
+   * Отказ в правах (M6): шлюз отвечает 403 с причиной, и кабинет показывает её
+   * вместо общего «попробуйте ещё раз» — иначе отказ выглядел бы поломкой.
+   */
+  it('403 на шаге показывает причину отказа (M6)', async () => {
+    createProject({ name: 'Молочный завод (M6, отказ)', xml: DAIRY_PLANT_PROJECT_XML });
+    mockCreateOrder.mockResolvedValueOnce({ ok: true, order: { status: 'NEW' } });
+
+    openAs('Менеджер клиента');
+    fireEvent.click(screen.getByText(/Оформить заказ заводу/));
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(1));
+    const [instanceId] = mockSendEvent.mock.calls[0];
+    const payload = { orderNum: mockCreateOrder.mock.calls[0][0].orderNum };
+
+    emitToken({ instanceId, elementId: 'Task_AcceptGoods', state: 'ACTIVE', payload });
+
+    // Так отвечает шлюз, когда роль сессии не совпала с ролью шага.
+    const reason =
+      'Роль WAREHOUSE не может завершить шаг Task_AcceptGoods: нужна роль CLIENT.';
+    mockSendEvent.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      error: 'Оркестратор вернул ошибку (403)',
+      details: reason,
+    });
+
+    fireEvent.click(await screen.findByText(/Принять партию по УПД/));
+
+    // Причина видна в карточке заказа и в блоке шага — проверяем, что она есть.
+    const shown = await screen.findAllByText(reason);
+    expect(shown.length).toBeGreaterThan(0);
+  });
+
+
 
   /* ------------------------------------------------------------------ *
    * Заказы как записи БД движка (`src/ordersApi.js`, M4)

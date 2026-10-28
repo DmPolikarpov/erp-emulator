@@ -132,6 +132,11 @@ export function normalizeOrder(serverOrder) {
     supplierInstanceId: serverOrder.supplierInstanceId || null,
     supplierActiveElementId: serverOrder.supplierActiveElementId || null,
     supplierProcessState: serverOrder.supplierProcessState || IDLE,
+    // Третий контур (M5). Сервер, не знающий о клиенте (старый деплой),
+    // присылает `undefined` — карточка тогда показывает `IDLE`, как и раньше.
+    clientInstanceId: serverOrder.clientInstanceId || null,
+    clientActiveElementId: serverOrder.clientActiveElementId || null,
+    clientProcessState: serverOrder.clientProcessState || IDLE,
     // Поля, которые живут только в кабинете (документы, пропуск, время): WS
     // дописывает их, сервер о них не знает.
     documents: null,
@@ -174,6 +179,8 @@ export function mergeOrders(remoteOrders, localOrders) {
         order.customerActiveElementId || current.customerActiveElementId || null,
       supplierActiveElementId:
         order.supplierActiveElementId || current.supplierActiveElementId || null,
+      clientActiveElementId:
+        order.clientActiveElementId || current.clientActiveElementId || null,
     };
   });
 

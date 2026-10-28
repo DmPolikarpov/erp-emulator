@@ -204,4 +204,90 @@ describe('MetricsPanel: инфографика по процессам', () => {
       'Process_SupplierSupply_v1'
     );
   });
+
+  it('подпись источника: сервер, кэш сервера или этот браузер', () => {
+    const { rerender } = render(
+      <MetricsPanel
+        runs={[runOf()]}
+        source="server"
+        generatedAt="2026-10-12T10:00:00.000Z"
+      />
+    );
+
+    expect(screen.getByTestId('metrics-source').dataset.source).toBe('server');
+    expect(screen.getByTestId('metrics-source').textContent).toContain('с сервера');
+    // Время расчёта на сервере видно руководителю (а не только в консоли).
+    expect(screen.getByTestId('metrics-source').textContent).toMatch(/\d{1,2}:\d{2}:\d{2}/);
+
+    rerender(<MetricsPanel runs={[runOf()]} source="cache" />);
+    expect(screen.getByTestId('metrics-source').textContent).toContain('кэш сервера');
+
+    rerender(<MetricsPanel runs={[runOf()]} />);
+    expect(screen.getByTestId('metrics-source').dataset.source).toBe('local');
+    expect(screen.getByTestId('metrics-source').textContent).toContain('этот браузер');
+  });
+
+  it('кнопка «Обновить» пересчитывает метрики на сервере', () => {
+    const onRefresh = jest.fn();
+
+    render(<MetricsPanel runs={[runOf()]} onRefresh={onRefresh} />);
+    fireEvent.click(screen.getByTestId('metrics-refresh'));
+
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    // Серверные цифры из браузера не забыть: кнопка «Очистить» не показывается.
+    expect(screen.queryByTestId('metrics-clear')).toBeNull();
+  });
+
+  it('ошибка API объясняет, откуда взяты цифры', () => {
+    render(
+      <MetricsPanel runs={[runOf()]} source="cache" error="API метрик недоступен." />
+    );
+
+    expect(screen.getByTestId('metrics-error').textContent).toContain(
+      'API метрик недоступен.'
+    );
+    expect(screen.getByTestId('metrics-error').textContent).toContain('кэша');
+  });
+
+  it('серверные разрезы: ожидание шага, SLA и доля брака', () => {
+    render(
+      <MetricsPanel
+        runs={[runOf()]}
+        source="server"
+        processMetrics={[
+          {
+            processId: 'Process_MilkCustomer_v1',
+            averageStepMs: 420000,
+            slaRuns: 1,
+            slaSteps: 2,
+            defectShare: 0.25,
+          },
+        ]}
+      />
+    );
+
+    expect(tileValue('Ожидание шага')).toBe('7 мин 00 с');
+    expect(tileValue('SLA')).toBe('1 / 2');
+    expect(tileValue('Брак')).toBe('25%');
+  });
+
+  it('без конечных узлов брака плитка «Брак» показывает прочерк', () => {
+    render(
+      <MetricsPanel
+        runs={[runOf()]}
+        source="server"
+        processMetrics={[{ processId: 'Process_MilkCustomer_v1', defectShare: null }]}
+      />
+    );
+
+    expect(tileValue('Брак')).toBe('—');
+  });
+
+  it('серверные плитки не добавляются, пока ответа сервера нет', () => {
+    render(<MetricsPanel runs={[runOf()]} />);
+
+    expect(tileValue('Ожидание шага')).toBeNull();
+    expect(tileValue('SLA')).toBeNull();
+    expect(tileValue('Брак')).toBeNull();
+  });
 });

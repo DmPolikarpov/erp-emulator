@@ -24,7 +24,7 @@
 export const SCHEMA_STORAGE_PREFIX = 'bpmn-schema:';
 
 /** Организации, у которых своя схема процесса. */
-export const SCHEMA_ORGS = ['CUSTOMER', 'SUPPLIER'];
+export const SCHEMA_ORGS = ['CUSTOMER', 'SUPPLIER', 'CLIENT'];
 
 /** Приводит код организации к каноническому виду (`customer` → `CUSTOMER`). */
 export function normalizeOrg(org) {

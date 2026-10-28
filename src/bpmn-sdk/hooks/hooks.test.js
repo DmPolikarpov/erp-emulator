@@ -15,6 +15,8 @@ function createSocketStub() {
     status: SOCKET_STATUS.CLOSED,
     connectCount: 0,
     disconnectCount: 0,
+    /** Объявленные шлюзу фильтры подписки (M7). */
+    subscriptions: [],
     get connected() {
       return this.status === SOCKET_STATUS.OPEN;
     },
@@ -27,6 +29,10 @@ function createSocketStub() {
     },
     emit(event, payload) {
       (listeners[event] || []).slice().forEach((listener) => listener(payload));
+    },
+    subscribe(filters) {
+      this.subscriptions.push(filters);
+      return true;
     },
     subscriberCount(event) {
       return (listeners[event] || []).length;
@@ -152,6 +158,22 @@ describe('useProcessTokens', () => {
     rerender({ ids: ['inst-cust-1', 'inst-supp-1'] });
 
     expect(socket.subscriberCount(SOCKET_EVENTS.TOKEN)).toBe(1);
+  });
+
+  it('объявляет экземпляры шлюзу, чтобы не получать чужие события', () => {
+    const socket = createSocketStub();
+    renderHook(() => useProcessTokens(socket, ['inst-cust-1', 'inst-supp-1']));
+
+    expect(socket.subscriptions).toEqual([
+      { instanceIds: ['inst-cust-1', 'inst-supp-1'] },
+    ]);
+  });
+
+  it('без экземпляров серверную подписку не сужает', () => {
+    const socket = createSocketStub();
+    renderHook(() => useProcessTokens(socket, []));
+
+    expect(socket.subscriptions).toEqual([]);
   });
 
   it('отписывается при размонтировании и умеет сбрасывать состояние', () => {

@@ -11,13 +11,18 @@
  *    роли кнопок и исполнителей (`bpmn:potentialOwner`) объявлены каталогом:
  *    иначе роль не появится на входе в кабинет;
  *  - у каждого узла и связи есть DI: без фигуры bpmn-js нарисует пустой холст;
- *  - проект — кооперация двух процессов, второй пул сдвинут на
- *    `DAIRY_PROJECT_ROW_OFFSET` и не перекрывает первый.
+ *  - проект — кооперация трёх процессов: завод, поставщик и клиент. Каждый
+ *    следующий пул сдвинут на `DAIRY_PROJECT_ROW_OFFSET`, поэтому пулы не
+ *    перекрываются, а контуры кабинета (`CUSTOMER`, `SUPPLIER`, `CLIENT`) идут
+ *    в порядке дорожек.
  *
  * Запуск: `npm test -- dairyPlant`.
  */
 
 import {
+  DAIRY_CLIENT_PARTICIPANT_NAME,
+  DAIRY_CLIENT_PROCESS_ID,
+  DAIRY_CLIENT_PROCESS_XML,
   DAIRY_PLANT_PARTICIPANT_NAME,
   DAIRY_PLANT_PROCESS_ID,
   DAIRY_PLANT_PROCESS_XML,
@@ -43,6 +48,7 @@ import {
   validateEngineSchema,
   validateProjectSchema,
 } from '../xml/bpmnXml';
+import { extractProcessXml } from '../xml/projectXml';
 
 /** Схемы процессов проекта: ожидаемые роли каталога и подписи пулов. */
 const PROCESSES = [
@@ -59,6 +65,13 @@ const PROCESSES = [
     xml: DAIRY_SUPPLIER_PROCESS_XML,
     participant: DAIRY_SUPPLIER_PARTICIPANT_NAME,
     roles: 3,
+  },
+  {
+    label: 'клиент',
+    id: DAIRY_CLIENT_PROCESS_ID,
+    xml: DAIRY_CLIENT_PROCESS_XML,
+    participant: DAIRY_CLIENT_PARTICIPANT_NAME,
+    roles: 2,
   },
 ];
 
@@ -395,6 +408,46 @@ describe('dairyPlant: кнопки и роли', () => {
     expect(DAIRY_SUPPLIER_PROCESS_XML).toContain('messageRef="Message_MilkShipped"');
     expect(flowNodeIds(DAIRY_PLANT_PROCESS_XML)).toContain('Event_MilkShipped');
   });
+
+  /**
+   * Обратный путь сообщений (M5): завод отвечает клиенту, а не только ждёт ответа
+   * поставщика. Без этих двух throw-событий процесс клиента останавливался на
+   * `Event_OrderConfirmed` и до приёмки не доходил.
+   */
+  it('отвечает клиенту подтверждением и отгрузкой (M5)', () => {
+    // MF2 — сразу после обработки заказа: клиент узнаёт о подтверждении до
+    // проверки остатков, иначе ждал бы его, пока завод закупает сырьё.
+    expect(getLocalName(elementById(DAIRY_PLANT_PROCESS_XML, 'Event_ConfirmOrder'))).toBe(
+      'intermediateThrowEvent'
+    );
+    expect(flowIndex(DAIRY_PLANT_PROCESS_XML)).toMatchObject({
+      SF3: { sourceRef: 'Task_ProcessOrder', targetRef: 'Event_ConfirmOrder' },
+      SF3_Message: { sourceRef: 'Event_ConfirmOrder', targetRef: 'Task_CheckStock' },
+    });
+
+    // MF6 — после отгрузки: ветки «со склада» и «после производства» сходятся на
+    // `Task_Ship`, поэтому сообщение уходит в обеих.
+    expect(getLocalName(elementById(DAIRY_PLANT_PROCESS_XML, 'Event_ShipGoods'))).toBe(
+      'intermediateThrowEvent'
+    );
+    expect(flowIndex(DAIRY_PLANT_PROCESS_XML)).toMatchObject({
+      SF20_Ship: { sourceRef: 'Task_Ship', targetRef: 'Event_ShipGoods' },
+      SF20_Message: { sourceRef: 'Event_ShipGoods', targetRef: 'End_Main' },
+    });
+
+    // `messageRef` разрешается в объявления на корне схемы: имена отправки и
+    // ожидания на стороне клиента должны совпадать буквально.
+    expect(DAIRY_PLANT_PROCESS_XML).toContain(
+      '<bpmn:message id="Message_OrderConfirmed" name="OrderConfirmed" />'
+    );
+    expect(DAIRY_PLANT_PROCESS_XML).toContain(
+      '<bpmn:message id="Message_GoodsShipped" name="GoodsShipped" />'
+    );
+    expect(DAIRY_PLANT_PROCESS_XML).toContain('messageRef="Message_OrderConfirmed"');
+    expect(DAIRY_PLANT_PROCESS_XML).toContain('messageRef="Message_GoodsShipped"');
+    expect(DAIRY_CLIENT_PROCESS_XML).toContain('messageRef="Message_OrderConfirmed"');
+    expect(DAIRY_CLIENT_PROCESS_XML).toContain('messageRef="Message_GoodsShipped"');
+  });
 });
 
 /**
@@ -502,10 +555,11 @@ describe('dairyPlant: внешние задачи ERP', () => {
 });
 
 describe('dairyPlant: проект', () => {
-  it('собирает кооперацию из двух процессов', () => {
+  it('собирает кооперацию из трёх процессов', () => {
     expect(getProcessIds(DAIRY_PLANT_PROJECT_XML)).toEqual([
       DAIRY_PLANT_PROCESS_ID,
       DAIRY_SUPPLIER_PROCESS_ID,
+      DAIRY_CLIENT_PROCESS_ID,
     ]);
 
     const processes = getProjectProcesses(DAIRY_PLANT_PROJECT_XML);
@@ -523,6 +577,12 @@ describe('dairyPlant: проект', () => {
         isExecutable: true,
         participantName: DAIRY_SUPPLIER_PARTICIPANT_NAME,
       },
+      {
+        id: DAIRY_CLIENT_PROCESS_ID,
+        name: expect.any(String),
+        isExecutable: true,
+        participantName: DAIRY_CLIENT_PARTICIPANT_NAME,
+      },
     ]);
 
     // Имя проекта — подпись в списке проектов.
@@ -532,7 +592,7 @@ describe('dairyPlant: проект', () => {
     );
   });
 
-  it('проходит проверку проекта: оба процесса совместимы с движком', () => {
+  it('проходит проверку проекта: все процессы совместимы с движком', () => {
     const report = validateProjectSchema(DAIRY_PLANT_PROJECT_XML);
 
     expect(report.problems).toEqual([]);
@@ -540,6 +600,7 @@ describe('dairyPlant: проект', () => {
     expect(report.processes.map((process) => process.id)).toEqual([
       DAIRY_PLANT_PROCESS_ID,
       DAIRY_SUPPLIER_PROCESS_ID,
+      DAIRY_CLIENT_PROCESS_ID,
     ]);
   });
 
@@ -568,24 +629,186 @@ describe('dairyPlant: проект', () => {
         };
       });
 
-    expect(frames).toHaveLength(2);
-    expect(frames[0]).toMatchObject({ element: 'Participant_' + DAIRY_PLANT_PROCESS_ID, y: 0 });
-    expect(frames[1]).toMatchObject({
-      element: 'Participant_' + DAIRY_SUPPLIER_PROCESS_ID,
-      y: DAIRY_PROJECT_ROW_OFFSET - 20,
-    });
-
-    // Пулы стоят друг под другом: нижняя граница завода выше начала поставщика.
-    expect(frames[0].y + frames[0].height).toBeLessThan(frames[1].y);
-
-    // Фигуры второго процесса сдвинуты вместе с пулом.
-    const start = Array.from(project.getElementsByTagName('*'))
-      .filter((node) => getLocalName(node) === 'BPMNShape')
-      .find((node) => node.getAttribute('bpmnElement') === 'Start_Supplier');
-    const startBounds = childrenOf(start).find(
-      (child) => getLocalName(child) === 'Bounds'
+    // Три пула — три контура кабинета, и порядок дорожек задаёт их порядок.
+    expect(frames).toHaveLength(3);
+    expect(frames.map((frame) => frame.element)).toEqual(
+      PROCESSES.map(({ id }) => 'Participant_' + id)
     );
 
-    expect(Number(startBounds.getAttribute('y'))).toBe(82 + DAIRY_PROJECT_ROW_OFFSET);
+    frames.forEach((frame, index) => {
+      expect(frame.y).toBe(index === 0 ? 0 : index * DAIRY_PROJECT_ROW_OFFSET - 20);
+    });
+
+    // Пулы стоят друг под другом: нижняя граница пула выше начала следующего.
+    expect(frames[0].y + frames[0].height).toBeLessThan(frames[1].y);
+    expect(frames[1].y + frames[1].height).toBeLessThan(frames[2].y);
+
+    // Фигуры процессов сдвинуты вместе со своими пулами.
+    const shapeYOf = (elementId) => {
+      const shape = Array.from(project.getElementsByTagName('*'))
+        .filter((node) => getLocalName(node) === 'BPMNShape')
+        .find((node) => node.getAttribute('bpmnElement') === elementId);
+      const bounds = childrenOf(shape).find((child) => getLocalName(child) === 'Bounds');
+
+      return Number(bounds.getAttribute('y'));
+    };
+
+    expect(shapeYOf('Start_Supplier')).toBe(82 + DAIRY_PROJECT_ROW_OFFSET);
+    expect(shapeYOf('Start_Client')).toBe(82 + 2 * DAIRY_PROJECT_ROW_OFFSET);
+  });
+});
+
+/**
+ * Третий пул проекта — клиент (`Part_Client`, M5).
+ *
+ * Процесс входит в `DAIRY_PLANT_PROJECT_XML` третьей дорожкой, поэтому кабинет
+ * получает контур `CLIENT`. Схема проверяется теми же инвариантами, что завод и
+ * поставщик: движок, связи, роли, кнопки, сообщения обмена и DI.
+ */
+describe('dairyPlant: клиент (третий пул, M5)', () => {
+  const xml = DAIRY_CLIENT_PROCESS_XML;
+
+  it('проходит проверку движка и объявляет роли каталогом', () => {
+    expect(parseXml(xml).getElementsByTagName('parsererror')).toHaveLength(0);
+    expect(validateEngineSchema(xml)).toEqual({ ok: true, problems: [] });
+    expect(getProcessIds(xml)).toEqual([DAIRY_CLIENT_PROCESS_ID]);
+
+    const roles = getRoleCatalog(xml, DAIRY_CLIENT_PROCESS_ID);
+
+    // `CLIENT` ведёт шаги, `CLIENT_DIRECTOR` — руководитель контура (EXECUTIVE).
+    expect(roles.map((role) => role.code).sort()).toEqual(['CLIENT', 'CLIENT_DIRECTOR']);
+    expect(roles.find((role) => role.code === 'CLIENT_DIRECTOR')).toMatchObject({
+      title: 'Руководитель клиента',
+      kind: 'EXECUTIVE',
+    });
+  });
+
+  it('связи сходятся на существующих узлах и объявлены у узлов', () => {
+    const nodes = flowNodeIds(xml);
+    const flows = flowIndex(xml);
+
+    // Маршрут линейный: заказ → подтверждение заводом → отгрузка → приёмка.
+    expect(nodes).toEqual([
+      'Start_Client',
+      'Task_ConfirmOrder',
+      'Event_SendOrder',
+      'Event_OrderConfirmed',
+      'Event_GoodsShipped',
+      'Task_AcceptGoods',
+      'End_Client',
+    ]);
+
+    Object.keys(flows).forEach((flowId) => {
+      expect(nodes).toContain(flows[flowId].sourceRef);
+      expect(nodes).toContain(flows[flowId].targetRef);
+    });
+  });
+
+  it('два шага клиента ведут его же сотрудники', () => {
+    const tasks = processChildren(xml, 'userTask');
+
+    expect(tasks.map((task) => task.getAttribute('id'))).toEqual([
+      'Task_ConfirmOrder',
+      'Task_AcceptGoods',
+    ]);
+
+    tasks.forEach((task) => {
+      const owner = childrenOf(task).find(
+        (child) => getLocalName(child) === 'potentialOwner'
+      );
+
+      expect(owner.getAttribute('name')).toBe('CLIENT');
+    });
+
+    const start = getStartAction(xml);
+
+    expect(start.elementId).toBe('Start_Client');
+    expect(start.action).toMatchObject({
+      id: 'placeClientOrder',
+      role: 'CLIENT',
+      elementId: 'Task_ConfirmOrder',
+    });
+
+    // Кнопки подтверждения и приёмки ведут в узлы этого же процесса.
+    const nodes = flowNodeIds(xml);
+    const actions = listActions(xml);
+
+    expect(actions.map(({ action }) => action.id).sort()).toEqual([
+      'acceptGoods',
+      'confirmClientOrder',
+      'placeClientOrder',
+    ]);
+
+    actions.forEach(({ elementId, action }) => {
+      expect(nodes).toContain(elementId);
+      expect(nodes).toContain(resolveAction(xml, elementId, action).elementId);
+    });
+  });
+
+  it('обменивается с заводом сообщениями ClientOrder/OrderConfirmed/GoodsShipped', () => {
+    const messages = childrenOf(parseXml(xml).documentElement)
+      .filter((child) => getLocalName(child) === 'message')
+      .map((message) => ({
+        id: message.getAttribute('id'),
+        name: message.getAttribute('name'),
+      }));
+
+    expect(messages).toEqual([
+      { id: 'Message_ClientOrder', name: 'ClientOrder' },
+      { id: 'Message_OrderConfirmed', name: 'OrderConfirmed' },
+      { id: 'Message_GoodsShipped', name: 'GoodsShipped' },
+    ]);
+
+    // MF1 клиент отправляет throw-событием, MF2 и MF6 — ждёт catch-событиями.
+    expect(getLocalName(elementById(xml, 'Event_SendOrder'))).toBe('intermediateThrowEvent');
+    expect(getLocalName(elementById(xml, 'Event_OrderConfirmed'))).toBe(
+      'intermediateCatchEvent'
+    );
+    expect(getLocalName(elementById(xml, 'Event_GoodsShipped'))).toBe(
+      'intermediateCatchEvent'
+    );
+
+    expect(xml).toContain('messageRef="Message_ClientOrder"');
+    expect(xml).toContain('messageRef="Message_OrderConfirmed"');
+    expect(xml).toContain('messageRef="Message_GoodsShipped"');
+  });
+
+  /**
+   * MF1 исполняет движок: кнопка подтверждения не запускает завод сама, а
+   * throw-событие несёт `trg:processTrigger`. Иначе заказ клиента попадал бы в
+   * «пустое» сообщение — без экземпляра, который его ждёт.
+   */
+  it('создаёт экземпляр завода триггером узла (M5)', () => {
+    expect(getElementTrigger(xml, 'Event_SendOrder')).toMatchObject({
+      targetProcessId: DAIRY_PLANT_PROCESS_ID,
+      instancePrefix: 'inst-cust-',
+      startElementId: 'Event_SendOrder',
+      firstElementId: 'Task_ReceiveOrder',
+      payloadKeys: 'orderNum',
+    });
+
+    // Первый шаг завода — приёмка заказа: триггер входит в тот же узел, который
+    // объявлен кнопкой старта завода (`Start_Dairy`), поэтому ручной старт не
+    // нужен, а кабинет завода видит активный шаг по токену.
+    expect(getStartAction(DAIRY_PLANT_PROCESS_XML).action.elementId).toBe(
+      getElementTrigger(xml, 'Event_SendOrder').firstElementId
+    );
+
+    // В движок уходит нарезка проекта, а не проект целиком: без namespace
+    // триггера и объявления сообщения он не создаст экземпляр завода.
+    const clientSlice = extractProcessXml(DAIRY_PLANT_PROJECT_XML, DAIRY_CLIENT_PROCESS_ID);
+
+    expect(clientSlice).toContain('xmlns:trg="http://erp.mes/schema/bpmn/trigger"');
+    expect(getElementTrigger(clientSlice, 'Event_SendOrder')).toMatchObject({
+      targetProcessId: DAIRY_PLANT_PROCESS_ID,
+      instancePrefix: 'inst-cust-',
+    });
+  });
+
+  it('рисует каждый узел и каждую связь', () => {
+    const { shapes, edges } = diIndex(xml);
+
+    flowNodeIds(xml).forEach((nodeId) => expect(shapes).toContain(nodeId));
+    Object.keys(flowIndex(xml)).forEach((flowId) => expect(edges).toContain(flowId));
   });
 });

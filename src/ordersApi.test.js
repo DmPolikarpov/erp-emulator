@@ -37,6 +37,9 @@ const SERVER_ORDER = {
   supplierInstanceId: null,
   supplierActiveElementId: null,
   supplierProcessState: 'IDLE',
+  clientInstanceId: null,
+  clientActiveElementId: null,
+  clientProcessState: 'IDLE',
 };
 
 /** Ответ шлюза на успешный запрос. */
@@ -172,6 +175,33 @@ describe('ordersApi: соответствие карточки кабинету'
     const local = [{ ...normalizeOrder(SERVER_ORDER), customerActiveElementId: 'Task_SendPO' }];
 
     expect(mergeOrders(remote, local)[0].customerActiveElementId).toBe('Task_SendPO');
+  });
+
+  it('ведёт третий контур (M5) рядом с двумя первыми', () => {
+    const order = normalizeOrder({
+      ...SERVER_ORDER,
+      clientInstanceId: 'inst-client-abc123',
+      clientActiveElementId: 'Task_ConfirmOrder',
+      clientProcessState: 'ACTIVE',
+    });
+
+    expect(order.clientInstanceId).toBe('inst-client-abc123');
+    expect(order.clientProcessState).toBe('ACTIVE');
+    // Первые две стороны не подменяются данными клиента.
+    expect(order.customerActiveElementId).toBe('Task_ReceiveOrder');
+    expect(order.supplierProcessState).toBe('IDLE');
+
+    // Старый сервер (без полей клиента) не ломает карточку.
+    expect(normalizeOrder(SERVER_ORDER).clientProcessState).toBe('IDLE');
+  });
+
+  it('шаг клиента из WS переживает пустой ответ сервера', () => {
+    const remote = [{ ...normalizeOrder(SERVER_ORDER), clientActiveElementId: null }];
+    const local = [
+      { ...normalizeOrder(SERVER_ORDER), clientActiveElementId: 'Task_AcceptGoods' },
+    ];
+
+    expect(mergeOrders(remote, local)[0].clientActiveElementId).toBe('Task_AcceptGoods');
   });
 });
 describe('ordersApi: HTTP-клиент', () => {

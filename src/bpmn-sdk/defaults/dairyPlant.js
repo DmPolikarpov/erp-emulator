@@ -5,9 +5,10 @@ import { buildProjectXml } from '../xml/projectXml';
  * производства и отгрузки.
  *
  * Схема выросла из `wip/edvanced_dairy_plant.bpmn` (три пула: Клиент, Молочный
- * завод, Поставщик сырья). В проект вошли два процесса — завод и поставщик:
- * клиент в демо-кабинете не ведёт шагов, его роль играет кнопка старта завода
- * (`createOrder` на стартовом событии).
+ * завод, Поставщик сырья). В проект вошли все три процесса: завод, поставщик и
+ * клиент (M5). Каждый получает свой контур кабинета (`CUSTOMER`, `SUPPLIER`,
+ * `CLIENT` — по порядку пулов), поэтому заказ на готовую продукцию клиент ведёт
+ * сам, а не кнопкой старта завода.
  *
  * Почему схему пришлось «разложить», а не положить как есть:
  *
@@ -38,6 +39,7 @@ import { buildProjectXml } from '../xml/projectXml';
  *    `dairyPlant.test.js`;
  *  - процессные роли (`role:catalog`) — это вход в кабинет: 9 ролей завода и
  *    3 роли поставщика, руководители (`kind="EXECUTIVE"`) видят схему и метрики;
+ *    у клиента в его схеме 2 роли (`CLIENT` и `CLIENT_DIRECTOR`);
  *  - обращения к ERP (`Task_ERP_*`) — это `bpmn:serviceTask` с
  *    `camunda:topic="erp"`: движок сам публикует команду в
  *    `mes.out.v1.cmd.erp`, а ответ воркера (`mes.in.v1.erp.response`) двигает
@@ -54,6 +56,9 @@ export const DAIRY_PLANT_PROCESS_ID = 'Process_Dairy';
 /** Идентификатор процесса поставщика сырья. */
 export const DAIRY_SUPPLIER_PROCESS_ID = 'Process_Supplier';
 
+/** Идентификатор процесса клиента завода (третий пул проекта, M5). */
+export const DAIRY_CLIENT_PROCESS_ID = 'Process_Client';
+
 /** Имя проекта: подпись в списке проектов и в шапке кабинета. */
 export const DAIRY_PLANT_PROJECT_NAME = 'Молочный завод: заказ → производство → отгрузка';
 
@@ -69,6 +74,13 @@ export const DAIRY_SALES_ROLE = 'SALES';
  * 150 px, производство занимает три ряда (норма / коррекция / авария). Проект
  * ставит второй процесс ниже на `PROJECT_ROW_OFFSET`, поэтому здесь начало
  * координат — верхняя дорожка.
+ *
+ * С клиентом завод обменивается сообщениями (M5, MF2/MF6): подтверждение заказа
+ * уходит после `Task_ProcessOrder` (`Event_ConfirmOrder` → `OrderConfirmed`),
+ * отгрузка — после `Task_Ship` (`Event_ShipGoods` → `GoodsShipped`). Оба
+ * сообщения движок находит по `orderNum`, поэтому завод не знает
+ * `instanceId` процесса клиента. Обратное направление (MF1, `ClientOrder`)
+ * объявлено триггером в схеме клиента: экземпляр завода создаёт движок.
  */
 export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
@@ -86,6 +98,9 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
   <bpmn:message id="Message_PurchaseOrder" name="PurchaseOrder" />
   <bpmn:message id="Message_PurchaseOrderConfirmed" name="PurchaseOrderConfirmed" />
   <bpmn:message id="Message_MilkShipped" name="MilkShipped" />
+  <!-- Обмен с клиентом (MF2/MF6): подтверждение заказа и отгрузка готовой продукции. -->
+  <bpmn:message id="Message_OrderConfirmed" name="OrderConfirmed" />
+  <bpmn:message id="Message_GoodsShipped" name="GoodsShipped" />
 
   <bpmn:process id="Process_Dairy" name="Молочный завод: заказ, производство, отгрузка" isExecutable="true">
     <bpmn:extensionElements>
@@ -108,6 +123,7 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
         <bpmn:flowNodeRef>Start_Dairy</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Task_ReceiveOrder</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Task_ProcessOrder</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_ConfirmOrder</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Task_CheckStock</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>Gateway_Stock</bpmn:flowNodeRef>
       </bpmn:lane>
@@ -159,15 +175,17 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:lane id="Lane_Logistics" name="Логистика">
         <bpmn:documentation>ДИ-ЛОГ-01: холодовая цепь, комплектация, УПД и ТТН.</bpmn:documentation>
         <bpmn:flowNodeRef>Task_Ship</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_ShipGoods</bpmn:flowNodeRef>
         <bpmn:flowNodeRef>End_Main</bpmn:flowNodeRef>
       </bpmn:lane>
     </bpmn:laneSet>
 
-    <!-- Продажи: заказ клиента приходит сообщением, его принимает кнопка старта. -->
+    <!-- Продажи: заказ клиента приходит сообщением (MF1), кнопка старта — ручной вход. -->
     <bpmn:startEvent id="Start_Dairy" name="Заказ клиента получен">
       <bpmn:extensionElements>
         <act:userAction id="createOrder" label="Принять заказ клиента" role="SALES" icon="PlusCircle" elementId="Task_ReceiveOrder" />
       </bpmn:extensionElements>
+      <bpmn:documentation>СОП-01/MF1: заказ приходит от клиента сообщением ClientOrder — экземпляр завода создаёт триггер узла клиента. Кнопка старта осталась для ручного заведения заказа, когда клиентского контура нет.</bpmn:documentation>
       <bpmn:outgoing>SF1</bpmn:outgoing>
     </bpmn:startEvent>
 
@@ -191,13 +209,21 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="SALES" />
     </bpmn:userTask>
 
+    <!-- Подтверждение уходит клиенту сообщением (MF2): оно будит его catch. -->
+    <bpmn:intermediateThrowEvent id="Event_ConfirmOrder" name="Заказ подтверждён клиенту">
+      <bpmn:documentation>Сообщение OrderConfirmed: клиент знает, что объём и срок подтверждены, и ждёт отгрузку. Движок доставляет его по orderNum, ветку закупки сырья это не затрагивает.</bpmn:documentation>
+      <bpmn:incoming>SF3</bpmn:incoming>
+      <bpmn:outgoing>SF3_Message</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_OrderConfirmed" />
+    </bpmn:intermediateThrowEvent>
+
     <bpmn:userTask id="Task_CheckStock" name="Проверить остатки ГП">
       <bpmn:extensionElements>
         <act:userAction id="haveStock" label="ГП хватает — отгрузить со склада" role="SALES" icon="Truck" elementId="Task_Ship" variables="stockSufficient=true" />
         <act:userAction id="needPurchase" label="ГП не хватает — закупить сырьё" role="SALES" icon="ShoppingCart" elementId="Task_CreatePO" variables="stockSufficient=false" />
       </bpmn:extensionElements>
       <bpmn:documentation>СОП-03: запрос остатков готовой продукции в 1С:ERP и оценка покрытия заказа.</bpmn:documentation>
-      <bpmn:incoming>SF3</bpmn:incoming>
+      <bpmn:incoming>SF3_Message</bpmn:incoming>
       <bpmn:outgoing>SF4</bpmn:outgoing>
       <bpmn:potentialOwner name="SALES" />
     </bpmn:userTask>
@@ -498,14 +524,23 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="LOGISTICS" />
     </bpmn:userTask>
 
-    <bpmn:endEvent id="End_Main" name="Заказ выполнен">
+    <!-- Отгрузка уходит клиенту сообщением (MF6): клиент переходит к приёмке. -->
+    <bpmn:intermediateThrowEvent id="Event_ShipGoods" name="Продукция отгружена клиенту">
+      <bpmn:documentation>Сообщение GoodsShipped: партия передана перевозчику, клиент принимает её по УПД. Ветки «со склада» и «после производства» сходятся в Task_Ship, поэтому сообщение уходит в обеих.</bpmn:documentation>
       <bpmn:incoming>SF20_Ship</bpmn:incoming>
+      <bpmn:outgoing>SF20_Message</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_GoodsShipped" />
+    </bpmn:intermediateThrowEvent>
+
+    <bpmn:endEvent id="End_Main" name="Заказ выполнен">
+      <bpmn:incoming>SF20_Message</bpmn:incoming>
     </bpmn:endEvent>
 
     <!-- Связи. Ветки шлюзов названы по условию: имя читается на схеме. -->
     <bpmn:sequenceFlow id="SF1" sourceRef="Start_Dairy" targetRef="Task_ReceiveOrder" />
     <bpmn:sequenceFlow id="SF2" sourceRef="Task_ReceiveOrder" targetRef="Task_ProcessOrder" />
-    <bpmn:sequenceFlow id="SF3" sourceRef="Task_ProcessOrder" targetRef="Task_CheckStock" />
+    <bpmn:sequenceFlow id="SF3" sourceRef="Task_ProcessOrder" targetRef="Event_ConfirmOrder" />
+    <bpmn:sequenceFlow id="SF3_Message" sourceRef="Event_ConfirmOrder" targetRef="Task_CheckStock" />
     <bpmn:sequenceFlow id="SF4" sourceRef="Task_CheckStock" targetRef="Gateway_Stock" />
     <bpmn:sequenceFlow id="SF5" name="Нет" sourceRef="Gateway_Stock" targetRef="Task_CreatePO" />
     <bpmn:sequenceFlow id="SF6" name="Да" sourceRef="Gateway_Stock" targetRef="Task_Ship">
@@ -553,7 +588,8 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
     <bpmn:sequenceFlow id="SF_T_Esc2" sourceRef="Tech_LogDegradation" targetRef="Task_ERP_HandleDeviation" />
     <bpmn:sequenceFlow id="SF_T_Esc3" sourceRef="Task_ERP_HandleDeviation" targetRef="End_ERP_DeviationLogged" />
     <bpmn:sequenceFlow id="SF_T_Err3" sourceRef="Task_ERP_CriticalAlert" targetRef="End_ERP_Aborted" />
-    <bpmn:sequenceFlow id="SF20_Ship" sourceRef="Task_Ship" targetRef="End_Main" />
+    <bpmn:sequenceFlow id="SF20_Ship" sourceRef="Task_Ship" targetRef="Event_ShipGoods" />
+    <bpmn:sequenceFlow id="SF20_Message" sourceRef="Event_ShipGoods" targetRef="End_Main" />
   </bpmn:process>
 
   <bpmndi:BPMNDiagram id="BPMNDiagram_Dairy">
@@ -595,13 +631,19 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmndi:BPMNShape id="Task_ProcessOrder_di" bpmnElement="Task_ProcessOrder">
         <dc:Bounds x="380" y="60" width="110" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_ConfirmOrder_di" bpmnElement="Event_ConfirmOrder">
+        <dc:Bounds x="510" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="473" y="125" width="110" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="Task_CheckStock_di" bpmnElement="Task_CheckStock">
-        <dc:Bounds x="530" y="60" width="110" height="80" />
+        <dc:Bounds x="566" y="60" width="110" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="Gateway_Stock_di" bpmnElement="Gateway_Stock" isMarkerVisible="true">
-        <dc:Bounds x="680" y="80" width="40" height="40" />
+        <dc:Bounds x="716" y="80" width="40" height="40" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="662" y="127" width="77" height="27" />
+          <dc:Bounds x="698" y="127" width="77" height="27" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
 
@@ -740,10 +782,16 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmndi:BPMNShape id="Task_Ship_di" bpmnElement="Task_Ship">
         <dc:Bounds x="2980" y="1090" width="110" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="End_Main_di" bpmnElement="End_Main">
-        <dc:Bounds x="3140" y="1112" width="36" height="36" />
+      <bpmndi:BPMNShape id="Event_ShipGoods_di" bpmnElement="Event_ShipGoods">
+        <dc:Bounds x="3110" y="1112" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="3128" y="1155" width="61" height="14" />
+          <dc:Bounds x="3086" y="1155" width="84" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Main_di" bpmnElement="End_Main">
+        <dc:Bounds x="3180" y="1112" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3168" y="1155" width="61" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
 
@@ -757,19 +805,23 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF3_di" bpmnElement="SF3">
         <di:waypoint x="490" y="100" />
-        <di:waypoint x="530" y="100" />
+        <di:waypoint x="510" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF3_Message_di" bpmnElement="SF3_Message">
+        <di:waypoint x="546" y="100" />
+        <di:waypoint x="566" y="100" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF4_di" bpmnElement="SF4">
-        <di:waypoint x="640" y="100" />
-        <di:waypoint x="680" y="100" />
+        <di:waypoint x="676" y="100" />
+        <di:waypoint x="716" y="100" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF5_di" bpmnElement="SF5">
-        <di:waypoint x="700" y="120" />
-        <di:waypoint x="700" y="260" />
+        <di:waypoint x="736" y="120" />
+        <di:waypoint x="736" y="260" />
         <di:waypoint x="760" y="260" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF6_di" bpmnElement="SF6">
-        <di:waypoint x="720" y="100" />
+        <di:waypoint x="756" y="100" />
         <di:waypoint x="3420" y="100" />
         <di:waypoint x="3420" y="1050" />
         <di:waypoint x="3035" y="1050" />
@@ -918,7 +970,11 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="SF20_Ship_di" bpmnElement="SF20_Ship">
         <di:waypoint x="3090" y="1130" />
-        <di:waypoint x="3140" y="1130" />
+        <di:waypoint x="3110" y="1130" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF20_Message_di" bpmnElement="SF20_Message">
+        <di:waypoint x="3146" y="1130" />
+        <di:waypoint x="3180" y="1130" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
@@ -1071,6 +1127,205 @@ export const DAIRY_SUPPLIER_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?
 </bpmn:definitions>`;
 
 /**
+ * Процесс клиента завода: подтверждение заказа и приёмка готовой продукции.
+ *
+ * Это третий пул исходной схемы (`Part_Client`, M5). Клиент ведёт два шага сам:
+ * подтверждает заказ (MF1/MF2) и принимает готовую продукцию (MF6). Обмен с
+ * заводом выражен сообщениями, как у поставщика: движок находит экземпляры по
+ * бизнес-ключу `orderNum`, а не по `instanceId`.
+ *
+ * Направления обмена:
+ *
+ * - MF1 — заказ: `Event_SendOrder` отправляет `ClientOrder` и несёт
+ *   `trg:processTrigger` на `Process_Dairy`, поэтому экземпляр завода
+ *   (`inst-cust-<orderNum>`) создаёт движок, а не кабинет;
+ * - MF2 — подтверждение: завод отправляет `OrderConfirmed` после
+ *   `Task_ProcessOrder`, клиент ждёт его в `Event_OrderConfirmed`;
+ * - MF6 — отгрузка: завод отправляет `GoodsShipped` после `Task_Ship`, клиент
+ *   ждёт его в `Event_GoodsShipped` и переходит к приёмке по УПД.
+ *
+ * Роли две: `CLIENT` ведёт шаги, `CLIENT_DIRECTOR` (`kind="EXECUTIVE"`) видит
+ * схему и метрики — так же устроены каталоги завода и поставщика.
+ *
+ * Процесс входит в `DAIRY_PLANT_PROJECT_XML` третьим пулом, поэтому в кабинете
+ * он получает контур `CLIENT` (`projectRoles.js`, `CONTOUR_ORDER`), а его роли —
+ * карточки на входе. Кабинет ведёт клиента так же, как поставщика: старт
+ * процесса, шаги из схемы и поля заказа в карточке (`clientProcessState`).
+ */
+export const DAIRY_CLIENT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:act="http://erp.mes/schema/bpmn/action"
+                  xmlns:role="http://erp.mes/schema/bpmn/roles"
+                  xmlns:trg="http://erp.mes/schema/bpmn/trigger"
+                  id="Definitions_DairyClient"
+                  targetNamespace="http://bpmn.io/schema/bpmn">
+  <!-- Сообщения обмена с заводом: заказ, его подтверждение и готовая продукция. -->
+  <bpmn:message id="Message_ClientOrder" name="ClientOrder" />
+  <bpmn:message id="Message_OrderConfirmed" name="OrderConfirmed" />
+  <bpmn:message id="Message_GoodsShipped" name="GoodsShipped" />
+
+  <bpmn:process id="Process_Client" name="Клиент: заказ и приёмка готовой продукции" isExecutable="true">
+    <bpmn:extensionElements>
+      <role:catalog id="RoleCatalog_DairyClient">
+        <role:businessRole code="CLIENT_DIRECTOR" title="Руководитель клиента" kind="EXECUTIVE" icon="Crown" />
+        <role:businessRole code="CLIENT" title="Менеджер клиента" icon="Briefcase" />
+      </role:catalog>
+    </bpmn:extensionElements>
+
+    <bpmn:laneSet id="LaneSet_DairyClient">
+      <bpmn:lane id="Lane_Client" name="Клиент">
+        <bpmn:documentation>ДИ-КЛ-01: оформление и подтверждение заказа, приёмка готовой продукции по УПД.</bpmn:documentation>
+        <bpmn:flowNodeRef>Start_Client</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_ConfirmOrder</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_SendOrder</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_OrderConfirmed</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_GoodsShipped</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_AcceptGoods</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>End_Client</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+
+    <bpmn:startEvent id="Start_Client" name="Клиент оформляет заказ">
+      <bpmn:extensionElements>
+        <act:userAction id="placeClientOrder" label="Оформить заказ заводу" role="CLIENT" icon="PlusCircle" elementId="Task_ConfirmOrder" />
+      </bpmn:extensionElements>
+      <bpmn:outgoing>SF_C1</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:userTask id="Task_ConfirmOrder" name="Подтвердить заказ">
+      <bpmn:extensionElements>
+        <act:userAction id="confirmClientOrder" label="Подтвердить номенклатуру, объём и срок и отправить заводу" role="CLIENT" icon="CheckCircle2" elementId="Event_SendOrder" />
+      </bpmn:extensionElements>
+      <bpmn:documentation>СОП-К-01: проверка номенклатуры, объёма и срока поставки; отправка заказа заводу (MF1).</bpmn:documentation>
+      <bpmn:incoming>SF_C1</bpmn:incoming>
+      <bpmn:outgoing>SF_C2</bpmn:outgoing>
+      <bpmn:potentialOwner name="CLIENT" />
+    </bpmn:userTask>
+
+    <!-- Заказ уходит заводу сообщением (MF1): экземпляр завода создаёт триггер. -->
+    <bpmn:intermediateThrowEvent id="Event_SendOrder" name="Заказ отправлен">
+      <bpmn:extensionElements>
+        <trg:processTrigger targetProcessId="Process_Dairy"
+                            instancePrefix="inst-cust-"
+                            startElementId="Event_SendOrder"
+                            firstElementId="Task_ReceiveOrder"
+                            payloadKeys="orderNum" />
+      </bpmn:extensionElements>
+      <bpmn:documentation>Сообщение ClientOrder: движок создаёт экземпляр Process_Dairy с id inst-cust-&lt;orderNum&gt; и переносит orderNum, поэтому завод принимает заказ без ручного старта. Схема завода должна быть задеплоена — иначе доставки нет.</bpmn:documentation>
+      <bpmn:incoming>SF_C2</bpmn:incoming>
+      <bpmn:outgoing>SF_C2_Message</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_ClientOrder" />
+    </bpmn:intermediateThrowEvent>
+
+    <!-- Подтверждение заказа заводом (MF2). -->
+    <bpmn:intermediateCatchEvent id="Event_OrderConfirmed" name="Заказ подтверждён заводом">
+      <bpmn:documentation>Сообщение OrderConfirmed: завод подтвердил объём и срок.</bpmn:documentation>
+      <bpmn:incoming>SF_C2_Message</bpmn:incoming>
+      <bpmn:outgoing>SF_C3</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_OrderConfirmed" />
+    </bpmn:intermediateCatchEvent>
+
+    <!-- Готовая продукция отгружена (MF6). -->
+    <bpmn:intermediateCatchEvent id="Event_GoodsShipped" name="Продукция отгружена">
+      <bpmn:documentation>Сообщение GoodsShipped: завод передал партию перевозчику.</bpmn:documentation>
+      <bpmn:incoming>SF_C3</bpmn:incoming>
+      <bpmn:outgoing>SF_C4</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_GoodsShipped" />
+    </bpmn:intermediateCatchEvent>
+
+    <bpmn:userTask id="Task_AcceptGoods" name="Принять готовую продукцию">
+      <bpmn:extensionElements>
+        <act:userAction id="acceptGoods" label="Принять партию по УПД и закрыть заказ" role="CLIENT" icon="PackageCheck" />
+      </bpmn:extensionElements>
+      <bpmn:documentation>СОП-К-02: приёмка партии по УПД, проверка количества и сроков годности.</bpmn:documentation>
+      <bpmn:incoming>SF_C4</bpmn:incoming>
+      <bpmn:outgoing>SF_C5</bpmn:outgoing>
+      <bpmn:potentialOwner name="CLIENT" />
+    </bpmn:userTask>
+
+    <bpmn:endEvent id="End_Client" name="Заказ получен">
+      <bpmn:incoming>SF_C5</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="SF_C1" sourceRef="Start_Client" targetRef="Task_ConfirmOrder" />
+    <bpmn:sequenceFlow id="SF_C2" sourceRef="Task_ConfirmOrder" targetRef="Event_SendOrder" />
+    <bpmn:sequenceFlow id="SF_C2_Message" sourceRef="Event_SendOrder" targetRef="Event_OrderConfirmed" />
+    <bpmn:sequenceFlow id="SF_C3" sourceRef="Event_OrderConfirmed" targetRef="Event_GoodsShipped" />
+    <bpmn:sequenceFlow id="SF_C4" sourceRef="Event_GoodsShipped" targetRef="Task_AcceptGoods" />
+    <bpmn:sequenceFlow id="SF_C5" sourceRef="Task_AcceptGoods" targetRef="End_Client" />
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_DairyClient">
+    <bpmndi:BPMNPlane id="BPMNPlane_DairyClient" bpmnElement="Process_Client">
+      <bpmndi:BPMNShape id="Start_Client_di" bpmnElement="Start_Client">
+        <dc:Bounds x="150" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="120" y="125" width="96" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_ConfirmOrder_di" bpmnElement="Task_ConfirmOrder">
+        <dc:Bounds x="230" y="60" width="150" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_SendOrder_di" bpmnElement="Event_SendOrder">
+        <dc:Bounds x="400" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="383" y="125" width="70" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_OrderConfirmed_di" bpmnElement="Event_OrderConfirmed">
+        <dc:Bounds x="460" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="433" y="125" width="90" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_GoodsShipped_di" bpmnElement="Event_GoodsShipped">
+        <dc:Bounds x="520" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="496" y="125" width="84" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_AcceptGoods_di" bpmnElement="Task_AcceptGoods">
+        <dc:Bounds x="580" y="60" width="140" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Client_di" bpmnElement="End_Client">
+        <dc:Bounds x="740" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="718" y="125" width="80" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNEdge id="SF_C1_di" bpmnElement="SF_C1">
+        <di:waypoint x="186" y="100" />
+        <di:waypoint x="230" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF_C2_di" bpmnElement="SF_C2">
+        <di:waypoint x="380" y="100" />
+        <di:waypoint x="400" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF_C2_Message_di" bpmnElement="SF_C2_Message">
+        <di:waypoint x="436" y="100" />
+        <di:waypoint x="460" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF_C3_di" bpmnElement="SF_C3">
+        <di:waypoint x="496" y="100" />
+        <di:waypoint x="520" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF_C4_di" bpmnElement="SF_C4">
+        <di:waypoint x="556" y="100" />
+        <di:waypoint x="580" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="SF_C5_di" bpmnElement="SF_C5">
+        <di:waypoint x="720" y="100" />
+        <di:waypoint x="740" y="100" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>`;
+
+/**
  * Вертикальный отступ второго пула проекта.
  *
  * Схема завода занимает 0..1270 px вместе с пулом, поэтому поставщик начинается
@@ -1084,11 +1339,18 @@ export const DAIRY_PLANT_PARTICIPANT_NAME = 'Молочный завод';
 /** Имя дорожки поставщика в проекте. */
 export const DAIRY_SUPPLIER_PARTICIPANT_NAME = 'Поставщик сырья';
 
+/** Имя дорожки клиента в проекте (третий пул, M5). */
+export const DAIRY_CLIENT_PARTICIPANT_NAME = 'Клиент';
+
 /**
- * Проект целиком: кооперация двух процессов, подписи участников и общий холст.
+ * Проект целиком: кооперация трёх процессов, подписи участников и общий холст.
  *
  * Собирается тем же `buildProjectXml`, что и демо-проект закупки молока:
- * участники, их DI-рамки и сдвиг второго пула — забота сборщика, а не схем.
+ * участники, их DI-рамки и сдвиг каждой следующей дорожки на
+ * `DAIRY_PROJECT_ROW_OFFSET` — забота сборщика, а не схем. Завод идёт первым
+ * (его процесс исполняет движок), поставщик и клиент — под ним, поэтому пулы не
+ * перекрываются, а в кабинете они получают контуры `SUPPLIER` и `CLIENT`
+ * (`projectRoles.js`, `CONTOUR_ORDER`).
  */
 export const DAIRY_PLANT_PROJECT_XML = buildProjectXml(
   [
@@ -1099,6 +1361,10 @@ export const DAIRY_PLANT_PROJECT_XML = buildProjectXml(
     {
       xml: DAIRY_SUPPLIER_PROCESS_XML,
       participantName: DAIRY_SUPPLIER_PARTICIPANT_NAME,
+    },
+    {
+      xml: DAIRY_CLIENT_PROCESS_XML,
+      participantName: DAIRY_CLIENT_PARTICIPANT_NAME,
     },
   ],
   { name: DAIRY_PLANT_PROJECT_NAME, rowOffset: DAIRY_PROJECT_ROW_OFFSET }

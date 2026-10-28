@@ -132,20 +132,58 @@ describe('projectRoles: схема без каталога', () => {
 });
 
 describe('projectRoles: границы проекта', () => {
-  it('предупреждает о лишних процессах и не пускает их в кабинет', () => {
+  it('ведёт три контура и предупреждает о лишних процессах', () => {
     const second = DEFAULT_CUSTOMER_BPMN_XML.replace(/Process_MilkCustomer_v1/g, 'Process_Second');
     const third = DEFAULT_CUSTOMER_BPMN_XML.replace(/Process_MilkCustomer_v1/g, 'Process_Third');
+    const fourth = DEFAULT_CUSTOMER_BPMN_XML.replace(/Process_MilkCustomer_v1/g, 'Process_Fourth');
     const analysis = analyzeProject(
       buildProjectXml([
         { xml: DEFAULT_CUSTOMER_BPMN_XML },
         { xml: second },
         { xml: third },
+        { xml: fourth },
       ])
     );
 
+    expect(MAX_PROJECT_PROCESSES).toBe(3);
     expect(analysis.processes).toHaveLength(MAX_PROJECT_PROCESSES);
-    expect(analysis.problems.join(' ')).toContain('3 процессов');
-    expect(analysis.roles.every((role) => role.processId !== 'Process_Third')).toBe(true);
+    expect(analysis.processes.map((process) => process.org)).toEqual([
+      'CUSTOMER',
+      'SUPPLIER',
+      'CLIENT',
+    ]);
+    expect(analysis.problems.join(' ')).toContain('4 процессов');
+    expect(analysis.problems.join(' ')).toContain(CONTOUR_LABELS.CLIENT);
+    expect(analysis.roles.every((role) => role.processId !== 'Process_Fourth')).toBe(true);
+  });
+
+  it('третий процесс проекта получает контур Клиента', () => {
+    const client = DEFAULT_CUSTOMER_BPMN_XML
+      .replace(/Process_MilkCustomer_v1/g, 'Process_Client')
+      .replace(/MANAGER/g, 'CLIENT_DIRECTOR');
+    const second = DEFAULT_CUSTOMER_BPMN_XML.replace(
+      /Process_MilkCustomer_v1/g,
+      'Process_Second'
+    );
+    const analysis = analyzeProject(
+      buildProjectXml([
+        { xml: DEFAULT_CUSTOMER_BPMN_XML },
+        { xml: second },
+        { xml: client },
+      ])
+    );
+
+    expect(analysis.processes.map((process) => process.org)).toEqual([
+      'CUSTOMER',
+      'SUPPLIER',
+      'CLIENT',
+    ]);
+    expect(CONTOUR_LABELS.CLIENT).toBe('КЛИЕНТ');
+    // Роли третьего процесса попадают в кабинет с контуром клиента.
+    expect(analysis.roles.filter((role) => role.org === 'CLIENT').map((role) => role.code)).toContain(
+      'CLIENT_DIRECTOR'
+    );
+    expect(analysis.problems).toEqual([]);
   });
 
   it('пустая схема не падает и объясняет, что не так', () => {

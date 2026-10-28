@@ -108,11 +108,14 @@ export class GatewayClient {
    * @param {Function} [options.fetchImpl] подмена `fetch` (для тестов).
    * @param {number} [options.timeoutMs] таймаут запроса, мс.
    * @param {Function} [options.correlationKeyFactory] генератор `correlation_key`.
+   * @param {string} [options.actor] роль сессии (M6): уходит в заголовке
+   *   `X-Actor-Role`, по ней движок проверяет `bpmn:potentialOwner` шага.
    */
   constructor(baseUrl = DEFAULT_GATEWAY_URL, options = {}) {
     this.baseUrl = normalizeGatewayUrl(baseUrl);
     this.timeoutMs =
       typeof options.timeoutMs === 'number' ? options.timeoutMs : REQUEST_TIMEOUT_MS;
+    this.actor = typeof options.actor === 'string' ? options.actor.trim() : '';
     this.fetchImpl =
       options.fetchImpl ||
       (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
@@ -152,15 +155,27 @@ export class GatewayClient {
       : null;
 
     try {
+      const actor = String(this.actor || '').trim();
+      const headers = { 'Content-Type': 'application/json' };
+      const body = {
+        event_name: eventName,
+        correlation_key: this.correlationKeyFactory(),
+        element_id: elementId || '',
+        output_data: outputData || {},
+      };
+
+      // Роль сессии (M6): заголовок читает шлюз, поле тела — движок, если
+      // событие ушло в NATS мимо шлюза или прокси срезал заголовок. Без роли
+      // запрос остаётся прежним: так шлют воркеры и E2E-скрипты.
+      if (actor) {
+        headers['X-Actor-Role'] = actor;
+        body.actor = actor;
+      }
+
       const response = await this.fetchImpl(this.eventsUrl(instanceId), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          event_name: eventName,
-          correlation_key: this.correlationKeyFactory(),
-          element_id: elementId || '',
-          output_data: outputData || {},
-        }),
+        headers,
+        body: JSON.stringify(body),
         signal: controller ? controller.signal : undefined,
       });
 
