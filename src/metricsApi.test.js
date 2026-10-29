@@ -177,6 +177,22 @@ describe('metricsApi: ответ движка → записи запусков 
     expect(run.org).toBe('');
   });
 
+  it('подписывает запуск номером заказа, если движок его вернул', () => {
+    // `orderNum` появился в ответе вместе с M8: экземпляр привязан к заказу, и
+    // панель показывает номер заказа вместо `inst-cust-…`.
+    const metrics = serverMetrics();
+    metrics.processes[0].lastRuns = [
+      { instanceId: 'inst-cust-4', orderNum: '№1042', durationMs: 1000, status: 'COMPLETED' },
+      { instanceId: 'inst-cust-5', durationMs: 2000, status: 'ACTIVE' },
+    ];
+
+    const [ordered, plain] = toPanelRuns(metrics);
+
+    expect(ordered.orderNumber).toBe('№1042');
+    // Ответ без заказа не ломает панель: подпись остаётся пустой → покажется id.
+    expect(plain.orderNumber).toBe('');
+  });
+
   it('пустой ответ и мусор дают пустой список', () => {
     expect(toPanelRuns(null)).toEqual([]);
     expect(toPanelRuns({})).toEqual([]);

@@ -116,8 +116,8 @@ export function metricsQuery(params = {}) {
  * `summarizeRuns`, но по серверным числам — одинаковым у всех клиентов.
  *
  * `durationMs` сервера — цикл запуска (старт → финиш), как и локальная метрика;
- * `orderNumber` в БД движка не хранится, поэтому подпись столбика — id
- * экземпляра.
+ * `orderNumber` берётся из заказа (`orders`, M4): движок отдаёт `orderNum` для
+ * запусков, привязанных к заказу. Экземпляр вне заказа подписывается id.
  *
  * @param {Object|null} metrics ответ `GET /api/v1/metrics`.
  * @param {{orgOf?: (processId: string) => string}} [options] контур процесса —
@@ -144,7 +144,7 @@ export function toPanelRuns(metrics, options = {}) {
         processId,
         processName: process.processName || '',
         org,
-        orderNumber: '',
+        orderNumber: typeof run.orderNum === 'string' ? run.orderNum : '',
         startedAt: run.startedAt || '',
         finishedAt: run.finishedAt || null,
         durationMs:

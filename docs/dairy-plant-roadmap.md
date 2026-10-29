@@ -489,6 +489,17 @@ Jest-тесты кабинета: `metricsApi.test.js`, `MetricsPanel.test.jsx`,
       *(Сделано: `npm run build:check` / `build:verify` —
       [`scripts/check-bundle.mjs`](../scripts/check-bundle.mjs): 3 процесса демо,
       роли кабинетов, `ACTION_ID`, клиент метрик M7, свежесть сборки и source map.)*
+- [x] SLA от последней активации: повторный вход в узел (переработка, возврат на
+      шаг) не должен давать ложный `TIMED_OUT`. *(Сделано: `tokens.state_changed_at`
+      — миграция `0006` + бэкфилл, пишется проекцией на каждой записи состояния;
+      читают SLA-воркер `main.rs` и расчёт метрик (`TokenRow::waiting_since`).
+      Тест: `metrics::tests::sla_counts_waiting_from_last_activation_of_token`.)*
+- [x] Номер заказа в серверных метриках: столбик панели подписывается заказом, а не
+      `inst-cust-…`. *(Сделано: движок отдаёт `lastRuns.orderNum` из `orders`
+      (оба контура), `toPanelRuns` переносит его в `orderNumber`; экземпляр вне
+      заказа по-прежнему подписывается id. Тесты:
+      `metrics::tests::last_runs_carry_order_number_from_orders_table`,
+      `metricsApi.test.js`.)*
 
 
 ## 6. Порядок и зависимости
