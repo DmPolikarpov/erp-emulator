@@ -500,6 +500,11 @@ Jest-тесты кабинета: `metricsApi.test.js`, `MetricsPanel.test.jsx`,
       заказа по-прежнему подписывается id. Тесты:
       `metrics::tests::last_runs_carry_order_number_from_orders_table`,
       `metricsApi.test.js`.)*
+- [x] Уборка проходных токенов: вендорная `token` не должна расти вечно.
+      *(Сделано: `db::purge_finished_tokens` раз в `TOKEN_GC_INTERVAL_SECS`
+      (60 с, `0` — выключить) удаляет токены завершённых экземпляров; на демо-схеме
+      это 4 строки на прогон, у живых экземпляров токены не трогаются. История
+      остаётся в `history_event` и legacy-проекции.)*
 
 
 ## 6. Порядок и зависимости
