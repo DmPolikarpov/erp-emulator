@@ -37,7 +37,8 @@ import {
   Truck, ShieldCheck, ClipboardCheck, FileText, Upload, Send, 
   LogOut, History, KeyRound, Layers, PlusCircle, BarChart2,
   PackageCheck, Clock, CheckCircle2, Loader2, AlertCircle, Pencil,
-  Save, RotateCcw, FolderOpen, FolderPlus, Trash2, ArrowLeft, Play, Factory
+  Save, RotateCcw, FolderOpen, FolderPlus, Trash2, ArrowLeft, Play, Factory,
+  Cloud
 } from 'lucide-react';
 import { MetricsPanel } from './MetricsPanel';
 import { CONTOUR_LABELS, analyzeProject, findUser } from './projectRoles';
@@ -63,10 +64,17 @@ import {
   deleteProject,
   ensureDefaultProject,
   formatProjectSavedAt,
+  getProject,
   listProjects,
   setActiveProjectId,
   updateProject,
 } from './projectStore';
+import {
+  projectsClient,
+  serverProjectLabel,
+  toProjectRecord,
+  versionLabel,
+} from './projectsApi';
 import {
   ORDER_STATUS,
   defaultOrderDraft,
@@ -517,6 +525,11 @@ export default function App() {
   const [projectXml, setProjectXml] = useState(() => project.xml);
   const [savedProject, setSavedProject] = useState(() => project);
   const [projects, setProjects] = useState(() => listProjects());
+  // Проекты, которые уже задеплоены в движок (M6): `GET /api/v1/projects`.
+  // Список нужен, чтобы показать версию и открыть проект в новом браузере,
+  // где `localStorage` пуст. Ошибку API не показываем: кабинет работает и
+  // без сервера, проект тогда остаётся локальным (демо-режим).
+  const [serverProjects, setServerProjects] = useState([]);
   // Экран до входа: 'login' — карточки ролей проекта, 'projects' — список
   // проектов (создание, импорт BPMN, удаление).
   const [screen, setScreen] = useState('login');
@@ -569,6 +582,25 @@ export default function App() {
   useEffect(() => {
     client.actor = currentUser ? currentUser.role : '';
   }, [client, currentUser]);
+
+  // Список проектов из движка (M6): схема живёт в БД, поэтому второй браузер
+  // видит тот же проект и версию. Запрос один раз при входе — деплой список
+  // обновляет сам. Ответ `{ok:false}` (нет шлюза) — не ошибка кабинета.
+  useEffect(() => {
+    let cancelled = false;
+
+    projectsClient.listProjects().then((result) => {
+      // Пустой ответ (шлюз есть, проектов нет) ничего не меняет: лишний
+      // `setState` перерисовывал бы кабинет и шумел в тестах.
+      if (cancelled || !result.ok || result.projects.length === 0) return;
+
+      setServerProjects(result.projects);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Токены по всем экземплярам процесса — источник подсветки узлов на схеме.
   const { tokensFor } = useProcessTokens(socket, []);
@@ -1032,6 +1064,40 @@ export default function App() {
       // Деплой обновляет и копию в браузере: определение процесса в кластере и
       // схема, которую показывает кабинет, не должны расходиться после F5.
       persistProject(projectXml);
+
+      // Схема уезжает и в БД движка (M6): версия растёт, а второй браузер
+      // получит её при входе. Сбой сохранения не отменяет деплой в кластер —
+      // проект остаётся рабочим в этой сессии, поэтому это предупреждение, а
+      // не ошибка. У проекта без хранилища (`MEMORY_PROJECT_ID`) нет ключа,
+      // по которому его нашла бы другая сессия.
+      if (project && project.id !== MEMORY_PROJECT_ID) {
+        const stored = await projectsClient.deployProject({
+          projectId: project.id,
+          name: project.name,
+          bpmnXml: projectXml,
+          actor: currentUser ? currentUser.role : '',
+        });
+
+        if (stored.ok) {
+          const refreshed = await projectsClient.listProjects();
+
+          if (refreshed.ok) setServerProjects(refreshed.projects);
+
+          logEvent(
+            orgType,
+            'ALL',
+            `Проект сохранён на сервере (${versionLabel(stored.project.version)})`,
+            `Схема проекта «${project.name}» доступна другим сессиям кабинета.`
+          );
+        } else {
+          logEvent(
+            orgType,
+            'ALL',
+            'Проект не сохранён на сервере',
+            stored.error || 'API проектов недоступен: схема осталась в браузере.'
+          );
+        }
+      }
       logEvent(orgType, 'ALL', 'Схема задеплоена', `Руководитель задеплоил новую конфигурацию схемы ${orgType} в кластер.`);
       alert(`Схема ${orgType} успешно передана в оркестратор!`);
     } else {
@@ -1959,6 +2025,36 @@ export default function App() {
     openProject(rest[0] || ensureDefaultProject());
   };
 
+  /**
+   * Открывает проект, которого нет в `localStorage` (M6): схему отдаёт
+   * движок, а браузер получает её копию — дальше проект живёт как локальный.
+   */
+  const handleOpenServerProject = async (summary) => {
+    if (!summary || !summary.projectId) return;
+
+    const result = await projectsClient.getProject(summary.projectId);
+
+    if (!result.ok || !result.project) {
+      alert(
+        `Не удалось загрузить проект с сервера: ${result.error || 'схема не найдена'}`
+      );
+      return;
+    }
+
+    const remote = toProjectRecord(result.project);
+
+    if (!remote) {
+      alert('Сервер вернул проект без схемы.');
+      return;
+    }
+
+    const cached = getProject(remote.id)
+      ? updateProject(remote.id, { name: remote.name, xml: remote.xml })
+      : createProject(remote);
+
+    openProject(cached || remote);
+  };
+
   const handleLogin = (e) => {
     e.preventDefault();
     const found = findUser(analysis.roles, loginInput, passwordInput);
@@ -2002,6 +2098,7 @@ export default function App() {
               <h2 style={{ margin: 0, color: '#f8fafc', fontSize: '22px' }}>📁 Проекты</h2>
               <p style={{ margin: '4px 0 0 0', color: '#94a3b8', fontSize: '13px' }}>
                 Проект — одна BPMN-схема с процессами сторон. Роли и кабинеты собираются из неё.
+                Схема хранится и на сервере: версия видна в карточке, второй браузер её получает.
               </p>
             </div>
 
@@ -2037,6 +2134,10 @@ export default function App() {
             const info = analyzeProject(item.xml);
             const savedAt = formatProjectSavedAt(item.updatedAt);
             const organizations = info.processes.map((process) => process.orgName).join(' ↔ ');
+            // Копия на сервере (M6): проект деплоили из этой или другой сессии.
+            const serverCopy = serverProjects.find(
+              (remote) => remote.projectId === item.id
+            );
 
             return (
               <div
@@ -2049,6 +2150,11 @@ export default function App() {
                     {organizations || 'процессов нет'} · ролей: {info.roles.length}
                     {savedAt ? ` · изменён в ${savedAt}` : ''}
                   </div>
+                  {serverCopy && (
+                    <div style={{ fontSize: '11px', color: '#0f766e', marginTop: '2px' }}>
+                      ☁ на сервере: {serverProjectLabel(serverCopy)}
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ display: 'flex', gap: '8px' }}>
@@ -2068,6 +2174,30 @@ export default function App() {
               Проектов пока нет: создайте демо-проект или импортируйте BPMN-файл.
             </p>
           )}
+
+          {serverProjects.filter(
+            (remote) => !projects.some((item) => item.id === remote.projectId)
+          ).map((remote) => (
+            <div
+              key={remote.projectId}
+              data-testid="server-project"
+              style={{ backgroundColor: '#134e4a', border: '1px solid #0f766e', borderRadius: '12px', padding: '16px 20px', marginBottom: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}
+            >
+              <div>
+                <div style={{ fontSize: '15px', fontWeight: '700', color: '#ecfeff' }}>{remote.name}</div>
+                <div style={{ fontSize: '12px', color: '#99f6e4' }}>
+                  ☁ на сервере · {serverProjectLabel(remote)} · этот браузер схему ещё не открывал
+                </div>
+              </div>
+
+              <button
+                onClick={() => handleOpenServerProject(remote)}
+                style={projectButtonStyle('#0f766e')}
+              >
+                <Cloud size={15} /> Загрузить
+              </button>
+            </div>
+          ))}
         </div>
       </div>
     );

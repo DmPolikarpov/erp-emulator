@@ -351,9 +351,14 @@ HTTP-шлюз недоступен, заказ остаётся локальны
 
 **Задачи.**
 
-- [ ] Серверная схема проекта: деплой из кабинета вместо копии в `localStorage` у каждой
-      сессии, версия проекта. *(не начато: проект по-прежнему живёт в браузере, деплой
-      остаётся явной кнопкой)*
+- [x] Серверная схема проекта: деплой из кабинета вместо копии в `localStorage` у каждой
+      сессии, версия проекта. *(сделано 29.10.2026: миграция `0007_projects.sql` —
+      `projects` и `project_versions`; API `mes.in.v1.api.projects` →
+      `GET/PUT /api/v1/projects`, `GET …/:id/versions`; кабинет при входе берёт
+      список и версию, «Задеплоить» поднимает версию и пишет историю с ролью из
+      `X-Actor-Role`, проект, которого нет в `localStorage`, загружается кнопкой
+      «Загрузить». `localStorage` остался кэшем; живой прогон
+      `tests/projects-api.e2e.cjs`)*
 - [x] Проверка прав на `sendEvent`: роль сессии против `bpmn:potentialOwner`,
       `act:userAction/@role`, `role:catalog`. *(сделано 23.10.2026: `runtime/roles.rs`
       разбирает роли схемы, `auth.rs` отвечает шлюзу на `mes.in.v1.api.auth`,
@@ -379,12 +384,14 @@ HTTP-шлюз недоступен, заказ остаётся локальны
 **Готово, когда.** Прямой `sendEvent` от имени `WAREHOUSE` на шаг `SALES` отклоняется;
 второй клиент не видит чужие экземпляры.
 
-**Статус.** Первая половина выполнена: прямой `sendEvent` с чужой ролью получает `403` и
+**Статус.** Выполнено целиком: прямой `sendEvent` с чужой ролью получает `403` и
 не двигает токен (движок отказывает и без шлюза — событие без роли считается системным,
-так шлют воркеры и E2E-скрипты). Вторая половина закрыта наполовину: WS-фильтрация
-сделана (клиент объявляет экземпляры и роль, шлюз отсекает чужие события до отправки),
-серверная схема проекта — открыта, а роль по-прежнему приходит заявленным заголовком
-(IdP в демо нет).
+так шлют воркеры и E2E-скрипты), WS-фильтрация сделана (клиент объявляет экземпляры и
+роль, шлюз отсекает чужие события до отправки), серверная схема проекта закрыта
+(`0007_projects.sql`, `src/projects.rs`, `GET/PUT /api/v1/projects` с версиями).
+Открытым остаётся только само понятие личности: роль по-прежнему приходит заявленным
+заголовком `X-Actor-Role` (IdP в демо нет), поэтому история деплоев знает «какая роль»,
+а не «кто именно».
 
 Живой прогон контура — [`roles-auth.e2e.cjs`](../../tests/roles-auth.e2e.cjs), 28 проверок:
 `403` чужой роли с причиной, отказ рантайма на событии в обход шлюза
@@ -401,10 +408,14 @@ HTTP-шлюз недоступен, заказ остаётся локальны
 `must be owner of table execution_history` (регресс-контроль, команды в README).
 
 **Файлы:** HTTP-шлюз (`bpmn-gateways/http-cluster/index.js`), движок
-(`src/auth.rs`, `src/runtime/roles.rs`, `src/runtime/mod.rs`, `src/db.rs`),
+(`src/auth.rs`, `src/projects.rs`, `src/runtime/roles.rs`, `src/runtime/mod.rs`, `src/db.rs`),
 [`App.jsx`](../src/App.jsx), [`httpClient.js`](../src/bpmn-sdk/client/httpClient.js),
-[`roles-auth.e2e.cjs`](../../tests/roles-auth.e2e.cjs), [`nats-publish.cjs`](../../tests/nats-publish.cjs),
+[`projectsApi.js`](../src/projectsApi.js),
+[`roles-auth.e2e.cjs`](../../tests/roles-auth.e2e.cjs),
+[`projects-api.e2e.cjs`](../../tests/projects-api.e2e.cjs),
+[`nats-publish.cjs`](../../tests/nats-publish.cjs),
 [`0005_execution_history_actor.sql`](../../bpmn-engine/migrations/0005_execution_history_actor.sql),
+[`0007_projects.sql`](../../bpmn-engine/migrations/0007_projects.sql),
 [`db-init-configmap.yaml`](../../db-init-configmap.yaml).
 
 

@@ -268,6 +268,25 @@ jest.mock('./metricsApi', () => {
   };
 });
 
+/**
+ * API проектов (M6) подменяется так же: схема живёт на сервере, а тест
+ * проверяет сценарий кабинета, а не сеть. Подписи и конвертация записи
+ * (`serverProjectLabel`, `toProjectRecord`) остаются настоящими.
+ */
+jest.mock('./projectsApi', () => {
+  const actual = jest.requireActual('./projectsApi');
+
+  return {
+    ...actual,
+    projectsClient: {
+      listProjects: jest.fn(),
+      getProject: jest.fn(),
+      deployProject: jest.fn(),
+      listVersions: jest.fn(),
+    },
+  };
+});
+
 const {
   listOrders: mockListOrders,
   getOrder: mockGetOrder,
@@ -276,6 +295,12 @@ const {
 } = jest.requireMock('./ordersApi').ordersClient;
 
 const { load: mockLoadMetrics } = jest.requireMock('./metricsApi').metricsClient;
+
+const {
+  listProjects: mockListServerProjects,
+  getProject: mockGetServerProject,
+  deployProject: mockDeployProject,
+} = jest.requireMock('./projectsApi').projectsClient;
 
 /* ------------------------------------------------------------------ *
  * Вспомогательные функции
@@ -344,6 +369,12 @@ describe('App: интеграция с BPMN Client SDK', () => {
     // руководителя показывает метрики этого браузера (как до M7). Тесты M7
     // задают ответ сервера сами.
     mockLoadMetrics.mockResolvedValue({ ok: false, error: 'API метрик недоступен.' });
+
+    // API проектов по умолчанию пуст: стенд без HTTP-шлюза, проект живёт в
+    // браузере (как до M6). Тесты M6 задают ответ сервера сами.
+    mockListServerProjects.mockResolvedValue({ ok: true, projects: [] });
+    mockGetServerProject.mockResolvedValue({ ok: false, error: 'Проект не найден.' });
+    mockDeployProject.mockResolvedValue({ ok: false, error: 'API проектов недоступен.' });
 
     mockViewerProps.length = 0;
     mockEditorProps.length = 0;
@@ -605,6 +636,68 @@ describe('App: интеграция с BPMN Client SDK', () => {
     const [orgType, xml] = lastProps(mockDeploySchema.mock.calls);
     expect(orgType).toBe('SUPPLIER');
     expect(xml).toContain('Process_SupplierSupply_v1');
+  });
+
+  it('деплой сохраняет схему проекта на сервере (M6)', async () => {
+    openAs('Руководитель Заказчика');
+    const projectId = listProjects()[0].id;
+
+    mockDeployProject.mockResolvedValue({
+      ok: true,
+      project: {
+        projectId,
+        name: 'Проект',
+        version: 2,
+        bpmnXml: defaultProjectXml(),
+      },
+    });
+
+    fireEvent.click(screen.getByText(/Задеплоить BPMN/));
+
+    await waitFor(() => expect(mockDeployProject).toHaveBeenCalled());
+
+    const payload = mockDeployProject.mock.calls[0][0];
+
+    expect(payload.projectId).toBe(projectId);
+    expect(payload.actor).toEqual(expect.any(String));
+    expect(payload.bpmnXml).toContain('bpmn:definitions');
+    // После деплоя список сервера перечитывается: карточка проекта покажет
+    // версию, а не только текущая сессия.
+    await waitFor(() => expect(mockListServerProjects).toHaveBeenCalledTimes(2));
+  });
+
+  it('проект с сервера виден в списке и загружается в браузер (M6)', async () => {
+    const summary = {
+      projectId: 'project-server',
+      name: 'Серверный завод',
+      version: 3,
+      xmlBytes: 91234,
+      updatedBy: 'DIRECTOR',
+      createdAt: '2026-10-20T08:00:00Z',
+      updatedAt: '2026-10-29T10:15:00Z',
+    };
+
+    mockListServerProjects.mockResolvedValue({ ok: true, projects: [summary] });
+
+    render(<App />);
+    fireEvent.click(screen.getByText('Проекты'));
+
+    const card = await screen.findByTestId('server-project');
+
+    expect(card.textContent).toContain('Серверный завод');
+    expect(card.textContent).toContain('v3');
+
+    mockGetServerProject.mockResolvedValue({
+      ok: true,
+      project: { ...summary, bpmnXml: defaultProjectXml() },
+    });
+
+    fireEvent.click(screen.getByText('Загрузить'));
+
+    await waitFor(() =>
+      expect(listProjects().map((project) => project.id)).toContain('project-server')
+    );
+    expect(mockGetServerProject).toHaveBeenCalledWith('project-server');
   });
 
   it('старт процесса производством уходит в GatewayClient.sendEvent', async () => {
