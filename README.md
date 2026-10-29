@@ -122,6 +122,8 @@ Jest и через `<script>`.
 | `npm run sdk:verify` | проверка контракта артефактов и актуальности сборки |
 | `npm run sdk:demo` | ассеты демо-страницы `<script>` (в `public/vendor`) |
 | `npm run sdk:demo:clean` | удалить ассеты демо-страницы |
+| `npm run build:check` | проверка production-сборки: демо-схема, роли, кнопки и клиент метрик в бандле, сборка не старше исходников |
+| `npm run build:verify` | `npm run build` + `npm run build:check` одной командой |
 
 Порядок при правке SDK: `npm run sdk:refresh && npm run test:ci`. Если SDK
 изменили, но не пересобрали, упадут и `sdk:sync`, и тест
@@ -161,6 +163,12 @@ It correctly bundles React in production mode and optimizes the build for the be
 
 The build is minified and the filenames include the hashes.\
 Your app is ready to be deployed!
+
+Собранный бандл проверяется отдельно — `npm run build:check`
+([`scripts/check-bundle.mjs`](scripts/check-bundle.mjs)): в нём должны быть три
+процесса демо-схемы, роли кабинетов, кнопки участников и клиент серверных
+метрик, а сам бандл быть не старше исходников. Одной командой —
+`npm run build:verify`. Ручной сценарий показа — [docs/demo-checklist.md](docs/demo-checklist.md).
 
 See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
 

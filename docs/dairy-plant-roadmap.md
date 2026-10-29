@@ -472,11 +472,24 @@ Jest-тесты кабинета: `metricsApi.test.js`, `MetricsPanel.test.jsx`,
 
 **Задачи.**
 
-- [ ] E2E-сценарий завода на живом контуре (`_e2e` / Playwright): заказ → отгрузка, ветка
-      брака, авария.
-- [ ] Ручной чек-лист показа (раздел 8), скриншоты и видео.
-- [ ] README и SDK-README обновляются вместе с этапом.
-- [ ] Проверка production-сборки: демо-проект, роли и кнопка присутствуют в бандле.
+- [x] E2E-сценарий завода на живом контуре: заказ → отгрузка, ветка брака, авария.
+      *(Сделано без браузера: [`tests/dairy-plant.e2e.cjs`](../../tests/dairy-plant.e2e.cjs)
+      гоняет демо-схему из клиента через HTTP-шлюз и Postgres — 97 проверок, в т.ч.
+      сообщение поставщику по `orderNum`, `serviceTask` мок-ERP и три негативные
+      ветки. Playwright не понадобился: `erp-simulator` не тянет браузерных
+      зависимостей, а всё, что показывает кабинет, видно и на уровне событий.
+      Кабинетная часть (кнопки, подсветка) остаётся за ручным чек-листом.)*
+- [x] Ручной чек-лист показа (раздел 8), скриншоты и видео. *(Сделано:
+      [`docs/demo-checklist.md`](../docs/demo-checklist.md) — окружение,
+      автотесты, сценарии A–E с ожидаемым результатом и журналом прогона;
+      артефакты — [`docs/demo-artifacts/`](../docs/demo-artifacts/README.md),
+      видео ссылкой, а не файлом.)*
+- [x] README и SDK-README обновляются вместе с этапом.
+- [x] Проверка production-сборки: демо-проект, роли и кнопка присутствуют в бандле.
+      *(Сделано: `npm run build:check` / `build:verify` —
+      [`scripts/check-bundle.mjs`](../scripts/check-bundle.mjs): 3 процесса демо,
+      роли кабинетов, `ACTION_ID`, клиент метрик M7, свежесть сборки и source map.)*
+
 
 ## 6. Порядок и зависимости
 
@@ -510,8 +523,12 @@ Jest-тесты кабинета: `metricsApi.test.js`, `MetricsPanel.test.jsx`,
 npm run test:ci -- src/bpmn-sdk/defaults/dairyPlant.test.js
 npm run test:ci -- src/App.test.js
 npm run sdk:verify
-npm run build
+npm run build:verify        # сборка + маркеры демо в бандле (scripts/check-bundle.mjs)
+cd .. && tests/run-live-e2e.sh dairy   # демо-схема целиком на живом контуре (M8)
 ```
+
+Чек-лист показа с этими же сценариями, но глазами зрителя:
+[`demo-checklist.md`](demo-checklist.md) (окружение, сценарии A–E, журнал прогона).
 
 Ручной сценарий M0:
 

@@ -18,6 +18,8 @@
     "build": "react-scripts build",
     "test": "react-scripts test",
     "test:ci": "react-scripts test --watchAll=false",
+    "build:check": "node scripts/check-bundle.mjs",
+    "build:verify": "npm run build && npm run build:check",
     "sdk:build": "node src/bpmn-sdk/tools/build.mjs",
     "sdk:sync": "node src/bpmn-sdk/tools/sync.mjs",
     "sdk:verify": "node src/bpmn-sdk/tools/verify.mjs",
