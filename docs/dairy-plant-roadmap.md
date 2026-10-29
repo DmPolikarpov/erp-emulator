@@ -50,7 +50,7 @@
 
 ## 3. Чем демо отличается от исходной схемы
 
-Исходник — [`wip/edvanced_dairy_plant.bpmn`](../../../wip/edvanced_dairy_plant.bpmn)
+Исходник — [`docs/edvanced_dairy_plant.bpmn`](../../docs/edvanced_dairy_plant.bpmn)
 (3 пула, 6 message flow, service/send/receive-задачи, boundary events).
 
 | В исходнике | В демо | Причина |
