@@ -77,7 +77,15 @@ function runWebpack() {
   });
 }
 
-/** Печатает по каждой сборке список ассетов, предупреждения и ошибки. */
+/**
+ * Печатает по каждой сборке список ассетов, предупреждения и ошибки.
+ *
+ * Имя ассета печатается терпимо: webpack 5.111 с `all: false` отдаёт в
+ * `assets` не только файлы, но и сводные группы (`{type: 'assets by status'}`)
+ * без поля `name`. На такой группе `asset.name.padEnd` падал, и успешная
+ * сборка (11 с работы) завершалась `TypeError` — без копирования в `vendor`
+ * и без `BUILD_INFO.json`.
+ */
 function printStats(stats) {
   const compilations = stats.stats ? stats.stats : [stats];
 
@@ -94,7 +102,8 @@ function printStats(stats) {
     console.log(`\n[${name}] ${json.time || 0} мс`);
 
     for (const asset of json.assets || []) {
-      console.log(`  ${asset.name.padEnd(26)} ${formatBytes(asset.size)}`);
+      const label = asset.name || asset.type || '(без имени)';
+      console.log(`  ${String(label).padEnd(26)} ${formatBytes(asset.size || 0)}`);
     }
 
     for (const warning of json.warnings || []) {
