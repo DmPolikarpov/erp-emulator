@@ -63,27 +63,49 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmn:potentialOwner name="MANAGER" />
     </bpmn:userTask>
     
-    <bpmn:sequenceFlow id="Flow_C4" sourceRef="Task_ReceiveDocsAndIssuePass" targetRef="Task_SecurityCheck" />
+    <!-- Пропуск выписан — дальше две ветви идут одновременно: охрана оформляет
+         въезд на КПП, ОТК проверяет качество сырья. Раньше здесь был
+         последовательный переход «охрана → ОТК», и параллельность демо-схема не
+         показывала: одновременно горел ровно один узел. -->
+    <bpmn:sequenceFlow id="Flow_C4" sourceRef="Task_ReceiveDocsAndIssuePass" targetRef="Gateway_PassAndQuality" />
+    <bpmn:parallelGateway id="Gateway_PassAndQuality" name="Въезд и качество — параллельно">
+      <bpmn:incoming>Flow_C4</bpmn:incoming>
+      <bpmn:outgoing>Flow_C4_Security</bpmn:outgoing>
+      <bpmn:outgoing>Flow_C4_Quality</bpmn:outgoing>
+    </bpmn:parallelGateway>
+
+    <bpmn:sequenceFlow id="Flow_C4_Security" sourceRef="Gateway_PassAndQuality" targetRef="Task_SecurityCheck" />
     <bpmn:userTask id="Task_SecurityCheck" name="Проверка пропуска на КПП">
       <bpmn:extensionElements>
         <act:userAction id="securityPass" label="Проверить пропуск и открыть ворота" icon="ShieldCheck" />
       </bpmn:extensionElements>
-      <bpmn:incoming>Flow_C4</bpmn:incoming>
-      <bpmn:outgoing>Flow_C5</bpmn:outgoing>
+      <bpmn:incoming>Flow_C4_Security</bpmn:incoming>
+      <bpmn:outgoing>Flow_C5_Security</bpmn:outgoing>
       <bpmn:potentialOwner name="SECURITY" />
     </bpmn:userTask>
     
-    <bpmn:sequenceFlow id="Flow_C5" sourceRef="Task_SecurityCheck" targetRef="Task_QualityControl" />
+    <bpmn:sequenceFlow id="Flow_C4_Quality" sourceRef="Gateway_PassAndQuality" targetRef="Task_QualityControl" />
     <bpmn:userTask id="Task_QualityControl" name="Контроль качества ОТК">
       <bpmn:extensionElements>
         <act:userAction id="qualityApprove" label="Подтвердить качество и передать в Производство" icon="ClipboardCheck" />
       </bpmn:extensionElements>
-      <bpmn:incoming>Flow_C5</bpmn:incoming>
-      <bpmn:outgoing>Flow_C6</bpmn:outgoing>
+      <bpmn:incoming>Flow_C4_Quality</bpmn:incoming>
+      <bpmn:outgoing>Flow_C5_Quality</bpmn:outgoing>
       <bpmn:potentialOwner name="QUALITY" />
     </bpmn:userTask>
     
-    <bpmn:sequenceFlow id="Flow_C6" sourceRef="Task_QualityControl" targetRef="EndEvent_Customer" />
+    <!-- Слияние ждёт обе ветви: экземпляр завершается, когда и охрана, и ОТК
+         закрыли свои шаги. Группу токенов держит движок (parallel_group_id),
+         клиенту для этого ничего считать не нужно. -->
+    <bpmn:sequenceFlow id="Flow_C5_Security" sourceRef="Task_SecurityCheck" targetRef="Gateway_PassAndQualityJoin" />
+    <bpmn:sequenceFlow id="Flow_C5_Quality" sourceRef="Task_QualityControl" targetRef="Gateway_PassAndQualityJoin" />
+    <bpmn:parallelGateway id="Gateway_PassAndQualityJoin" name="Въезд разрешён, качество принято">
+      <bpmn:incoming>Flow_C5_Security</bpmn:incoming>
+      <bpmn:incoming>Flow_C5_Quality</bpmn:incoming>
+      <bpmn:outgoing>Flow_C6</bpmn:outgoing>
+    </bpmn:parallelGateway>
+
+    <bpmn:sequenceFlow id="Flow_C6" sourceRef="Gateway_PassAndQualityJoin" targetRef="EndEvent_Customer" />
     <bpmn:endEvent id="EndEvent_Customer" name="Молоко сдано в производство">
       <bpmn:incoming>Flow_C6</bpmn:incoming>
     </bpmn:endEvent>
@@ -103,21 +125,36 @@ export const DEFAULT_CUSTOMER_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <bpmndi:BPMNShape id="Task_ReceiveDocsAndIssuePass_di" bpmnElement="Task_ReceiveDocsAndIssuePass">
         <dc:Bounds x="550" y="78" width="100" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_PassAndQuality_di" bpmnElement="Gateway_PassAndQuality" isMarkerVisible="true">
+        <dc:Bounds x="680" y="98" width="40" height="40" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="655" y="145" width="120" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="Task_SecurityCheck_di" bpmnElement="Task_SecurityCheck">
-        <dc:Bounds x="700" y="78" width="100" height="80" />
+        <dc:Bounds x="740" y="40" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="Task_QualityControl_di" bpmnElement="Task_QualityControl">
-        <dc:Bounds x="850" y="78" width="100" height="80" />
+        <dc:Bounds x="740" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_PassAndQualityJoin_di" bpmnElement="Gateway_PassAndQualityJoin" isMarkerVisible="true">
+        <dc:Bounds x="880" y="98" width="40" height="40" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="845" y="145" width="140" height="27" />
+        </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="EndEvent_Customer_di" bpmnElement="EndEvent_Customer">
-        <dc:Bounds x="1000" y="100" width="36" height="36" />
+        <dc:Bounds x="950" y="100" width="36" height="36" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="Flow_C1_di" bpmnElement="Flow_C1"><di:waypoint x="196" y="118" /><di:waypoint x="250" y="118" /></bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="Flow_C2_di" bpmnElement="Flow_C2"><di:waypoint x="350" y="118" /><di:waypoint x="400" y="118" /></bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="Flow_C3_di" bpmnElement="Flow_C3"><di:waypoint x="500" y="118" /><di:waypoint x="550" y="118" /></bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_C4_di" bpmnElement="Flow_C4"><di:waypoint x="650" y="118" /><di:waypoint x="700" y="118" /></bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_C5_di" bpmnElement="Flow_C5"><di:waypoint x="800" y="118" /><di:waypoint x="850" y="118" /></bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_C6_di" bpmnElement="Flow_C6"><di:waypoint x="950" y="118" /><di:waypoint x="1000" y="118" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_C4_di" bpmnElement="Flow_C4"><di:waypoint x="650" y="118" /><di:waypoint x="680" y="118" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_C4_Security_di" bpmnElement="Flow_C4_Security"><di:waypoint x="720" y="118" /><di:waypoint x="720" y="80" /><di:waypoint x="740" y="80" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_C4_Quality_di" bpmnElement="Flow_C4_Quality"><di:waypoint x="720" y="118" /><di:waypoint x="720" y="200" /><di:waypoint x="740" y="200" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_C5_Security_di" bpmnElement="Flow_C5_Security"><di:waypoint x="840" y="80" /><di:waypoint x="880" y="80" /><di:waypoint x="880" y="98" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_C5_Quality_di" bpmnElement="Flow_C5_Quality"><di:waypoint x="840" y="200" /><di:waypoint x="880" y="200" /><di:waypoint x="880" y="138" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_C6_di" bpmnElement="Flow_C6"><di:waypoint x="920" y="118" /><di:waypoint x="950" y="118" /></bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
 </bpmn:definitions>`;

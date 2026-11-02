@@ -1162,7 +1162,9 @@ describe('bpmnXml: кнопки участников (act:userAction)', () => {
     ]);
 
     // Пара «событие + узел» в кнопке демо-схемы не записана: её выводит схема,
-    // поэтому проверяется не только чтение, но и разрешение пары.
+    // поэтому проверяется не только чтение, но и разрешение пары. Следующий
+    // узел охраны — слияние параллельных ветвей: обе задачи (`Task_SecurityCheck`
+    // и `Task_QualityControl`) идут к нему, а не друг за другом.
     const securityPass = getElementAction(
       DEFAULT_CUSTOMER_BPMN_XML,
       'Task_SecurityCheck',
@@ -1171,7 +1173,7 @@ describe('bpmnXml: кнопки участников (act:userAction)', () => {
     expect(securityPass).toMatchObject({ event: '', elementId: '' });
     expect(
       resolveAction(DEFAULT_CUSTOMER_BPMN_XML, 'Task_SecurityCheck', securityPass)
-    ).toEqual({ event: DEFAULT_ACTION_EVENT, elementId: 'Task_QualityControl' });
+    ).toEqual({ event: DEFAULT_ACTION_EVENT, elementId: 'Gateway_PassAndQualityJoin' });
 
     expect(getElementAction(DEFAULT_CUSTOMER_BPMN_XML, 'Task_SecurityCheck', 'nope')).toBeNull();
     expect(

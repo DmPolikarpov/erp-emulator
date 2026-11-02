@@ -46,10 +46,11 @@ function createSocketStub() {
   };
 }
 
-const tokenMessage = (instanceId, elementId, state) => ({
+const tokenMessage = (instanceId, elementId, state, tokenId = '') => ({
   instanceId,
   elementId,
   state,
+  tokenId,
   timestamp: null,
   payload: null,
 });
@@ -107,6 +108,44 @@ describe('useProcessTokens', () => {
       'Task_A',
       'Task_B',
     ]);
+  });
+
+  // M1.1: на параллельных ветвях у каждого шага свой `token_id` — по нему
+  // движок понимает, какую из двух ожидающих задач закрывать.
+  it('отдаёт `token_id` активного узла и снимает его с закрытием', () => {
+    const socket = createSocketStub();
+    const { result } = renderHook(() => useProcessTokens(socket, []));
+
+    act(() => {
+      socket.emit(
+        SOCKET_EVENTS.TOKEN,
+        tokenMessage('inst-cust-1', 'Task_A', TOKEN_STATES.ACTIVE, 'token-a')
+      );
+      socket.emit(
+        SOCKET_EVENTS.TOKEN,
+        tokenMessage('inst-cust-1', 'Task_B', TOKEN_STATES.ACTIVE, 'token-b')
+      );
+    });
+
+    expect(result.current.tokenIdFor('inst-cust-1', 'Task_A')).toBe('token-a');
+    expect(result.current.tokenIdFor('inst-cust-1', 'Task_B')).toBe('token-b');
+    // Неизвестный узел и чужой экземпляр подсказки не дают.
+    expect(result.current.tokenIdFor('inst-cust-1', 'Task_Unknown')).toBe('');
+    expect(result.current.tokenIdFor('inst-supp-1', 'Task_A')).toBe('');
+    expect(result.current.tokenIdsByInstance['inst-cust-1']).toEqual({
+      Task_A: 'token-a',
+      Task_B: 'token-b',
+    });
+
+    act(() => {
+      socket.emit(
+        SOCKET_EVENTS.TOKEN,
+        tokenMessage('inst-cust-1', 'Task_A', TOKEN_STATES.COMPLETED, 'token-a')
+      );
+    });
+
+    expect(result.current.tokenIdFor('inst-cust-1', 'Task_A')).toBe('');
+    expect(result.current.tokenIdFor('inst-cust-1', 'Task_B')).toBe('token-b');
   });
 
   it('заменяет состояние токена при повторном событии', () => {

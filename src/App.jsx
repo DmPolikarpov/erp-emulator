@@ -14,6 +14,7 @@ import {
   INSTANCE_PREFIX,
   SOCKET_EVENTS,
   TOKEN_STATES,
+  collectActiveElementIds,
   createUuid,
   extractProcessXml,
   getElementRole,
@@ -603,7 +604,72 @@ export default function App() {
   }, []);
 
   // Токены по всем экземплярам процесса — источник подсветки узлов на схеме.
-  const { tokensFor } = useProcessTokens(socket, []);
+  // `tokenIdFor` — идентификатор токена движка для конкретного узла: он нужен,
+  // чтобы завершить шаг на параллельной ветви (см. `withStepToken`).
+  const { tokensFor, tokenIdFor } = useProcessTokens(socket, []);
+
+  /**
+   * `token_id` шага, который закрывает нажатие.
+   *
+   * Когда экземпляр стоит на параллельных ветвях (`parallelGateway`), в нём
+   * два `ACTIVE`-токена — по одному на ветвь. Движок выбирает, какую именно
+   * ожидающую задачу завершать, по `output_data.token_id`
+   * (`runtime::pump::host_step`); без подсказки он пишет `no_waiting_token` и
+   * нажатие не двигает ничего. Ключ служебный: в переменные процесса он не
+   * попадает (`vars::TRANSPORT_KEYS`).
+   *
+   * @param {string} instanceId экземпляр контура.
+   * @param {string} elementId узел-хост кнопки (не следующий шаг).
+   * @returns {string} идентификатор токена (`''`, если движок его ещё не прислал).
+   */
+  const stepTokenId = useCallback(
+    (instanceId, elementId) =>
+      instanceId && elementId ? tokenIdFor(instanceId, elementId) : '',
+    [tokenIdFor]
+  );
+
+  /**
+   * Полезная нагрузка шага вместе с подсказкой токена.
+   *
+   * Кладётся во все события завершения (`CompleteBlock`): на последовательном
+   * маршруте подсказка просто не нужна, на параллельном — обязательна.
+   *
+   * @param {Object} payload данные кнопки.
+   * @param {string} instanceId экземпляр контура.
+   * @param {string} elementId узел-хост кнопки.
+   * @returns {Object} payload с `token_id`, если токен известен.
+   */
+  const withStepToken = useCallback(
+    (payload, instanceId, elementId) => {
+      const tokenId = stepTokenId(instanceId, elementId);
+
+      return tokenId ? { ...payload, token_id: tokenId } : payload;
+    },
+    [stepTokenId]
+  );
+
+  /**
+   * Стоит ли токен на узле — по набору активных узлов контура.
+   *
+   * `customerActiveElementId` (и его аналоги у поставщика и клиента) хранит
+   * **один** узел: последний, который активировал движок. На параллельных
+   * ветвях их два, и кнопки обеих веток должны быть доступны сразу, поэтому
+   * карточка сверяется с набором `ACTIVE`-узлов (`tokensFor`). Одиночный узел
+   * из заказа остаётся запасным путём: он есть и до первого WS-сообщения.
+   *
+   * @param {Object|null} order заказ.
+   * @param {'CUSTOMER'|'SUPPLIER'|'CLIENT'} org контур.
+   * @param {string} elementId узел-хост кнопки.
+   * @returns {boolean} `true`, если на узле сейчас стоит `ACTIVE`-токен.
+   */
+  const isStepActive = useCallback(
+    (order, org, elementId) => {
+      if (!order || !elementId) return false;
+
+      return collectActiveElementIds(tokensFor(instanceOf(order, org))).includes(elementId);
+    },
+    [tokensFor]
+  );
 
   /** Схемы контуров: источник назначений ролей, кнопок и деплоя. */
   const schemaXmlByOrg = useMemo(
@@ -1623,7 +1689,11 @@ export default function App() {
       targetOrder.customerInstanceId,
       sendToSupplier.action.event,
       sendToSupplier.action.elementId,
-      { status: 'SENT_TO_SUPPLIER', orderNum: orderId }
+      withStepToken(
+        { status: 'SENT_TO_SUPPLIER', orderNum: orderId },
+        targetOrder.customerInstanceId,
+        sendToSupplier.elementId
+      )
     );
 
     if (resCust.ok) {
@@ -1688,7 +1758,11 @@ export default function App() {
       targetOrder.supplierInstanceId,
       createDocs.action.event,
       createDocs.action.elementId,
-      { documents: generatedDocs, orderNum: orderId }
+      withStepToken(
+        { documents: generatedDocs, orderNum: orderId },
+        targetOrder.supplierInstanceId,
+        createDocs.elementId
+      )
     );
 
     if (!res.ok) {
@@ -1716,7 +1790,11 @@ export default function App() {
       targetOrder.supplierInstanceId,
       shipment.action.event,
       shipment.action.elementId,
-      { shippedAt, orderNum: orderId }
+      withStepToken(
+        { shippedAt, orderNum: orderId },
+        targetOrder.supplierInstanceId,
+        shipment.elementId
+      )
     );
 
     if (resSupp.ok) {
@@ -1771,7 +1849,11 @@ export default function App() {
       targetOrder.customerInstanceId,
       issuePass.action.event,
       issuePass.action.elementId,
-      { passData: pass, orderNum: orderId }
+      withStepToken(
+        { passData: pass, orderNum: orderId },
+        targetOrder.customerInstanceId,
+        issuePass.elementId
+      )
     );
 
     if (!res.ok) {
@@ -1797,7 +1879,11 @@ export default function App() {
       targetOrder.customerInstanceId,
       securityPass.action.event,
       securityPass.action.elementId,
-      { entryTime, orderNum: orderId }
+      withStepToken(
+        { entryTime, orderNum: orderId },
+        targetOrder.customerInstanceId,
+        securityPass.elementId
+      )
     );
 
     if (!res.ok) {
@@ -1823,7 +1909,11 @@ export default function App() {
       targetOrder.customerInstanceId,
       qualityApprove.action.event,
       qualityApprove.action.elementId,
-      { checkedAt, status: 'COMPLETED', orderNum: orderId }
+      withStepToken(
+        { checkedAt, status: 'COMPLETED', orderNum: orderId },
+        targetOrder.customerInstanceId,
+        qualityApprove.elementId
+      )
     );
 
     if (!res.ok) {
@@ -1876,7 +1966,11 @@ export default function App() {
       instanceId,
       entry.action.event,
       entry.action.elementId,
-      { orderNum: order.id, actedAt, ...variables }
+      withStepToken(
+        { orderNum: order.id, actedAt, ...variables },
+        instanceId,
+        entry.elementId
+      )
     );
 
     if (!res.ok) {
@@ -2333,8 +2427,11 @@ export default function App() {
    *
    * Что попадает в список:
    *
-   * - кнопки на «текущем шаге» своего контура (`activeStepOf`) — кнопка шага
-   *   живёт там, где её объявили, и не всплывает на других шагах процесса;
+   * - кнопки на активных шагах своего контура — кнопка шага живёт там, где её
+   *   объявили, и не всплывает на других шагах процесса. Узлов может быть
+   *   несколько: на параллельных ветвях движок держит два `ACTIVE`-токена, и
+   *   кнопки обеих ветвей доступны сразу (`collectActiveElementIds`), а
+   *   одиночный `activeStepOf` остаётся запасным путём до первого сообщения;
    * - кроме стартового события: заказ заводит кнопка `createOrder` (со своим
    *   обработчиком), а кнопка старта дублировала бы её;
    * - только «моей» роли — `act:userAction/@role`, а если роли у кнопки нет,
@@ -2344,9 +2441,13 @@ export default function App() {
    */
   const schemaStepActions = (() => {
     const org = currentUser.org;
-    const activeElementId = activeStepOf(currentOrder, org);
+    const activeTokens = currentOrder
+      ? collectActiveElementIds(tokensFor(instanceOf(currentOrder, org)))
+      : [];
+    const activeElementIds =
+      activeTokens.length > 0 ? activeTokens : [activeStepOf(currentOrder, org)].filter(Boolean);
 
-    if (!activeElementId) return [];
+    if (activeElementIds.length === 0) return [];
 
     const xml = schemaXml(org);
     const startHostId = startStepOf(xml)?.elementId || '';
@@ -2356,7 +2457,9 @@ export default function App() {
     );
 
     return listActions(xml)
-      .filter((entry) => entry.elementId === activeElementId && entry.elementId !== startHostId)
+      .filter(
+        (entry) => activeElementIds.includes(entry.elementId) && entry.elementId !== startHostId
+      )
       .map((entry) => resolveActionEntry(xml, entry))
       .filter((entry) => !KNOWN_ACTION_IDS.includes(entry.action.id))
       // Роль кнопки: своя (`act:userAction/@role`) либо роль узла. Шаг без роли —
@@ -2955,7 +3058,7 @@ export default function App() {
               <div>
                 {actionLoading[currentOrder.id] ? (
                   <RenderActionStatus orderId={currentOrder.id} />
-                ) : currentOrder.customerActiveElementId === securityPassAction?.elementId || (currentOrder.passData && !currentOrder.entryTime) ? (
+                ) : currentOrder.customerActiveElementId === securityPassAction?.elementId || isStepActive(currentOrder, 'CUSTOMER', securityPassAction?.elementId) || (currentOrder.passData && !currentOrder.entryTime) ? (
                   <div style={{ padding: '16px', backgroundColor: '#fef3c7', border: '1px solid #fde68a', borderRadius: '8px' }}>
                     <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#92400e' }}>🚚 Автоцистерна на КПП [Заказ {currentOrder.id}]</h4>
                     <p style={{ fontSize: '12px', color: '#b45309', margin: '0 0 12px 0' }}>
@@ -2990,7 +3093,7 @@ export default function App() {
               <div>
                 {actionLoading[currentOrder.id] ? (
                   <RenderActionStatus orderId={currentOrder.id} />
-                ) : currentOrder.customerActiveElementId === qualityApproveAction?.elementId || (currentOrder.entryTime && !isOrderCompleted(currentOrder)) ? (
+                ) : currentOrder.customerActiveElementId === qualityApproveAction?.elementId || isStepActive(currentOrder, 'CUSTOMER', qualityApproveAction?.elementId) || (currentOrder.entryTime && !isOrderCompleted(currentOrder)) ? (
                   <div style={{ padding: '16px', backgroundColor: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '8px' }}>
                     <p style={{ fontSize: '14px', margin: '0 0 12px 0' }}>🧪 Сырье доставлено. Провести экспресс-анализ молока [Заказ {currentOrder.id}].</p>
                     <ActionButton

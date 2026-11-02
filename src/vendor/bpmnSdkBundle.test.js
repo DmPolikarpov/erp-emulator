@@ -309,6 +309,9 @@ describe('вендорный бандл BPMN Client SDK', () => {
     // приходит, но подсветить его нечем — на схеме «не подсвечивается
     // активный блок» (так было с `Task_WaitForSupplierShipment`, который
     // отправляет `handleCustomerSendOrderToSupplier`).
+    //
+    // Параллельные шлюзы — тоже элементы схемы с подсветкой: движок ставит на
+    // них проходные токены, а `BpmnViewer` рисует по ним маркеры ветвления.
     expect(
       sdk.listFlowElements(sdk.DEFAULT_CUSTOMER_BPMN_XML).map((element) => element.id)
     ).toEqual([
@@ -316,8 +319,10 @@ describe('вендорный бандл BPMN Client SDK', () => {
       'Task_CreatePurchaseOrder',
       'Task_WaitForSupplierShipment',
       'Task_ReceiveDocsAndIssuePass',
+      'Gateway_PassAndQuality',
       'Task_SecurityCheck',
       'Task_QualityControl',
+      'Gateway_PassAndQualityJoin',
       'EndEvent_Customer',
     ]);
 

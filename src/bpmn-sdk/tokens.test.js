@@ -1,4 +1,5 @@
 import {
+  applyTokenIdUpdate,
   applyTokenUpdate,
   collectActiveElementIds,
   isDeployInstanceId,
@@ -131,6 +132,36 @@ describe('tokens: applyTokenUpdate', () => {
   });
 });
 
+describe('tokens: applyTokenIdUpdate', () => {
+  it('запоминает идентификатор токена активного узла', () => {
+    const initial = { Task_1: 'token-1' };
+    const next = applyTokenIdUpdate(initial, 'Task_2', 'token-2', 'ACTIVE');
+
+    expect(next).toEqual({ Task_1: 'token-1', Task_2: 'token-2' });
+    expect(initial).toEqual({ Task_1: 'token-1' });
+  });
+
+  it('снимает подсказку, когда токен закрыт', () => {
+    expect(applyTokenIdUpdate({ Task_1: 'token-1' }, 'Task_1', 'token-1', 'COMPLETED')).toEqual(
+      {}
+    );
+  });
+
+  it('не запоминает пустой идентификатор: подсказки нет', () => {
+    expect(applyTokenIdUpdate({ Task_1: 'token-1' }, 'Task_2', '', 'ACTIVE')).toEqual({
+      Task_1: 'token-1',
+    });
+    expect(applyTokenIdUpdate({}, 'Task_2', undefined, 'ACTIVE')).toEqual({});
+  });
+
+  it('игнорирует обновление без идентификатора элемента', () => {
+    expect(applyTokenIdUpdate({ Task_1: 'token-1' }, '', 'token-2', 'ACTIVE')).toEqual({
+      Task_1: 'token-1',
+    });
+    expect(applyTokenIdUpdate(undefined, null, 'token-2', 'ACTIVE')).toEqual({});
+  });
+});
+
 describe('tokens: collectActiveElementIds', () => {
   it('возвращает только активные узлы', () => {
     expect(
@@ -154,6 +185,7 @@ describe('tokens: parseTokenMessage', () => {
     instance_id: 'inst-cust-1',
     element_id: 'Task_Approve',
     state: 'ACTIVE',
+    token_id: 'token-7',
     timestamp: '2026-01-01T00:00:00Z',
     payload: { order: 'A-1' },
   };
@@ -163,6 +195,7 @@ describe('tokens: parseTokenMessage', () => {
       instanceId: 'inst-cust-1',
       elementId: 'Task_Approve',
       state: 'ACTIVE',
+      tokenId: 'token-7',
       timestamp: '2026-01-01T00:00:00Z',
       payload: { order: 'A-1' },
     });
@@ -184,9 +217,18 @@ describe('tokens: parseTokenMessage', () => {
       instanceId: 'inst-cust-1',
       elementId: 'Task_Approve',
       state: 'COMPLETED',
+      tokenId: '',
       timestamp: null,
       payload: null,
     });
+  });
+
+  // M1.1: `token_id` — единственный способ отличить две ожидающие задачи на
+  // параллельных ветвях; клиент возвращает его движку в `output_data`.
+  it('отдаёт идентификатор токена движка и не пропускает чужие типы', () => {
+    expect(parseTokenMessage(validMessage).tokenId).toBe('token-7');
+    expect(parseTokenMessage({ ...validMessage, token_id: 42 }).tokenId).toBe('');
+    expect(parseTokenMessage({ ...validMessage, token_id: null }).tokenId).toBe('');
   });
 
   it('отбрасывает аудит-события движка', () => {

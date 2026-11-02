@@ -45,9 +45,15 @@ export function deployInstanceId(orgType) {
  * (`{process_id, event_type, payload}`). Для подсветки интересны только
  * сообщения с `event === 'token_updated'`.
  *
+ * `token_id` — идентификатор токена движка (не `element_id`): их два, когда
+ * экземпляр стоит на параллельных ветвях. Клиент отправляет его обратно в
+ * `output_data` при завершении шага, иначе движок не знает, какую из двух
+ * ожидающих задач закрывать (`runtime/mod.rs`, `host_step`).
+ *
  * @param {string|Object} raw текст или уже разобранный объект сообщения
  * @returns {{instanceId: string, elementId: string, state: string,
- *            timestamp: string|null, payload: Object|null}|null}
+ *            tokenId: string, timestamp: string|null,
+ *            payload: Object|null}|null}
  */
 export function parseTokenMessage(raw) {
   let data = raw;
@@ -73,6 +79,7 @@ export function parseTokenMessage(raw) {
     instanceId,
     elementId,
     state,
+    tokenId: typeof data.token_id === 'string' ? data.token_id : '',
     timestamp: data.timestamp || null,
     payload: data.payload || null,
   };
@@ -155,4 +162,32 @@ export function collectActiveElementIds(tokens) {
   return Object.keys(tokens).filter(
     (elementId) => tokens[elementId] === TOKEN_STATES.ACTIVE
   );
+}
+
+/**
+ * Иммутабельно запоминает идентификатор токена движка для узла.
+ *
+ * Подсказка нужна только активному шагу: по ней движок выбирает, какую из двух
+ * ожидающих задач закрывать (`output_data.token_id`, дизайн 5.2). Поэтому
+ * `COMPLETED`/`FAILED` запись снимает: токен закрыт, а устаревший идентификатор
+ * отправил бы завершение в никуда.
+ *
+ * @param {Object<string, string>} [tokenIds] карта `element_id -> token_id`.
+ * @param {string} elementId узел, о котором сообщил движок.
+ * @param {string} tokenId `token_id` из WS-сообщения (может быть пустым).
+ * @param {string} state состояние токена (`TOKEN_STATES`).
+ * @returns {Object<string, string>} новая карта.
+ */
+export function applyTokenIdUpdate(tokenIds, elementId, tokenId, state) {
+  if (!elementId) return tokenIds || {};
+
+  const next = { ...(tokenIds || {}) };
+
+  if (state !== TOKEN_STATES.ACTIVE || !tokenId) {
+    delete next[elementId];
+    return next;
+  }
+
+  next[elementId] = tokenId;
+  return next;
 }

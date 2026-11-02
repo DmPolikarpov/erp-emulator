@@ -79,7 +79,8 @@ const EDITED_PROJECT_XML = buildProjectXml([
 ]);
 
 /**
- * Правка редактора: после ОТК добавлен блок приёмки сырья на склад в роли ОТК.
+ * Правка редактора: в ветвь ОТК (параллельная ветка заказчика) добавлен блок
+ * приёмки сырья на склад в роли ОТК.
  *
  * Кнопка блока — без параметров (только ключ, надпись и иконка): событие и узел
  * движения токена доводит сама схема (`resolveAction`), потому что у блока одна
@@ -87,20 +88,20 @@ const EDITED_PROJECT_XML = buildProjectXml([
  * он должен показать его общим блоком (`schemaStepActions`).
  */
 const XML_WITH_QUALITY_STEP = DEFAULT_CUSTOMER_BPMN_XML.replace(
-  '<bpmn:sequenceFlow id="Flow_C6" sourceRef="Task_QualityControl" targetRef="EndEvent_Customer" />',
+  '<bpmn:sequenceFlow id="Flow_C5_Quality" sourceRef="Task_QualityControl" targetRef="Gateway_PassAndQualityJoin" />',
   [
-    '<bpmn:sequenceFlow id="Flow_C6" sourceRef="Task_QualityControl" targetRef="Task_QualityStorage" />',
+    '<bpmn:sequenceFlow id="Flow_C5_Quality" sourceRef="Task_QualityControl" targetRef="Task_QualityStorage" />',
     '',
     '<bpmn:userTask id="Task_QualityStorage" name="Принять сырьё на склад ОТК">',
     '      <bpmn:extensionElements>',
     '        <act:userAction id="qualityStorageAccept" label="Принять сырьё на склад" icon="PackageCheck" />',
     '      </bpmn:extensionElements>',
-    '      <bpmn:incoming>Flow_C6</bpmn:incoming>',
+    '      <bpmn:incoming>Flow_C5_Quality</bpmn:incoming>',
     '      <bpmn:outgoing>Flow_C7</bpmn:outgoing>',
     '      <bpmn:potentialOwner name="QUALITY" />',
     '    </bpmn:userTask>',
     '',
-    '    <bpmn:sequenceFlow id="Flow_C7" sourceRef="Task_QualityStorage" targetRef="EndEvent_Customer" />',
+    '    <bpmn:sequenceFlow id="Flow_C7" sourceRef="Task_QualityStorage" targetRef="Gateway_PassAndQualityJoin" />',
   ].join('\n')
 );
 
@@ -542,6 +543,76 @@ describe('App: интеграция с BPMN Client SDK', () => {
     });
     // «Текущий шаг» (кнопки и карточка) остаётся один — последний активированный.
     expect(viewerProps.activeElementId).toBe('Task_SecurityCheck');
+  });
+
+  // M1.1, вторая половина: подсветки мало — на параллельных ветвях обе кнопки
+  // должны быть доступны сразу, иначе «параллельность» видна, но не играется.
+  // Демо-схема заказчика содержит ровно такой `parallelGateway`: после выписки
+  // пропуска охрана КПП и ОТК работают одновременно.
+  it('на параллельных ветвях кнопки охраны и ОТК доступны одновременно', () => {
+    const instanceId = 'inst-cust-parallel-buttons';
+
+    openAs('Охрана КПП');
+
+    emitToken({
+      instanceId,
+      elementId: 'Task_SecurityCheck',
+      state: 'ACTIVE',
+      payload: { orderNum: '№830' },
+    });
+    emitToken({
+      instanceId,
+      elementId: 'Task_QualityControl',
+      state: 'ACTIVE',
+      payload: { orderNum: '№830' },
+    });
+
+    // Ветвь охраны: кнопка на своём узле.
+    expect(screen.getByText('Проверить пропуск и открыть ворота')).toBeTruthy();
+
+    // Ветвь ОТК ждёт своей роли и не требует, чтобы охрана нажала первой:
+    // карточка сверяется с набором активных узлов, а не с `entryTime`.
+    fireEvent.click(screen.getByText('Выход'));
+    fireEvent.click(screen.getByText('Специалист ОТК'));
+
+    expect(
+      screen.getByText('Подтвердить качество и передать в Производство')
+    ).toBeTruthy();
+  });
+
+  // Движок закрывает шаг из двух ожидающих задач по `output_data.token_id`:
+  // `element_id` для этого не годится, он называет узел, а не токен
+  // (`runtime::pump::host_step`). Кабинет берёт идентификатор из WS-сообщения.
+  it('нажатие на параллельной ветви несёт `token_id` своего токена', async () => {
+    const instanceId = 'inst-cust-parallel-token';
+
+    openAs('Охрана КПП');
+
+    emitToken({
+      instanceId,
+      elementId: 'Task_SecurityCheck',
+      state: 'ACTIVE',
+      tokenId: `${instanceId}:token-security`,
+      payload: { orderNum: '№831' },
+    });
+    emitToken({
+      instanceId,
+      elementId: 'Task_QualityControl',
+      state: 'ACTIVE',
+      tokenId: `${instanceId}:token-quality`,
+      payload: { orderNum: '№831' },
+    });
+
+    fireEvent.click(screen.getByText('Проверить пропуск и открыть ворота'));
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalled());
+
+    const [sentInstance, , elementId, outputData] = mockSendEvent.mock.calls[0];
+
+    expect(sentInstance).toBe(instanceId);
+    // Следующий узел по схеме — слияние ветвей.
+    expect(elementId).toBe('Gateway_PassAndQualityJoin');
+    expect(outputData.token_id).toBe(`${instanceId}:token-security`);
   });
 
   // Просмотрщик показывает проект целиком, а токены приходят по экземплярам:
@@ -1215,10 +1286,11 @@ describe('App: интеграция с BPMN Client SDK', () => {
     const [instanceId, eventName, elementId] = mockSendEvent.mock.calls[0];
 
     // Кнопка без параметров: событие — умолчание схемы («шаг выполнен»), а узел —
-    // следующий блок по единственной исходящей связи.
+    // следующий блок по единственной исходящей связи. За складом ОТК стоит
+    // слияние параллельных ветвей, поэтому узел — `Gateway_PassAndQualityJoin`.
     expect(instanceId).toBe('inst-cust-quality-step');
     expect(eventName).toBe('CompleteBlock');
-    expect(elementId).toBe('EndEvent_Customer');
+    expect(elementId).toBe('Gateway_PassAndQualityJoin');
   });
 
   it('шаг схемы без обработчика виден только на своём узле и только своей роли', () => {
@@ -1252,7 +1324,15 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     expect(screen.getAllByText('Принять документы на складе').length).toBeGreaterThan(0);
 
-    // Токен ушёл на другой узел — кнопка шага уезжает вместе с ним.
+    // Токен ушёл на другой узел — кнопка шага уезжает вместе с ним. Движок
+    // закрывает прежний токен событием `COMPLETED`; кабинет подсвечивает набор
+    // активных узлов, поэтому закрытие нужно прислать так же, как в жизни.
+    emitToken({
+      instanceId: 'inst-cust-schema-step',
+      elementId: 'Task_WaitForSupplierShipment',
+      state: 'COMPLETED',
+      payload: { orderNum: '№911' },
+    });
     emitToken({
       instanceId: 'inst-cust-schema-step',
       elementId: 'Task_QualityControl',

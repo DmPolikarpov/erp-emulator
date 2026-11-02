@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { SOCKET_EVENTS } from '../client/wsClient';
 import {
+  applyTokenIdUpdate,
   applyTokenUpdate,
   collectActiveElementIds,
   isDeployInstanceId,
@@ -36,7 +37,9 @@ export function toInstanceIdList(instanceIds) {
  *   события служебных экземпляров деплоя (`inst-deploy-*`).
  * @returns {{
  *   tokensByInstance: Object<string, Object<string, string>>,
+ *   tokenIdsByInstance: Object<string, Object<string, string>>,
  *   tokensFor: (instanceId: string) => Object<string, string>,
+ *   tokenIdFor: (instanceId: string, elementId: string) => string,
  *   activeElementsFor: (instanceId: string) => string[],
  *   lastEvent: Object|null,
  *   reset: () => void
@@ -49,6 +52,7 @@ export function useProcessTokens(socket, instanceIds, options = {}) {
   const idsKey = ids.join('|');
 
   const [tokensByInstance, setTokensByInstance] = useState({});
+  const [tokenIdsByInstance, setTokenIdsByInstance] = useState({});
   const [lastEvent, setLastEvent] = useState(null);
 
   useEffect(() => {
@@ -75,12 +79,24 @@ export function useProcessTokens(socket, instanceIds, options = {}) {
           message.state
         ),
       }));
+      // Идентификатор токена нужен, чтобы завершить шаг на параллельной ветви:
+      // узлов два, и движок выбирает ожидающий токен по `output_data.token_id`.
+      setTokenIdsByInstance((previous) => ({
+        ...previous,
+        [message.instanceId]: applyTokenIdUpdate(
+          previous[message.instanceId],
+          message.elementId,
+          message.tokenId,
+          message.state
+        ),
+      }));
       setLastEvent(message);
     });
   }, [socket, idsKey, includeDeployInstances]);
 
   const reset = useCallback(() => {
     setTokensByInstance({});
+    setTokenIdsByInstance({});
     setLastEvent(null);
   }, []);
 
@@ -89,10 +105,24 @@ export function useProcessTokens(socket, instanceIds, options = {}) {
     [tokensByInstance]
   );
 
+  const tokenIdFor = useCallback(
+    (instanceId, elementId) =>
+      (tokenIdsByInstance[instanceId] || EMPTY_TOKENS)[elementId] || '',
+    [tokenIdsByInstance]
+  );
+
   const activeElementsFor = useCallback(
     (instanceId) => collectActiveElementIds(tokensByInstance[instanceId]),
     [tokensByInstance]
   );
 
-  return { tokensByInstance, tokensFor, activeElementsFor, lastEvent, reset };
+  return {
+    tokensByInstance,
+    tokenIdsByInstance,
+    tokensFor,
+    tokenIdFor,
+    activeElementsFor,
+    lastEvent,
+    reset,
+  };
 }

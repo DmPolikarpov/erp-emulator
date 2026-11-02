@@ -58,6 +58,9 @@ const TOKEN_MESSAGE = JSON.stringify({
   instance_id: 'inst-cust-1',
   element_id: 'Task_Approve',
   state: 'ACTIVE',
+  // Идентификатор токена движка: по нему кабинет завершает шаг на параллельной
+  // ветви (M1.1). Шлюз присылает его рядом с `element_id`.
+  token_id: 'token-7',
   timestamp: '2026-01-01T00:00:00Z',
 });
 
@@ -141,6 +144,7 @@ describe('wsClient: сообщения', () => {
       instanceId: 'inst-cust-1',
       elementId: 'Task_Approve',
       state: 'ACTIVE',
+      tokenId: 'token-7',
       timestamp: '2026-01-01T00:00:00Z',
       payload: null,
     });
