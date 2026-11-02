@@ -98,8 +98,15 @@ function contains(code, needle) {
   return escaped !== needle && code.includes(escaped);
 }
 
+/** Тесты и их окружение: CRA не включает их в production-бандл. */
+const TEST_DIRS = ['__tests__', '__mocks__'];
+const TEST_FILE = /\.test\.[jt]sx?$/;
+
 /**
  * Собирает время последнего изменения файлов каталога (рекурсивно).
+ *
+ * Тесты пропускаются: правка `*.test.js` не требует пересборки, иначе проверка
+ * «сборка не старше исходников» падала бы после любого прогона тестов.
  *
  * @param {string} dir каталог.
  * @param {number} [current] накопленный максимум.
@@ -114,9 +121,12 @@ function newestMtime(dir, current = 0) {
     const full = path.join(dir, entry.name);
 
     if (entry.isDirectory()) {
+      if (TEST_DIRS.includes(entry.name)) continue;
       newest = newestMtime(full, newest);
       continue;
     }
+
+    if (TEST_FILE.test(entry.name)) continue;
 
     const { mtimeMs } = fs.statSync(full);
     if (mtimeMs > newest) newest = mtimeMs;
