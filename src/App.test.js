@@ -511,6 +511,67 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(viewerProps.activeElementId).toBe('Task_WaitForSupplierShipment');
   });
 
+  // M1.1: `parallelGateway`/`inclusiveGateway` держат в экземпляре несколько
+  // ACTIVE-токенов, поэтому подсветка — карта `elementId → state`, а не один
+  // «текущий шаг»: просмотрщик навешивает маркеры на все активные узлы.
+  // Узлы взяты из контура Заказчика — схема должна узнавать их при отрисовке.
+  it('параллельные ветви подсвечиваются одновременно', () => {
+    openAs('Руководитель Заказчика');
+
+    const instanceId = 'inst-cust-parallel';
+
+    emitToken({
+      instanceId,
+      elementId: 'Task_QualityControl',
+      state: 'ACTIVE',
+      payload: { orderNum: '№820' },
+    });
+    emitToken({
+      instanceId,
+      elementId: 'Task_SecurityCheck',
+      state: 'ACTIVE',
+      payload: { orderNum: '№820' },
+    });
+
+    const viewerProps = lastProps(mockViewerProps);
+
+    // Обе ветви в подсветке: ни одна не «перетёрла» другую.
+    expect(viewerProps.tokens).toEqual({
+      Task_QualityControl: 'ACTIVE',
+      Task_SecurityCheck: 'ACTIVE',
+    });
+    // «Текущий шаг» (кнопки и карточка) остаётся один — последний активированный.
+    expect(viewerProps.activeElementId).toBe('Task_SecurityCheck');
+  });
+
+  // Просмотрщик показывает проект целиком, а токены приходят по экземплярам:
+  // у Заказчика и Поставщика они разные, и подсветка должна собрать обе стороны.
+  it('токены контуров складываются в одну подсветку', () => {
+    openAs('Руководитель Заказчика');
+
+    emitToken({
+      instanceId: 'inst-cust-merge',
+      elementId: 'Task_WaitForSupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№821' },
+    });
+    // Экземпляр поставщика движок создаёт по сообщению сам; карточку заказа он
+    // находит по `orderNum`, поэтому подсветка обязана склеить два контура.
+    emitToken({
+      instanceId: 'inst-supp-merge',
+      elementId: 'Task_SupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№821' },
+    });
+
+    const viewerProps = lastProps(mockViewerProps);
+
+    expect(viewerProps.tokens).toEqual({
+      Task_WaitForSupplierShipment: 'ACTIVE',
+      Task_SupplierShipment: 'ACTIVE',
+    });
+  });
+
   it('COMPLETED по незнакомому экземпляру не создаёт заказ', () => {
     openAs('Руководитель Заказчика');
 

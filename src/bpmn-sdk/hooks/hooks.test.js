@@ -82,6 +82,33 @@ describe('useProcessTokens', () => {
     expect(result.current.lastEvent.instanceId).toBe('inst-supp-1');
   });
 
+  // M1.1: параллельные ветви — несколько ACTIVE-токенов одного экземпляра.
+  // Хук обязан отдать набор, иначе подсветка покажет только последний узел.
+  it('держит набор активных узлов (параллельные ветви)', () => {
+    const socket = createSocketStub();
+    const { result } = renderHook(() => useProcessTokens(socket, []));
+
+    act(() => {
+      socket.emit(
+        SOCKET_EVENTS.TOKEN,
+        tokenMessage('inst-cust-1', 'Task_A', TOKEN_STATES.ACTIVE)
+      );
+      socket.emit(
+        SOCKET_EVENTS.TOKEN,
+        tokenMessage('inst-cust-1', 'Task_B', TOKEN_STATES.ACTIVE)
+      );
+    });
+
+    expect(result.current.tokensFor('inst-cust-1')).toEqual({
+      Task_A: TOKEN_STATES.ACTIVE,
+      Task_B: TOKEN_STATES.ACTIVE,
+    });
+    expect(result.current.activeElementsFor('inst-cust-1')).toEqual([
+      'Task_A',
+      'Task_B',
+    ]);
+  });
+
   it('заменяет состояние токена при повторном событии', () => {
     const socket = createSocketStub();
     const { result } = renderHook(() => useProcessTokens(socket, []));
