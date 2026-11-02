@@ -65,6 +65,25 @@ describe('projectXml: сборка проекта', () => {
     expect(Number(supplierShape[2])).toBeGreaterThan(200);
   });
 
+  // Дорожки разводятся по фактической высоте пула, а не по фиксированному шагу:
+  // после M1.1 демо-схема заказчика выше `PROJECT_ROW_OFFSET` (параллельные
+  // ветви охраны и ОТК), и шаг «240 вниз» наехал бы пулом на соседа.
+  it('держит пулы врозь, если схема выше шага дорожек', () => {
+    const project = buildProjectXml([
+      { xml: DEFAULT_CUSTOMER_BPMN_XML, participantName: 'Заказчик' },
+      { xml: DEFAULT_SUPPLIER_BPMN_XML, participantName: 'Поставщик' },
+    ]);
+
+    const pools = [
+      ...project.matchAll(
+        /<bpmndi:BPMNShape id="Participant_[^"]+_di"[\s\S]*?<dc:Bounds x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="([\d.]+)"/g
+      ),
+    ].map((match) => ({ top: Number(match[1]), bottom: Number(match[1]) + Number(match[2]) }));
+
+    expect(pools).toHaveLength(2);
+    expect(pools[0].bottom).toBeLessThanOrEqual(pools[1].top);
+  });
+
   it('сохраняет каталог ролей каждого процесса', () => {
     const catalog = getRoleCatalog(DEFAULT_PROJECT_BPMN_XML);
     const titles = catalog.map((role) => role.title);

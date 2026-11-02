@@ -262,6 +262,11 @@ export function buildProjectXml(processes, options = {}) {
     });
   });
 
+  // Верх следующей дорожки. `rowOffset` — минимальный шаг: процесс с высокой
+  // схемой (параллельные ветви, несколько дорожек) сдвигает соседа ниже, иначе
+  // пулы наехали бы друг на друга (`bounds.bottom` больше шага).
+  let offset = 0;
+
   list.forEach((item, index) => {
     const block = processBlockOf(item.xml, item.processId);
 
@@ -272,7 +277,6 @@ export function buildProjectXml(processes, options = {}) {
 
     const processId = attributeOf(block, 'id');
     const processName = attributeOf(block, 'name') || processId;
-    const offset = index * rowOffset;
 
     processXml.push(block);
 
@@ -286,14 +290,18 @@ export function buildProjectXml(processes, options = {}) {
 
     const nodes = processDi(item.xml, block, offset);
     const bounds = boundsOf(nodes);
+    const poolTop = Math.max(offset - 20, 0);
+    const poolHeight = Math.max(bounds.bottom - offset + 60, 160);
 
     di.push(
       '      <bpmndi:BPMNShape id="' + participantId + '_di" bpmnElement="' + participantId + '" isHorizontal="true">',
-      '        <dc:Bounds x="40" y="' + Math.max(offset - 20, 0) + '" width="' + Math.max(bounds.right + 80, 700) +
-        '" height="' + Math.max(bounds.bottom - offset + 60, 160) + '" />',
+      '        <dc:Bounds x="40" y="' + poolTop + '" width="' + Math.max(bounds.right + 80, 700) +
+        '" height="' + poolHeight + '" />',
       '      </bpmndi:BPMNShape>'
     );
     di.push(...nodes.map((node) => '      ' + node));
+
+    offset = Math.max(offset + rowOffset, poolTop + poolHeight + 20);
   });
 
   return [
