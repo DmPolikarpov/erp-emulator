@@ -151,6 +151,17 @@ Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
 The page will reload when you make changes.\
 You may also see any lint errors in the console.
 
+Если старт падает с `Invalid options object. Dev Server has been initialized
+using an options object that does not match the API schema. - options.allowedHosts[0]
+should be a non-empty string`, это `react-scripts` + включённый `proxy`: он берёт
+`allowedHosts` из приватного IPv4 машины, а первый не-internal адрес здесь —
+Radmin VPN (`26.220.114.239`), поэтому `lanUrlForConfig` пуст. Положите в
+`.env.development.local` (файл в `.gitignore`) строку
+`DANGEROUSLY_DISABLE_HOST_CHECK=true` — и `npm start` заработает как обычно.
+`HOST=localhost` не помогает: `lanUrlForConfig` остаётся пустым при любом `HOST`.
+Диагностика — `node ..\..\wip\probe-allowed-host.cjs`; подробнее — таблица
+диагностики в основном [README](../../README.md).
+
 ### `npm test`
 
 Launches the test runner in the interactive watch mode.\
