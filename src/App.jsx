@@ -17,8 +17,10 @@ import {
   collectActiveElementIds,
   createUuid,
   extractProcessXml,
+  findMessageThrow,
   getElementRole,
   getLocalName,
+  getMessageWait,
   getOutgoingTargetIds,
   getProcessIds,
   getProjectProcesses,
@@ -2500,6 +2502,56 @@ export default function App() {
     };
   })();
 
+  /**
+   * Активный шаг ждёт сообщение (catch-событие)?
+   *
+   * Узел `intermediateCatchEvent` с `messageEventDefinition` кнопок не имеет:
+   * команду присылает вторая сторона, и токен сдвигается сам (M3/M5). Без
+   * подсказки панель действий выглядела бы пустой, а «текущий шаг» показывал
+   * бы последний человеческий шаг — на этом месте демо раньше и «зависало».
+   *
+   * Ожидание ищется по набору `ACTIVE`-узлов (`collectActiveElementIds`):
+   * на параллельных ветвях их несколько, и ждать сообщение может любая.
+   *
+   * @type {{elementId: string, name: string, message: string}|null}
+   */
+  const activeMessageWait = (() => {
+    if (!currentOrder) return null;
+
+    const org = currentUser.org;
+    const xml = schemaXml(org);
+    const activeTokens = collectActiveElementIds(tokensFor(instanceOf(currentOrder, org)));
+    const elementIds =
+      activeTokens.length > 0
+        ? activeTokens
+        : [activeStepOf(currentOrder, org)].filter(Boolean);
+
+    return elementIds.map((elementId) => getMessageWait(xml, elementId)).find(Boolean) || null;
+  })();
+
+  /**
+   * Кто дошлёт ожидаемое сообщение.
+   *
+   * Отправитель ищется по схемам **других** контуров: имя сообщения — общий
+   * ключ обмена (`bpmn:message/@name`), а `messageRef` в каждом процессе свой.
+   * Если отправителя в проекте нет (сообщение приходит из внешней системы),
+   * подсказка называет ожидание без второй стороны.
+   *
+   * @type {{org: 'CUSTOMER'|'SUPPLIER'|'CLIENT', source: object}|null}
+   */
+  const messageSender = (() => {
+    if (!activeMessageWait) return null;
+
+    return (
+      CONTOUR_KEYS.filter((key) => key !== currentUser.org)
+        .map((key) => ({
+          org: key,
+          source: findMessageThrow(schemaXml(key), activeMessageWait.message),
+        }))
+        .find((item) => item.source) || null
+    );
+  })();
+
   /* ------------------------------ *
    * Локальный кэш схемы в браузере
    * ------------------------------ */
@@ -3161,6 +3213,24 @@ export default function App() {
                 <p style={{ fontSize: '12px', margin: 0, color: '#1e3a8a' }}>
                   Команда опубликована в <code>mes.out.v1.cmd.{activeExternalTask.topic}</code>.
                   Результат придёт в кабинет автоматически: ответ воркера двигает процесс дальше.
+                </p>
+              </div>
+            )}
+
+            {/* 7.2. ОЖИДАНИЕ СООБЩЕНИЯ (catch-событие). Кнопок у шага нет:
+                команду пришлёт вторая сторона, и токен сдвинет её сообщение.
+                Подсказка называет сообщение и отправителя, иначе пустая панель
+                действий читается как «процесс завис». */}
+            {currentOrder && schemaStepActions.length === 0 && !activeExternalTask && activeMessageWait && (
+              <div style={{ padding: '16px', backgroundColor: '#fefce8', border: '1px solid #fde68a', borderRadius: '8px', marginBottom: '16px' }}>
+                <p style={{ fontSize: '14px', margin: '0 0 8px 0', color: '#92400e' }}>
+                  ⏳ Шаг «{activeMessageWait.name}» ждёт сообщение <code>{activeMessageWait.message}</code> [Заказ {currentOrder.id}].
+                </p>
+                <p style={{ fontSize: '12px', margin: 0, color: '#a16207' }}>
+                  {messageSender
+                    ? <>Сообщение дошлёт контур «{CONTOUR_LABELS[messageSender.org] || messageSender.org}» на шаге «{messageSender.source.name}».</>
+                    : <>Сообщение приходит из внешней системы.</>}
+                  {' '}Токен движка стоит на catch-событии и сдвинется сам: нажимать нечего.
                 </p>
               </div>
             )}

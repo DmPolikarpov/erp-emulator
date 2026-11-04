@@ -751,6 +751,152 @@ export function getNextElementId(xml, elementId) {
   return targets.length === 1 ? targets[0] : '';
 }
 
+/* ------------------------------------------------------------------ *
+ * Сообщения: объявления и throw/catch-события
+ * ------------------------------------------------------------------ */
+
+/**
+ * Роль узла в обмене сообщениями: `'throw'` — отправляет, `'catch'` — ждёт.
+ *
+ * Типы перечислены те, что движок исполняет (`ENGINE_FLOW_NODE_TYPES`) или
+ * читает как события сообщений (`runtime/messages.rs`): промежуточные
+ * события сообщений, а также стартовое (ловит) и конечное (шлёт) события.
+ * `sendTask`, `receiveTask` и `boundaryEvent` движок не исполняет, поэтому в
+ * списке их нет: подсказка по узлу, который не скомпилируется, не нужна.
+ */
+const MESSAGE_EVENT_KINDS = {
+  startEvent: 'catch',
+  intermediateCatchEvent: 'catch',
+  intermediateThrowEvent: 'throw',
+  endEvent: 'throw',
+};
+
+/**
+ * Объявления `bpmn:message` схемы: `id` → `name`.
+ *
+ * `messageEventDefinition/@messageRef` ссылается на объявление, а человеку
+ * нужно имя сообщения (`MilkShipped`), а не идентификатор
+ * (`Message_MilkShipped`).
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {Object<string, string>} например `{Message_MilkShipped: 'MilkShipped'}`.
+ */
+export function getMessageNames(xml) {
+  if (typeof xml !== 'string') return {};
+
+  const doc = parseXml(xml);
+  if (!doc) return {};
+
+  return Array.from(doc.getElementsByTagName('*'))
+    .filter((node) => getLocalName(node) === 'message')
+    .reduce((names, node) => {
+      const id = node.getAttribute('id') || '';
+      if (id !== '') names[id] = node.getAttribute('name') || id;
+      return names;
+    }, {});
+}
+
+/**
+ * Событие сообщения на узле — или `null`, если узел к сообщениям не относится.
+ *
+ * Имя сообщения: объявление (`bpmn:message/@name` по `messageRef`), иначе сам
+ * `messageRef`, иначе имя события — так же его читает движок
+ * (`message_event_name` в `runtime/messages.rs`), поэтому подсказка кабинета
+ * совпадает с тем, что ждёт рантайм.
+ *
+ * @param {Element} node Узел DOM.
+ * @param {Object<string, string>} names Объявления `getMessageNames`.
+ * @returns {{elementId: string, kind: 'throw'|'catch', type: string, name: string, message: string, messageRef: string}|null}
+ */
+const messageEventOf = (node, names) => {
+  const type = getLocalName(node);
+  const kind = MESSAGE_EVENT_KINDS[type] || '';
+  if (!kind) return null;
+
+  const definition = Array.from(node.getElementsByTagName('*')).find(
+    (child) => getLocalName(child) === 'messageEventDefinition'
+  );
+  if (!definition) return null;
+
+  const elementId = node.getAttribute('id') || '';
+  const ownName = node.getAttribute('name') || '';
+  const messageRef = definition.getAttribute('messageRef') || '';
+  const message = names[messageRef] || messageRef || ownName || elementId;
+
+  return { elementId, kind, type, name: ownName || message, message, messageRef };
+};
+
+/**
+ * События сообщений схемы в порядке документа.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {Array<{elementId: string, kind: 'throw'|'catch', type: string, name: string, message: string, messageRef: string}>}
+ */
+export function listMessageEvents(xml) {
+  if (typeof xml !== 'string') return [];
+
+  const doc = parseXml(xml);
+  if (!doc) return [];
+
+  const names = getMessageNames(xml);
+
+  return Array.from(doc.getElementsByTagName('*'))
+    .map((node) => messageEventOf(node, names))
+    .filter((event) => event !== null && event.elementId !== '');
+}
+
+/**
+ * Событие сообщения на конкретном узле (`null`, если узел — не событие сообщения).
+ *
+ * @param {string} xml BPMN-схема.
+ * @param {string} elementId узел (`element_id`).
+ * @returns {{elementId: string, kind: 'throw'|'catch', type: string, name: string, message: string, messageRef: string}|null}
+ */
+export function getMessageEvent(xml, elementId) {
+  if (!elementId) return null;
+
+  return listMessageEvents(xml).find((event) => event.elementId === elementId) || null;
+}
+
+/**
+ * Узел ждёт сообщение (catch-событие)?
+ *
+ * По такому узлу у кабинета нет кнопок: команду присылает вторая сторона, и
+ * токен сдвигается сам (`runtime::messages`). Подсказка «ждём сообщение»
+ * объясняет пустую панель действий.
+ *
+ * @param {string} xml BPMN-схема.
+ * @param {string} elementId узел.
+ * @returns {{elementId: string, kind: 'catch', type: string, name: string, message: string, messageRef: string}|null}
+ */
+export function getMessageWait(xml, elementId) {
+  const event = getMessageEvent(xml, elementId);
+
+  return event && event.kind === 'catch' ? event : null;
+}
+
+/**
+ * Узел, отправляющий сообщение `message` (по имени), — отправитель.
+ *
+ * Нужен подсказке «ждём сообщение»: кабинет называет вторую сторону, чей
+ * процесс дошлёт сообщение. Сравнение идёт по имени сообщения, а не по
+ * `messageRef`: в разных процессах объявления могут называться по-разному, а
+ * связывает их как раз имя (`bpmn:message/@name`).
+ *
+ * @param {string} xml BPMN-схема.
+ * @param {string} message имя сообщения (например `MilkShipped`).
+ * @returns {{elementId: string, kind: 'throw', type: string, name: string, message: string, messageRef: string}|null}
+ */
+export function findMessageThrow(xml, message) {
+  if (!message) return null;
+
+  return (
+    listMessageEvents(xml).find(
+      (event) => event.kind === 'throw' && event.message === message
+    ) || null
+  );
+}
+
 /**
  * Событие кнопки: её собственное (`event`) либо `DEFAULT_ACTION_EVENT`.
  *

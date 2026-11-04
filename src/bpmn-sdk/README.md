@@ -61,6 +61,8 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
   `deployInstanceId`;
 - логика XML: `listFlowElements`, `getProcessIds`, `getElementIds`, `isValidXml`,
   `isValidElementId`, `isElementIdAvailable`, `renameElementId`, `parseXml`, `getLocalName`;
+- события-сообщения (`bpmn:message` + throw/catch): `getMessageNames`,
+  `listMessageEvents`, `getMessageEvent`, `getMessageWait`, `findMessageThrow`;
 - совместимость схемы с движком: `validateEngineSchema`, `ENGINE_FLOW_NODE_TYPES`,
   `SCHEMA_PROBLEM`;
 - роль исполнителя узла (`bpmn:potentialOwner`): `getElementRole`, `getRoleAssignments`,

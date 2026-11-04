@@ -108,6 +108,12 @@ const PUBLIC_API = [
   'ACTION_MODELE_EXTENSIONS',
   'ACTION_TAG_NAME',
   'ACTION_ICON_PATTERN',
+  // события-сообщения (bpmn:message + throw/catch): ожидание и отправитель
+  'getMessageNames',
+  'listMessageEvents',
+  'getMessageEvent',
+  'getMessageWait',
+  'findMessageThrow',
 ];
 
 /**

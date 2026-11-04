@@ -615,6 +615,74 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(outputData.token_id).toBe(`${instanceId}:token-security`);
   });
 
+  // M3/M5, кабинет: на catch-событии кнопок нет, и раньше панель действий
+  // просто пустела — на показе это читалось как «процесс завис». Теперь шаг
+  // ожидания объясняется: какое сообщение ждём и кто его дошлёт. Подсказка
+  // берётся из схемы (`getMessageWait`/`findMessageThrow`), а не из кода
+  // кабинета, поэтому работает и для проекта, загруженного из редактора.
+  it('ожидание сообщения объясняется подсказкой вместо пустых кнопок', () => {
+    createProject({ name: 'Молочный завод (ожидание)', xml: DAIRY_PLANT_PROJECT_XML });
+
+    openAs('Менеджер по закупкам');
+
+    emitToken({
+      instanceId: 'inst-cust-wait-message',
+      elementId: 'Task_WaitPOConfirmed',
+      state: 'ACTIVE',
+      payload: { orderNum: '№901' },
+    });
+
+    // Шаг назван по событию схемы, сообщение — по объявлению `bpmn:message`.
+    expect(screen.getByText(/ждёт сообщение/).textContent).toContain(
+      'Ожидание подтверждения заказа'
+    );
+    expect(screen.getByText('PurchaseOrderConfirmed')).toBeTruthy();
+    // Отправитель — вторая сторона проекта: подтверждение шлёт Поставщик.
+    expect(screen.getByText(/Сообщение дошлёт контур «ПОСТАВЩИК»/)).toBeTruthy();
+
+    // На человеческом шаге подсказки нет: там ждут кнопку, а не сообщение.
+    // Движок закрывает catch-событие `COMPLETED` в момент активации следующего
+    // узла — так же, как это делают тесты подсветки выше.
+    emitToken({
+      instanceId: 'inst-cust-wait-message',
+      elementId: 'Task_WaitPOConfirmed',
+      state: 'COMPLETED',
+      payload: {},
+    });
+    emitToken({
+      instanceId: 'inst-cust-wait-message',
+      elementId: 'Task_ReceiveMilk',
+      state: 'ACTIVE',
+      payload: { orderNum: '№901' },
+    });
+
+    expect(screen.queryByText(/ждёт сообщение/)).toBeNull();
+  });
+
+  // Подсказка объясняет ожидание, но показ должен видеть и сам узел: токен
+  // приходит на catch-событие, а просмотрщик рисует маркер по карте токенов.
+  // Схему в кабинете показывает только руководитель завода (`DIRECTOR`,
+  // `kind="EXECUTIVE"`), поэтому проверяем от него.
+  it('catch-событие подсвечивается на самом узле ожидания', () => {
+    createProject({ name: 'Молочный завод (подсветка)', xml: DAIRY_PLANT_PROJECT_XML });
+
+    openAs('Директор завода');
+
+    emitToken({
+      instanceId: 'inst-cust-wait-highlight',
+      elementId: 'Task_WaitPOConfirmed',
+      state: 'ACTIVE',
+      payload: { orderNum: '№902' },
+    });
+
+    const viewerProps = lastProps(mockViewerProps);
+
+    // Подсветка стоит на ожидании, а не на предыдущем человеческом шаге
+    // (`Task_CheckStock`), и «текущий шаг» — тоже оно.
+    expect(viewerProps.tokens).toEqual({ Task_WaitPOConfirmed: 'ACTIVE' });
+    expect(viewerProps.activeElementId).toBe('Task_WaitPOConfirmed');
+  });
+
   // Просмотрщик показывает проект целиком, а токены приходят по экземплярам:
   // у Заказчика и Поставщика они разные, и подсветка должна собрать обе стороны.
   it('токены контуров складываются в одну подсветку', () => {
