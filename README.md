@@ -139,6 +139,41 @@ Jest и через `<script>`.
 Витрина `<script>`-подключения: `npm run sdk:demo && npm start` →
 [http://localhost:3000/sdk-demo.html](http://localhost:3000/sdk-demo.html).
 
+## Кто инициализирует заказ
+
+Заказ создаёт **не руководитель**, а та роль, что объявлена в кнопке старта схемы
+(`act:userAction/@role` на `bpmn:startEvent`). Кабинет сравнивает её с ролью
+сессии в `App.jsx` (`canCreateOrder`), движок — независимо от клиента в
+`runtime/roles.rs` (`decide_start`): чужой `StartProcess` получает **403** с
+текстом «Роль DIRECTOR не может запустить процесс Process_Dairy: нужна роль
+SALES». Роль с `kind="EXECUTIVE"` («Директор завода», «Руководитель …») даёт
+схему, метрики и редактор — кнопку старта она не получает.
+
+| Проект (умолчание кабинета) | Контур | Кнопка старта в схеме | Роль-инициатор | Вход |
+| --- | --- | --- | --- | --- |
+| «Закупка и приёмка молока» (`defaults/milkProcess.js`) | CUSTOMER | `createOrder` на `StartEvent_Customer` | `PRODUCTION` — «Мастер производства» | `production` / `123` |
+| «Закупка и приёмка молока» | SUPPLIER | `startSupplierProcess` на `StartEvent_Supplier`, роль не указана | любая роль контура (общая очередь) | `supplier_manager` / `123` |
+| «Молочный завод: заказ → производство → отгрузка» (`defaults/dairyPlant.js`) | CUSTOMER | `createOrder` на `Start_Dairy` → `Task_ReceiveOrder` | `SALES` — «Менеджер по продажам» | `sales` / `123` |
+| «Молочный завод» | CLIENT | `placeClientOrder` на `Start_Client` → `Task_ConfirmOrder` | `CLIENT` — «Менеджер клиента» | `client` / `123` |
+| «Молочный завод» | SUPPLIER | `startSupplierProcess` на `Start_Supplier` → `Task_ConfirmPO` | `SUPPLIER_MANAGER` — «Менеджер по продажам сырья» | `supplier_manager` / `123` |
+
+Пароль у всех ролей один — `123` (`roleIcons.js`, `DEFAULT_PASSWORD`), логины —
+`loginOf(code)`; карточки на экране входа подписаны титулами из `role:catalog` и
+сгруппированы по контурам.
+
+Поставщика в обоих проектах руками обычно не запускают: его экземпляр создаёт
+триггер из контура Заказчика (`trg:processTrigger`) — `sendToSupplier` в
+«Закупке…», `Task_SendPO` в «Молочном заводе». У «Молочного завода» есть вторая
+точка входа — Клиент: `Event_SendOrder` тем же триггером создаёт экземпляр
+завода (`startElementId="Event_SendOrder"`), поэтому заказ клиента доезжает до
+завода без ручного старта.
+
+Если в схеме кнопки `createOrder` нет, кабинет показывает блок «Запуск по схеме»
+(`App.jsx`): процесс стартует со стартового события, а роль всё равно проверяет
+движок. Поменять инициатора можно без правки кода — правая панель под ролью
+`EXECUTIVE` (`BpmnEditor`) → «Кнопки участников на узле» → поле «Роль участника
+(role)» → сохранить и задеплоить схему.
+
 ## Available Scripts
 
 In the project directory, you can run:
