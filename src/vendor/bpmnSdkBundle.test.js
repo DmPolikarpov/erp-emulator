@@ -113,6 +113,7 @@ const PUBLIC_API = [
   'listMessageEvents',
   'getMessageEvent',
   'getMessageWait',
+  'getStartMessageWait',
   'findMessageThrow',
 ];
 

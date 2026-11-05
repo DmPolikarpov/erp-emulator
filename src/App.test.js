@@ -1469,12 +1469,27 @@ describe('App: интеграция с BPMN Client SDK', () => {
     });
 
     openAs('Менеджер по продажам');
-    fireEvent.click((await screen.findAllByText('Принять заказ клиента'))[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalled());
+    // Заказ у завода не заводят кнопкой: он приходит от клиента сообщением
+    // ClientOrder, и экземпляр завода создаёт триггер `Event_SendOrder`. Поэтому
+    // у менеджера нет ни кнопки старта, ни «Запуска по схеме» — есть приём.
+    expect(screen.queryByText('Принять заказ клиента')).toBeNull();
+    expect(screen.queryByText('Запуск по схеме')).toBeNull();
+    expect(screen.getByText('Приём заказов')).toBeTruthy();
 
-    const orderNum = mockSendEvent.mock.calls[0][3].orderNum;
-    const plantInstanceId = mockSendEvent.mock.calls[0][0];
+    // Движок создал экземпляр завода по сообщению: кабинет узнаёт о заказе из
+    // токена (`inst-cust-<orderNum>`) и показывает менеджеру его шаг.
+    const orderNum = '№915';
+    const plantInstanceId = 'inst-cust-m3';
+
+    emitToken({
+      instanceId: plantInstanceId,
+      elementId: 'Task_ReceiveOrder',
+      state: 'ACTIVE',
+      payload: { orderNum },
+    });
+
+    expect(await screen.findByText('Зарегистрировать заказ в 1С:УТ')).toBeTruthy();
 
     // Один токен завода прошёл закупку: шаг отправки активен.
     emitToken({
@@ -1895,6 +1910,13 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     fireEvent.click(screen.getByText(/Оформить заказ заводу/));
 
+    // Схема завода уходит в движок до сообщения: экземпляр `Process_Dairy`
+    // создаёт триггер `Event_SendOrder`, а не кабинет — ручной кнопки старта у
+    // завода нет, поэтому определение готовит сторона, отправляющая заказ.
+    await waitFor(() => expect(mockDeploySchema).toHaveBeenCalled());
+    expect(mockDeploySchema.mock.calls[0][0]).toBe('CUSTOMER');
+    expect(mockDeploySchema.mock.calls[0][1]).toContain('Process_Dairy');
+
     await waitFor(() => expect(mockCreateOrder).toHaveBeenCalledTimes(1));
     expect(mockCreateOrder.mock.calls[0][0]).toMatchObject({ orderNum: '№101' });
 
@@ -2093,14 +2115,9 @@ describe('App: интеграция с BPMN Client SDK', () => {
    * ------------------------------------------------------------------ */
 
   it('создание заказа уходит в API с полями формы (M4)', async () => {
-    createProject({
-      name: 'Молочный завод (M4)',
-      xml: buildProjectXml([
-        { xml: DAIRY_PLANT_PROCESS_XML, participantName: 'Молочный завод' },
-        { xml: DAIRY_SUPPLIER_PROCESS_XML, participantName: 'Поставщик сырья' },
-      ]),
-    });
-
+    // Контур, который заводит заказ сам, — производство демо-проекта: у завода
+    // в «Молочном заводе» такой кнопки нет, его заказ приходит от клиента
+    // сообщением (проверено тестом M3 выше).
     mockCreateOrder.mockResolvedValueOnce({
       ok: true,
       order: {
@@ -2128,13 +2145,12 @@ describe('App: интеграция с BPMN Client SDK', () => {
         dueDate: '2026-11-05',
         counterparty: 'ООО «Тест»',
         customerInstanceId: 'inst-cust-api',
-        customerActiveElementId: 'Task_ReceiveOrder',
+        customerActiveElementId: 'Task_CreatePurchaseOrder',
         customerProcessState: 'ACTIVE',
       },
     });
 
-    render(<App />);
-    fireEvent.click(screen.getByText('Менеджер по продажам'));
+    openAs('Мастер производства');
 
     // Форма заказа: «100 Л» без номенклатуры больше нет — поля редактируются.
     fireEvent.change(screen.getByLabelText('Поле заказа: Номенклатура'), {
@@ -2150,7 +2166,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
       target: { value: 'ООО «Тест»' },
     });
 
-    fireEvent.click((await screen.findAllByText('Принять заказ клиента'))[0]);
+    fireEvent.click((await screen.findAllByText('Создать внутренний заказ на 100 л'))[0]);
 
     await waitFor(() => expect(mockCreateOrder).toHaveBeenCalled());
 

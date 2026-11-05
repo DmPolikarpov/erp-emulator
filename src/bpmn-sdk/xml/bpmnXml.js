@@ -876,6 +876,40 @@ export function getMessageWait(xml, elementId) {
 }
 
 /**
+ * Стартовое событие ждёт сообщение (message start event)?
+ *
+ * Так объявляют вход в процесс, который открывает вторая сторона: у завода это
+ * заказ клиента (`ClientOrder`). Кнопки инициатора у такого старта нет и быть не
+ * должно — экземпляр создаёт триггер узла-отправителя (`trg:processTrigger`),
+ * поэтому кабинет не рисует ни кнопку старта, ни «Запуск по схеме»: заказ нельзя
+ * завести руками, его присылают.
+ *
+ * Движок читает стартовое событие без его определения (`parse_start_event`), так
+ * что `messageEventDefinition` — разметка для людей и кабинета, а не команда
+ * рантайму: экземпляр всё равно входит в `firstElementId` триггера.
+ *
+ * @param {string} xml BPMN-схема.
+ * @returns {{elementId: string, kind: 'catch', type: string, name: string, message: string, messageRef: string}|null}
+ *   стартовое событие-сообщение либо `null`, если старт запускают кнопкой.
+ */
+export function getStartMessageWait(xml) {
+  if (typeof xml !== 'string') return null;
+
+  const doc = parseXml(xml);
+  if (!doc) return null;
+
+  const process = firstProcess(doc);
+  if (!process) return null;
+
+  const start = elementChildren(process).find(
+    (child) => getLocalName(child) === 'startEvent'
+  );
+  if (!start) return null;
+
+  return messageEventOf(start, getMessageNames(xml));
+}
+
+/**
  * Узел, отправляющий сообщение `message` (по имени), — отправитель.
  *
  * Нужен подсказке «ждём сообщение»: кабинет называет вторую сторону, чей

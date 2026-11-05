@@ -25,6 +25,7 @@ import {
   getProcessIds,
   getProjectProcesses,
   getStartAction,
+  getStartMessageWait,
   isDeployInstanceId,
   listActions,
   listFlowElements,
@@ -1384,6 +1385,33 @@ export default function App() {
     );
   };
 
+  /**
+   * Перечитывает заказы с сервера.
+   *
+   * Завод сам заказов не заводит: они приходят от клиента сообщением
+   * `ClientOrder`, а экземпляр завода создаёт триггер узла клиента. Карточку
+   * кабинет узнаёт по токену (`attachOrderInstance`), но если вкладка была
+   * открыта до отправки заказа, WS-кадр мог не дойти — тогда список читается
+   * заново, и менеджер видит пришедший заказ без F5.
+   */
+  const handleRefreshOrders = async () => {
+    const result = await ordersClient.listOrders();
+
+    if (!result.ok) {
+      logEvent(
+        currentUser.org,
+        currentUser.role,
+        'Список заказов не обновлён',
+        result.error || result.details || 'API заказов недоступен.',
+        null
+      );
+      return;
+    }
+
+    const remote = (result.orders || []).map(normalizeOrder).filter(Boolean);
+    setOrders(prev => mergeOrders(remote, prev));
+  };
+
   // 1. ТОЧКА ВХОДА: Создание заказа Производством. Кнопку инициатора — надпись,
   // роль, событие первого шага — объявляет стартовое событие схемы, а поля
   // заказа (номенклатура, объём, жирность, упаковка, срок, контрагент) — форма
@@ -1554,6 +1582,44 @@ export default function App() {
         orderNum
       );
       alert(`Схема Клиента несовместима с движком:\n${lines.join('\n')}`);
+      return;
+    }
+
+    // Заказ клиента будит завод сообщением, а экземпляр `Process_Dairy` создаёт
+    // триггер `Event_SendOrder` по **задеплоенному** определению. Ручной кнопки
+    // старта у завода больше нет, поэтому определение готовит та сторона, что
+    // отправляет заказ: иначе движок напишет `message_target_not_deployed`, и
+    // заказ будет некому принять. Деплой — upsert по `bpmn:process/@id`.
+    const factoryXml = schemaXml('CUSTOMER');
+    const factoryProblems = validateEngineSchema(factoryXml).problems;
+
+    if (factoryProblems.length > 0) {
+      const lines = schemaProblemLines(factoryProblems);
+      logEvent(
+        'CUSTOMER',
+        currentUser ? currentUser.role : 'ALL',
+        'Заказ клиента не создан: движок не примет схему завода',
+        lines.join(' '),
+        orderNum
+      );
+      alert(`Схема Молочного завода несовместима с движком:\n${lines.join('\n')}`);
+      return;
+    }
+
+    const deployFactory = await client.deploySchema('CUSTOMER', factoryXml);
+
+    if (!deployFactory.ok) {
+      setActionErrors(prev => ({
+        ...prev,
+        [orderNum]: 'Не удалось задеплоить схему завода: заказ некому принять.',
+      }));
+      logEvent(
+        'CUSTOMER',
+        currentUser ? currentUser.role : 'ALL',
+        'Заказ клиента не создан: схема завода не задеплоена',
+        'Экземпляр завода создаёт триггер сообщения ClientOrder — без определения в движке он не появится.',
+        orderNum
+      );
       return;
     }
 
@@ -2404,6 +2470,17 @@ export default function App() {
   const canCreateOrder = Boolean(createOrderAction) && currentUser.role === actionRoleOf('CUSTOMER', createOrderAction);
 
   /**
+   * Старт процесса ждёт сообщение (message start event).
+   *
+   * Так объявлен вход завода в «Молочном заводе»: заказ приходит от клиента
+   * (`ClientOrder`), экземпляр создаёт триггер `Event_SendOrder`, поэтому
+   * кнопки инициатора у завода нет — и «Запуск по схеме» тоже не рисуется:
+   * иначе менеджер завёл бы заказ, которого никто не заказывал. Кнопка есть
+   * только у контура, чей старт объявлен `act:userAction`.
+   */
+  const startMessageWait = getStartMessageWait(schemaXml(currentUser.org));
+
+  /**
    * Кнопка старта процесса клиента (M5).
    *
    * У третьего контура ключ кнопки в `ACTION_ID` не заводится: кабинет не
@@ -2784,8 +2861,11 @@ export default function App() {
                 может не объявлять `act:userAction` на стартовом событии, но
                 экземпляр всё равно нужен — иначе шаги кабинета не подсветятся.
                 У клиента своя точка входа (заказ готовой продукции, ниже):
-                без карточки заказа его процесс заводу нечего обслуживать. */}
-            {((!createOrderAction && currentUser.org !== 'CLIENT') ||
+                без карточки заказа его процесс заводу нечего обслуживать.
+                Старт-сообщение (`getStartMessageWait`) — исключение: заказ
+                приходит от второй стороны, и ручной запуск создал бы заказ,
+                которого никто не заказывал. */}
+            {((!createOrderAction && !startMessageWait && currentUser.org !== 'CLIENT') ||
               (currentUser.org === 'CLIENT' && !clientStartStep)) && (
               <div style={{ padding: '16px', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', marginBottom: '16px' }}>
                 <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#1e40af', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2800,6 +2880,45 @@ export default function App() {
                 >
                   <Play size={16} /> Запустить процесс
                 </button>
+              </div>
+            )}
+
+            {/* ПРИЁМ ЗАКАЗОВ: старт процесса ждёт сообщение второй стороны
+                (`ClientOrder` от клиента). Заказ не заводят руками — его
+                присылают, а экземпляр создаёт триггер `Event_SendOrder`; шаги
+                менеджера появляются только у пришедшего заказа. Кнопки здесь
+                не запускают процесс: первая перечитывает список заказов,
+                вторая готовит определение в движке. */}
+            {startMessageWait && !isExecutive && currentUser.org !== 'CLIENT' && (
+              <div style={{ padding: '16px', backgroundColor: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '8px', marginBottom: '16px' }}>
+                <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#065f46', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <ClipboardCheck size={18} /> Приём заказов
+                </h3>
+                <p style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#065f46' }}>
+                  Заказ приходит от клиента сообщением <b>{startMessageWait.message}</b>: экземпляр
+                  процесса создаёт движок по триггеру узла клиента, поэтому кнопки
+                  «создать заказ» у контура нет. Ваш шаг появится у заказа, который пришёл.
+                </p>
+                <p style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#047857' }}>
+                  Чтобы заказ дошёл, определение схемы контура должно быть в движке
+                  (его передаёт кнопка ниже или сторона, отправляющая заказ).
+                </p>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button
+                    onClick={handleRefreshOrders}
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    <RotateCcw size={16} /> Обновить список заказов
+                  </button>
+                  <button
+                    onClick={() => deployBpmnSchema(currentUser.org, schemaXml(currentUser.org))}
+                    disabled={isDeploying}
+                    title="Передать определение процесса в оркестратор: без него триггер сообщения не создаст экземпляр"
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#fff', color: '#065f46', border: '1px solid #6ee7b7', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    <Upload size={16} /> {isDeploying ? 'Деплой...' : 'Задеплоить схему приёма'}
+                  </button>
+                </div>
               </div>
             )}
 

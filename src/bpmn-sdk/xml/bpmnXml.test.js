@@ -20,6 +20,7 @@ import {
   getProcessIds,
   getRoleAssignments,
   getStartAction,
+  getStartMessageWait,
   getTriggerAssignments,
   isActionHostType,
   isElementIdAvailable,
@@ -1576,6 +1577,30 @@ describe('bpmnXml: сообщения (bpmn:message и throw/catch)', () => {
     expect(getMessageWait(MESSAGE_BPMN, 'End_Msg')).toBeNull();
     expect(getMessageWait(MESSAGE_BPMN, 'Event_Timer')).toBeNull();
     expect(getMessageWait(MESSAGE_BPMN, 'Task_Missing')).toBeNull();
+  });
+
+  /**
+   * Старт процесса, который открывает вторая сторона.
+   *
+   * Так объявлен вход завода в «Молочном заводе»: `ClientOrder` от клиента.
+   * Кабинет по этому признаку не рисует ни кнопку инициатора, ни «Запуск по
+   * схеме»: экземпляр создаёт триггер узла-отправителя, а заказ нельзя завести
+   * руками. У обычного старта (`act:userAction`) ответ `null`.
+   */
+  it('находит стартовое событие-сообщение (message start event)', () => {
+    expect(getStartMessageWait(MESSAGE_BPMN)).toMatchObject({
+      elementId: 'Start_Msg',
+      kind: 'catch',
+      type: 'startEvent',
+      // Объявление есть, но без `@name` — именем сообщения остаётся сам `id`.
+      message: 'Message_PurchaseOrder',
+      messageRef: 'Message_PurchaseOrder',
+    });
+
+    expect(getStartMessageWait(SIMPLE_BPMN)).toBeNull();
+    expect(getStartMessageWait('')).toBeNull();
+    expect(getStartMessageWait(undefined)).toBeNull();
+    expect(getStartMessageWait('<broken>')).toBeNull();
   });
 
   it('находит отправителя сообщения по имени', () => {

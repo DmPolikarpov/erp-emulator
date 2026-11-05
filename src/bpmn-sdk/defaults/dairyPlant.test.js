@@ -34,12 +34,15 @@ import {
   DAIRY_SUPPLIER_PROCESS_XML,
 } from './dairyPlant';
 import {
+  getElementAction,
   getElementTrigger,
   getLocalName,
+  getNextElementId,
   getProcessIds,
   getProjectProcesses,
   getRoleCatalog,
   getStartAction,
+  getStartMessageWait,
   isValidAction,
   listActions,
   parseActionVariables,
@@ -358,15 +361,11 @@ describe('dairyPlant: кнопки и роли', () => {
   });
 
   it('стартовые кнопки объявляют роль инициатора и первый шаг', () => {
-    const plantStart = getStartAction(DAIRY_PLANT_PROCESS_XML);
     const supplierStart = getStartAction(DAIRY_SUPPLIER_PROCESS_XML);
 
-    expect(plantStart.elementId).toBe('Start_Dairy');
-    expect(plantStart.action).toMatchObject({
-      id: 'createOrder',
-      role: 'SALES',
-      elementId: 'Task_ReceiveOrder',
-    });
+    // У завода кнопки старта нет: заказ приходит от клиента сообщением, и
+    // завести его руками менеджер не может (см. тест message start ниже).
+    expect(getStartAction(DAIRY_PLANT_PROCESS_XML)).toBeNull();
 
     expect(supplierStart.elementId).toBe('Start_Supplier');
     expect(supplierStart.action).toMatchObject({
@@ -374,6 +373,35 @@ describe('dairyPlant: кнопки и роли', () => {
       role: 'SUPPLIER_MANAGER',
       elementId: 'Task_ConfirmPO',
     });
+  });
+
+  /**
+   * Заказ у завода не заводят руками: `Start_Dairy` — message start event.
+   *
+   * Экземпляр `Process_Dairy` создаёт триггер узла клиента (`Event_SendOrder`),
+   * поэтому у старта нет `act:userAction`: кабинет не рисует менеджеру ни
+   * кнопку «Принять заказ клиента», ни «Запуск по схеме». Работа менеджера —
+   * шаг `Task_ReceiveOrder` у уже пришедшего заказа.
+   */
+  it('завод стартует сообщением клиента, а не кнопкой (M5)', () => {
+    expect(getStartMessageWait(DAIRY_PLANT_PROCESS_XML)).toMatchObject({
+      elementId: 'Start_Dairy',
+      kind: 'catch',
+      message: 'ClientOrder',
+      messageRef: 'Message_ClientOrder',
+    });
+
+    // Токен приходит на приём заказа — туда же, куда входит триггер клиента.
+    expect(getNextElementId(DAIRY_PLANT_PROCESS_XML, 'Start_Dairy')).toBe('Task_ReceiveOrder');
+
+    // Кнопка менеджера — шаг приёма, а не старт процесса.
+    expect(
+      getElementAction(DAIRY_PLANT_PROCESS_XML, 'Task_ReceiveOrder', 'receiveOrder')
+    ).toMatchObject({ role: 'SALES', elementId: 'Task_ProcessOrder' });
+
+    // У остальных контуров старт по-прежнему кнопочный.
+    expect(getStartMessageWait(DAIRY_SUPPLIER_PROCESS_XML)).toBeNull();
+    expect(getStartMessageWait(DAIRY_CLIENT_PROCESS_XML)).toBeNull();
   });
 
   it('связывает пулы сообщениями и триггером узла (M3)', () => {
@@ -787,10 +815,9 @@ describe('dairyPlant: клиент (третий пул, M5)', () => {
       payloadKeys: 'orderNum',
     });
 
-    // Первый шаг завода — приёмка заказа: триггер входит в тот же узел, который
-    // объявлен кнопкой старта завода (`Start_Dairy`), поэтому ручной старт не
-    // нужен, а кабинет завода видит активный шаг по токену.
-    expect(getStartAction(DAIRY_PLANT_PROCESS_XML).action.elementId).toBe(
+    // Первый шаг завода — приёмка заказа: триггер входит в тот же узел, куда
+    // ведёт стартовое событие, поэтому токен и подсветка шага совпадают.
+    expect(getNextElementId(DAIRY_PLANT_PROCESS_XML, 'Start_Dairy')).toBe(
       getElementTrigger(xml, 'Event_SendOrder').firstElementId
     );
 

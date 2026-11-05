@@ -62,7 +62,8 @@ npm run sdk:demo      # ассеты демо-страницы <script> (public/
 - логика XML: `listFlowElements`, `getProcessIds`, `getElementIds`, `isValidXml`,
   `isValidElementId`, `isElementIdAvailable`, `renameElementId`, `parseXml`, `getLocalName`;
 - события-сообщения (`bpmn:message` + throw/catch): `getMessageNames`,
-  `listMessageEvents`, `getMessageEvent`, `getMessageWait`, `findMessageThrow`;
+  `listMessageEvents`, `getMessageEvent`, `getMessageWait`, `getStartMessageWait`,
+  `findMessageThrow`;
 - совместимость схемы с движком: `validateEngineSchema`, `ENGINE_FLOW_NODE_TYPES`,
   `SCHEMA_PROBLEM`;
 - роль исполнителя узла (`bpmn:potentialOwner`): `getElementRole`, `getRoleAssignments`,
@@ -249,6 +250,7 @@ XML явно, всегда важнее умолчания: старые схе�
 | `getElementAction(xml, elementId, id)` | одна кнопка по ключу (`null`, если её нет) |
 | `getActionAssignments(xml)` | карта `{element_id: [кнопка, ...]}` |
 | `getStartAction(xml)` | кнопка запуска процесса: первая кнопка на стартовом событии |
+| `getStartMessageWait(xml)` | стартовое событие ждёт сообщение (`bpmn:messageEventDefinition`): ручного старта у процесса нет, экземпляр создаёт отправитель; `null` — старт запускают кнопкой |
 | `resolveAction(xml, elementId, action)` | пара `{event, elementId}` кнопки — аргументы `sendEvent`: пустые поля заменяются умолчаниями схемы |
 | `resolveActionEvent(action)` / `resolveActionTarget(xml, elementId, action)` | то же по отдельности |
 | `parseActionVariables(variables)` | строка `variables` → `{ключ: значение}`; пустая — `{}`, кривая — исключение (её же ловит валидатор) |
@@ -267,6 +269,11 @@ XML явно, всегда важнее умолчания: старые схе�
   записывать: у стартового события связь одна, и `resolveAction` доводит её до
   первого блока (`CompleteBlock`) — но без самой кнопки старта процесс не описан,
   и `startProcess` вернёт ошибку;
+- **стартовое событие-сообщение** (`bpmn:messageEventDefinition`; у завода —
+  `ClientOrder`) — старт без кнопки: `getStartMessageWait` возвращает это событие,
+  и кабинет не рисует ни кнопку инициатора, ни «Запуск по схеме». Экземпляр
+  создаёт `trg:processTrigger` отправителя, поэтому определение процесса должно
+  быть задеплоено до отправки сообщения (иначе `message_target_not_deployed`);
 - **хост — только узел потока** (задача, событие, шлюз, подпроцесс): на
   `sequenceFlow` шаг не активируется, `setElementActions` бросает ошибку;
 - **обязательны только `id` и `label`**: пустые `event`/`elementId` допустимы и
