@@ -162,11 +162,14 @@ SALES». Роль с `kind="EXECUTIVE"` («Директор завода», «Р
 сгруппированы по контурам.
 
 Поставщика в обоих проектах руками обычно не запускают: его экземпляр создаёт
-триггер из контура Заказчика (`trg:processTrigger`) — `sendToSupplier` в
-«Закупке…», `Task_SendPO` в «Молочном заводе». У «Молочного завода» есть вторая
-точка входа — Клиент: `Event_SendOrder` тем же триггером создаёт экземпляр
-завода (`startElementId="Event_SendOrder"`), поэтому заказ клиента доезжает до
-завода без ручного старта.
+контур Заказчика — кнопка `sendToSupplier` на `Task_CreatePurchaseOrder` в
+«Закупке…» (`startsProcess="Process_SupplierSupply_v1"`) и `trg:processTrigger`
+на `Event_SendPO` в «Молочном заводе» (`targetProcessId="Process_Supplier"`,
+`firstElementId="Task_ConfirmPO"`). Там же третья точка входа — Клиент:
+`Event_SendOrder` создаёт экземпляр завода (`targetProcessId="Process_Dairy"`,
+`instancePrefix="inst-cust-"`, `firstElementId="Task_ReceiveOrder"`), поэтому
+заказ клиента доезжает до завода без ручного старта — при условии, что схема
+завода задеплоена.
 
 Если в схеме кнопки `createOrder` нет, кабинет показывает блок «Запуск по схеме»
 (`App.jsx`): процесс стартует со стартового события, а роль всё равно проверяет
