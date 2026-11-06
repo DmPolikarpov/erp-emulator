@@ -248,6 +248,7 @@ jest.mock('./ordersApi', () => {
       getOrder: jest.fn(),
       createOrder: jest.fn(),
       attachInstance: jest.fn(),
+      clearOrders: jest.fn(),
     },
   };
 });
@@ -293,6 +294,7 @@ const {
   getOrder: mockGetOrder,
   createOrder: mockCreateOrder,
   attachInstance: mockAttachInstance,
+  clearOrders: mockClearOrders,
 } = jest.requireMock('./ordersApi').ordersClient;
 
 const { load: mockLoadMetrics } = jest.requireMock('./metricsApi').metricsClient;
@@ -365,6 +367,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
     mockGetOrder.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
     mockCreateOrder.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
     mockAttachInstance.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
+    mockClearOrders.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
 
     // API метрик по умолчанию тоже недоступен — стенд без HTTP-шлюза: панель
     // руководителя показывает метрики этого браузера (как до M7). Тесты M7
@@ -2267,5 +2270,80 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(
       mockAttachInstance.mock.calls.filter((call) => call[2] === 'inst-supp-777')
     ).toHaveLength(1);
+  });
+
+  it('кнопка «Очистить все заказы» удаляет их в БД движка, а не только в браузере (M8)', async () => {
+    createProject({
+      name: 'Молочный завод (M8)',
+      xml: buildProjectXml([
+        { xml: DAIRY_PLANT_PROCESS_XML, participantName: 'Молочный завод' },
+        { xml: DAIRY_SUPPLIER_PROCESS_XML, participantName: 'Поставщик сырья' },
+      ]),
+    });
+
+    mockListOrders.mockResolvedValue({
+      ok: true,
+      orders: [
+        {
+          orderNum: '№921',
+          status: 'IN_PROGRESS',
+          nomenclature: 'Ряженка 4%',
+          volumeLiters: 120,
+          fatContent: 4,
+          packaging: 'ПЭТ 0,5 л',
+          dueDate: '2026-12-05',
+          counterparty: 'ООО «Ромашка»',
+          customerInstanceId: 'inst-cust-921',
+          customerActiveElementId: 'Task_ReceiveOrder',
+          customerProcessState: 'ACTIVE',
+        },
+      ],
+    });
+    mockClearOrders.mockResolvedValue({ ok: true, deleted: 1 });
+
+    // `window.confirm` в jsdom не реализован: без подмены очистка не началась бы.
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+
+    openAs('Менеджер по продажам');
+
+    // Карточка с сервера в баре «Внутренние заказы»: номер — бизнес-ключ.
+    expect((await screen.findAllByText('Заказ №921')).length).toBeGreaterThan(0);
+
+    // Кнопка есть и в баре «Внутренние заказы», и в панели «Приём заказов»:
+    // сбросить демо-список должен уметь любой кабинет, а не только продажи.
+    const buttons = screen.getAllByText('Очистить все заказы');
+    expect(buttons).toHaveLength(2);
+
+    fireEvent.click(buttons[0]);
+
+    // Спрашиваем подтверждение: очистка необратима.
+    await waitFor(() => expect(mockClearOrders).toHaveBeenCalledTimes(1));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Удалить все заказы'));
+
+    // Карточка исчезает из кабинета: список чистится и на экране, и в движке.
+    await waitFor(() => expect(screen.queryAllByText('Заказ №921')).toHaveLength(0));
+    expect(screen.getByText('Заказов пока нет.')).toBeTruthy();
+  });
+
+  it('без API кнопка очистки чистит список этой вкладки (M8)', async () => {
+    jest.spyOn(window, 'confirm').mockReturnValue(true);
+
+    openAs('Руководитель Заказчика');
+
+    emitToken({
+      instanceId: 'inst-cust-930',
+      elementId: 'Task_WaitForSupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№930' },
+    });
+
+    expect(screen.queryByText('Заказов пока нет.')).toBeNull();
+
+    fireEvent.click(screen.getAllByText('Очистить все заказы')[0]);
+
+    // Стенд без шлюза: серверных карточек нет, поэтому чистится локальный список
+    // (иначе заказ-призрак остался бы на экране до F5).
+    await waitFor(() => expect(mockClearOrders).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText('Заказов пока нет.')).toBeTruthy());
   });
 });

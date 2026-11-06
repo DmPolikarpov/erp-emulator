@@ -307,6 +307,22 @@ export class OrdersClient {
 
     return { ok: true, order: result.data.order || null };
   }
+
+  /**
+   * `DELETE /api/v1/orders` → `{ok, deleted}`: очистка всех заказов (M8).
+   *
+   * Заказы удаляются из БД движка, а не только из `useState` кабинета — иначе
+   * следующий F5 вернул бы их обратно. Экземпляры процессов остаются в движке:
+   * кнопка сбрасывает демо-список, а не историю прогонов.
+   */
+  async clearOrders() {
+    const result = await this.request('', { method: 'DELETE' });
+    if (!result.ok) return result;
+
+    const deleted = Number(result.data.deleted);
+
+    return { ok: true, deleted: Number.isFinite(deleted) ? deleted : 0 };
+  }
 }
 
 /** Клиент по умолчанию: приложение использует его без настройки. */

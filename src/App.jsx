@@ -1412,6 +1412,73 @@ export default function App() {
     setOrders(prev => mergeOrders(remote, prev));
   };
 
+  /**
+   * Кнопка «Очистить все заказы» (M8): удаляет заказы из БД движка.
+   *
+   * Список заказов живёт на сервере, поэтому «забыть» его в браузере мало:
+   * следующий F5 вернул бы карточки обратно. Кнопка вызывает
+   * `DELETE /api/v1/orders` (`action: 'clear'` в API заказов) и очищает
+   * локальные артефакты сценария — документы, пропуска, время въезда, — иначе
+   * карточки-призраки остались бы в памяти вкладки.
+   *
+   * Экземпляры процессов в движке не останавливаются: удаляется карточка
+   * заказа, а не история прогона (процессы видны в журнале движка).
+   */
+  const handleClearOrders = async () => {
+    if (orders.length === 0) {
+      logEvent(
+        currentUser.org,
+        currentUser.role,
+        'Очистка заказов',
+        'Список заказов уже пуст — очищать нечего.',
+        null
+      );
+      return;
+    }
+
+    // Очистка необратима: без подтверждения её легко нажать вместо
+    // «Обновить список». В jsdom/тестах `confirm` может отсутствовать.
+    const question = `Удалить все заказы (${orders.length})? Экземпляры процессов в движке останутся.`;
+    const confirmed =
+      typeof window === 'undefined' || typeof window.confirm !== 'function'
+        ? true
+        : window.confirm(question);
+
+    if (!confirmed) return;
+
+    const result = await ordersClient.clearOrders();
+
+    if (!result.ok && result.status) {
+      // Шлюз ответил отказом: список на сервере цел, локальную копию не трогаем.
+      logEvent(
+        currentUser.org,
+        currentUser.role,
+        'Заказы не очищены',
+        result.error || result.details || 'API заказов вернул ошибку.',
+        null
+      );
+      return;
+    }
+
+    // API недоступен (стенд без шлюза): заказы этой вкладки всё равно чистим —
+    // серверных карточек тогда и нет, иначе список остался бы на экране.
+    setOrders([]);
+    setSelectedOrderId(null);
+    setActionErrors({});
+    setActionLoading({});
+    attachedInstances.current = new Set();
+
+    logEvent(
+      currentUser.org,
+      currentUser.role,
+      result.ok ? 'Заказы очищены' : 'Заказы очищены только в кабинете',
+      result.ok
+        ? `Удалено заказов: ${result.deleted}. Экземпляры процессов в движке остались — новые заказы начнут список заново.`
+        : `${result.error || 'API заказов недоступен.'} Список очищен в этой вкладке: серверных заказов нет.`,
+      null
+    );
+  };
+
   // 1. ТОЧКА ВХОДА: Создание заказа Производством. Кнопку инициатора — надпись,
   // роль, событие первого шага — объявляет стартовое событие схемы, а поля
   // заказа (номенклатура, объём, жирность, упаковка, срок, контрагент) — форма
@@ -2839,13 +2906,25 @@ export default function App() {
         {/* Старт процесса: кнопка инициатора объявлена на стартовом событии
             схемы (`act:userAction`); роль там указана в самой кнопке, потому что
             `bpmn:potentialOwner` по спецификации BPMN 2.0 есть только у Activity. */}
-        {canCreateOrder && (
-          <ActionButton
-            action={createOrderAction.action}
-            onClick={handleProductionCreateOrder}
-            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
-          />
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          {canCreateOrder && (
+            <ActionButton
+              action={createOrderAction.action}
+              onClick={handleProductionCreateOrder}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+            />
+          )}
+
+          {/* Сброс демо-списка: заказы живут в БД движка, поэтому чистится и
+              сервер (`DELETE /api/v1/orders`), а не только `useState`. */}
+          <button
+            onClick={handleClearOrders}
+            title="Удалить все заказы из БД движка: список начнётся заново (экземпляры процессов останутся)"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#fff', color: '#b91c1c', border: '1px solid #fca5a5', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+          >
+            <Trash2 size={15} /> Очистить все заказы
+          </button>
+        </div>
       </div>
 
       <div id="main-dashboard-container" style={{ display: 'flex', width: '100%', position: 'relative' }}>
@@ -2888,7 +2967,8 @@ export default function App() {
                 присылают, а экземпляр создаёт триггер `Event_SendOrder`; шаги
                 менеджера появляются только у пришедшего заказа. Кнопки здесь
                 не запускают процесс: первая перечитывает список заказов,
-                вторая готовит определение в движке. */}
+                вторая готовит определение в движке, третья очищает список
+                (`DELETE /api/v1/orders`) перед новым показом. */}
             {startMessageWait && !isExecutive && currentUser.org !== 'CLIENT' && (
               <div style={{ padding: '16px', backgroundColor: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '8px', marginBottom: '16px' }}>
                 <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#065f46', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2917,6 +2997,15 @@ export default function App() {
                     style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#fff', color: '#065f46', border: '1px solid #6ee7b7', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
                   >
                     <Upload size={16} /> {isDeploying ? 'Деплой...' : 'Задеплоить схему приёма'}
+                  </button>
+                  {/* Список заказов живёт в БД движка: «очистить» — это DELETE,
+                      иначе следующий F5 вернул бы карточки обратно. */}
+                  <button
+                    onClick={handleClearOrders}
+                    title="Удалить все заказы из БД движка: список начнётся заново (экземпляры процессов останутся)"
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#fff', color: '#b91c1c', border: '1px solid #fca5a5', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    <Trash2 size={16} /> Очистить все заказы
                   </button>
                 </div>
               </div>

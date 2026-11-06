@@ -258,6 +258,39 @@ describe('ordersApi: HTTP-клиент', () => {
     });
   });
 
+  it('очищает все заказы DELETE-ом и возвращает число удалённых (M8)', async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse({ ok: true, deleted: 3 }));
+    const client = new OrdersClient('http://gateway/api/v1/orders', { fetchImpl });
+
+    const result = await client.clearOrders();
+
+    expect(result).toEqual({ ok: true, deleted: 3 });
+
+    const [url, options] = fetchImpl.mock.calls[0];
+
+    expect(url).toBe('http://gateway/api/v1/orders');
+    expect(options.method).toBe('DELETE');
+    // Тела нет: очистка удаляет весь список, а не выбранный заказ.
+    expect(options.body).toBeUndefined();
+  });
+
+  it('очистка без числа удалённых не врёт про ноль и переживает отказ', async () => {
+    const withoutCount = new OrdersClient('', {
+      fetchImpl: jest.fn(async () => jsonResponse({ ok: true })),
+    });
+
+    expect(await withoutCount.clearOrders()).toEqual({ ok: true, deleted: 0 });
+
+    const refused = new OrdersClient('', {
+      fetchImpl: jest.fn(async () => jsonResponse({ error: 'ошибка хранилища заказов' }, 500)),
+    });
+
+    const failure = await refused.clearOrders();
+
+    expect(failure.ok).toBe(false);
+    expect(failure.status).toBe(500);
+  });
+
   it('разбирает 400 с ошибками полей и 409 как «заказ уже есть»', async () => {
     const validation = new OrdersClient('', {
       fetchImpl: jest.fn(async () =>
