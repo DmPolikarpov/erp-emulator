@@ -1460,6 +1460,50 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(counterpart[0]).toBe('inst-cust-counterpart');
     expect(counterpart[1]).toBe('SupplierShippedSignal');
     expect(counterpart[2]).toBe('Task_ReceiveDocsAndIssuePass');
+    // Сигнал — системная доставка: движок сверяет роль с шагом второй стороны,
+    // и роль сессии даёт `403`. Поэтому пятый аргумент гасит роль только у него.
+    expect(counterpart[4]).toEqual({ actor: '' });
+    expect(step[4]).toBeUndefined();
+  });
+
+  /**
+   * Старая схема (демо-проект SDK, `milkProcess.js`): отгрузку закрывает
+   * `handleSupplierShipment`, и сигнал Заказчику шлёт тот же клиент. Движок
+   * сверяет роль не с нажатой кнопкой, а с ожидающим шагом **заказчика**
+   * (`Task_WaitForSupplierShipment`, `MANAGER`), поэтому под ролью поставщика
+   * шлюз отвечал `403`, а приёмка документов не открывалась.
+   */
+  it('отгрузка по старой схеме шлёт сигнал Заказчику без роли сессии (M6)', async () => {
+    openAs('Менеджер Поставщика');
+
+    emitToken({
+      instanceId: 'inst-cust-legacy-signal',
+      elementId: 'Task_WaitForSupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№913' },
+    });
+    emitToken({
+      instanceId: 'inst-supp-legacy-signal',
+      elementId: 'Task_SupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№913' },
+    });
+
+    fireEvent.click(screen.getByText('Подтвердить отгрузку'));
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+
+    const [step, counterpart] = mockSendEvent.mock.calls;
+
+    // Свой шаг закрывается ролью сессии...
+    expect(step[0]).toBe('inst-supp-legacy-signal');
+    expect(step[4]).toBeUndefined();
+
+    // ...а сигнал второй стороне — без неё.
+    expect(counterpart[0]).toBe('inst-cust-legacy-signal');
+    expect(counterpart[1]).toBe('SupplierShippedSignal');
+    expect(counterpart[2]).toBe('Task_ReceiveDocsAndIssuePass');
+    expect(counterpart[4]).toEqual({ actor: '' });
   });
 
   it('заказ поставщику уходит сообщением: экземпляр второй стороны создаёт движок (M3)', async () => {

@@ -134,10 +134,14 @@ export class GatewayClient {
    * @param {string} eventName имя события (`StartProcess`, `SendToSupplier`, ...).
    * @param {string} [elementId] `element_id` шага, который породил событие.
    * @param {Object} [outputData] полезная нагрузка события.
+   * @param {Object} [options]
+   * @param {string} [options.actor] роль именно этого события: `''` — системная
+   *   доставка без роли (сигнал второй стороне `counterpartEvent`, воркеры),
+   *   не задана — роль сессии клиента (M6).
    * @returns {Promise<{ok: boolean, status?: number, data?: Object,
    *                    error?: string, details?: (string|null)}>}
    */
-  async sendEvent(instanceId, eventName, elementId = '', outputData = {}) {
+  async sendEvent(instanceId, eventName, elementId = '', outputData = {}, options = {}) {
     if (!instanceId) {
       return { ok: false, error: 'Не указан идентификатор экземпляра процесса.' };
     }
@@ -155,7 +159,13 @@ export class GatewayClient {
       : null;
 
     try {
-      const actor = String(this.actor || '').trim();
+      // Роль события: по умолчанию — роль сессии, но `options.actor` её
+      // переопределяет. `''` — системная доставка без роли: так кабинет шлёт
+      // сигнал второй стороне (`counterpartEvent` старых схем) и так же ходят
+      // воркеры и E2E-скрипты.
+      const actorSource =
+        options && options.actor !== undefined ? options.actor : this.actor;
+      const actor = String(actorSource || '').trim();
       const headers = { 'Content-Type': 'application/json' };
       const body = {
         event_name: eventName,

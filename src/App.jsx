@@ -1936,16 +1936,26 @@ export default function App() {
       // Старые схемы объявляют пару `counterpartEvent`/`counterpartElementId`:
       // сигнал второй стороне шлёт клиент. Демо-проект обходится сообщением
       // `MilkShipped`, которое движок доставляет заводу по `orderNum` (M3).
+      //
+      // Роль для такого сигнала не передаётся (`{ actor: '' }`): движок сверяет
+      // роль с ожидающим шагом **второй стороны** (`Task_WaitForSupplierShipment`
+      // заказчика, `MANAGER`), и под ролью поставщика шлюз отвечал `403`. Сигнал
+      // — доставка сообщения в чужой экземпляр (то же, что делает движок по
+      // `bpmn:messageFlow`), а не действие роли поставщика.
       if (shipment.action.counterpartEvent) {
         const resCust = await client.sendEvent(
           targetOrder.customerInstanceId,
           shipment.action.counterpartEvent,
           shipment.action.counterpartElementId,
-          { shippedAt, orderNum: orderId, documents: targetOrder.documents }
+          { shippedAt, orderNum: orderId, documents: targetOrder.documents },
+          { actor: '' }
         );
 
         if (!resCust.ok) {
-          setActionErrors(prev => ({ ...prev, [orderId]: 'Не удалось передать сигнал об отгрузке Заказчику.' }));
+          setActionErrors(prev => ({
+            ...prev,
+            [orderId]: eventFailure(resCust, 'Шаг выполнен, но сигнал об отгрузке Заказчику не дошёл.'),
+          }));
         }
       } else {
         logEvent(
@@ -2131,15 +2141,22 @@ export default function App() {
     const counterpartInstanceId = counterpartInstanceOf(order, org);
 
     if (entry.action.counterpartEvent && counterpartInstanceId) {
+      // Сигнал второй стороне уходит без роли (`{ actor: '' }`): движок сверяет
+      // роль с ожидающим шагом её контура, а не с нажатой кнопкой, поэтому роль
+      // сессии здесь даёт `403` (см. `handleSupplierShipment`).
       const counterpartRes = await client.sendEvent(
         counterpartInstanceId,
         entry.action.counterpartEvent,
         entry.action.counterpartElementId || '',
-        { orderNum: order.id, actedAt }
+        { orderNum: order.id, actedAt },
+        { actor: '' }
       );
 
       if (!counterpartRes.ok) {
-        setActionErrors(prev => ({ ...prev, [order.id]: 'Шаг выполнен, но сигнал второй стороне не ушёл.' }));
+        setActionErrors(prev => ({
+          ...prev,
+          [order.id]: eventFailure(counterpartRes, 'Шаг выполнен, но сигнал второй стороне не ушёл.'),
+        }));
       }
     }
   };
