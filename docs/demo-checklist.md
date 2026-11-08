@@ -14,7 +14,8 @@
 | Проверка | Команда | Ожидаемо |
 | --- | --- | --- |
 | Кластер поднят | `kubectl get pods` | движок, шлюз, Postgres, NATS — `Running` |
-| Шлюз доступен локально | `kubectl port-forward svc/bpmn-gateway 8080:8080` | `curl http://localhost:8080/api/v1/process/instances` отвечает 200 |
+| Шлюз доступен локально | `wip\port-forward.cmd` (или `kubectl port-forward svc/http-cluster-service 8080:8080`) | в `port-forward.log` — `Forwarding from 127.0.0.1:8080`; `curl http://localhost:8080/api/v1/orders` отвечает 200 |
+| Проброс жив после пересборки | повторить `wip\port-forward.cmd` после `rollout restart`, затем F5 в кабинете | в журнале кабинета нет «API заказов вернул ошибку (500)»: 500 с пустым телом — это CRA-прокси без живого проброса, а не отказ движка |
 | Кабинет запущен | `npm start` в `erp-simulator` | `http://localhost:3000` открывается без оверлея ошибки |
 | `.env` на месте | `type .env` | `REACT_APP_GATEWAY_URL`, `REACT_APP_WS_URL`, `REACT_APP_METRICS_API_URL` |
 | Чистая БД (для показа «с нуля») | `wip/db-wipe.sql` через `kubectl exec … psql` | таблицы `process_instances`, `tokens`, `orders` пусты |
