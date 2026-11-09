@@ -319,6 +319,15 @@ const emitToken = (token) => {
   });
 };
 
+/** Доставляет произвольное JSON-сообщение шлюза подписчикам сокета. */
+const emitMessage = (message) => {
+  act(() => {
+    (mockSocketListeners[SOCKET_EVENTS.MESSAGE] || []).forEach((listener) =>
+      listener(message)
+    );
+  });
+};
+
 const lastProps = (propsList) => propsList[propsList.length - 1];
 
 const openAs = (roleName) => {
@@ -431,8 +440,10 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   // Движок держит на экземпляр ровно один ACTIVE-токен: активируя следующий
-  // узел, он закрывает прежний событием `COMPLETED` (см. тесты ниже).
-  it('COMPLETED прежнего узла не двигает текущий шаг и не закрывает заказ', () => {
+  // узел, он закрывает прежний событием `COMPLETED`. Если после `COMPLETED`
+  // следующий узел не активировался (например, слияние параллельной ветви),
+  // «текущий шаг» снимается, чтобы кнопка пройденного узла не осталась в карточке.
+  it('COMPLETED текущего узла снимает его из «текущего шага», не закрывая заказ', () => {
     openAs('Руководитель Заказчика');
 
     emitToken({
@@ -451,11 +462,11 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     const viewerProps = lastProps(mockViewerProps);
 
-    // Подсветка: узел ушёл в зелёный трейл, «текущий шаг» остался на месте.
+    // Подсветка: узел ушёл в зелёный трейл, активного шага больше нет.
     expect(viewerProps.tokens).toEqual({
       Task_CreatePurchaseOrder: 'COMPLETED',
     });
-    expect(viewerProps.activeElementId).toBe('Task_CreatePurchaseOrder');
+    expect(viewerProps.activeElementId).toBe('');
 
     // Статус процесса в таблице руководителя остался ACTIVE: событие COMPLETED
     // закрывает прежний узел, а не заказ (иначе здесь было бы COMPLETED).
@@ -616,6 +627,87 @@ describe('App: интеграция с BPMN Client SDK', () => {
     // Следующий узел по схеме — слияние ветвей.
     expect(elementId).toBe('Gateway_PassAndQualityJoin');
     expect(outputData.token_id).toBe(`${instanceId}:token-security`);
+  });
+
+  // Подсветка схемы включает проходные узлы (шлюзы, события), но «текущим
+  // шагом» заказа они не становятся: поле active остаётся за задачами.
+  it('шлюз подсвечивается, но не становится текущим шагом', () => {
+    openAs('Руководитель Заказчика');
+
+    const instanceId = 'inst-cust-gateway-step';
+    emitToken({
+      instanceId,
+      elementId: 'Task_QualityControl',
+      state: 'ACTIVE',
+      payload: { orderNum: '№842' },
+    });
+    emitToken({
+      instanceId,
+      elementId: 'Gateway_PassAndQualityJoin',
+      state: 'ACTIVE',
+    });
+
+    const viewerProps = lastProps(mockViewerProps);
+
+    expect(viewerProps.tokens).toEqual({
+      Task_QualityControl: 'ACTIVE',
+      Gateway_PassAndQualityJoin: 'ACTIVE',
+    });
+    expect(viewerProps.activeElementId).toBe('Task_QualityControl');
+  });
+
+  // На параллельном слиянии экземпляр завершается без активации `endEvent` в
+  // проекции токенов, поэтому финиш фиксируется по отдельному событию движка
+  // `process_completed` (сообщение без `element_id`, его `parseTokenMessage`
+  // отбрасывает). Карточка должна закрыть заказ и снять кнопку последнего узла.
+  it('заказ закрывается по событию движка `process_completed`', () => {
+    openAs('Менеджер закупок');
+
+    emitToken({
+      instanceId: 'inst-cust-completed',
+      elementId: 'Task_QualityControl',
+      state: 'ACTIVE',
+      payload: { orderNum: '№840' },
+    });
+
+    emitMessage({
+      event: 'process_completed',
+      instance_id: 'inst-cust-completed',
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(screen.getByText(/полностью завершен/)).toBeTruthy();
+  });
+
+  // Завершение первой ветви на параллельной вилке не активирует следующий шаг
+  // (следующий узел — шлюз слияния, в проекцию он не попадает), поэтому движок
+  // присылает только `token_updated` с `state: COMPLETED` и без payload.
+  // Индикатор «Фиксация въезда...» должен сниматься именно по этому событию.
+  it('COMPLETED первой ветви снимает индикатор шага охраны КПП', async () => {
+    openAs('Охрана КПП');
+
+    const instanceId = 'inst-cust-security-first';
+    emitToken({
+      instanceId,
+      elementId: 'Task_SecurityCheck',
+      state: 'ACTIVE',
+      tokenId: `${instanceId}:token-security`,
+      payload: { orderNum: '№841', passData: { passNumber: 'ПР-100000' } },
+    });
+
+    fireEvent.click(screen.getByText('Проверить пропуск и открыть ворота'));
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalled());
+    expect(screen.getByText('Фиксация въезда транспорта на КПП...')).toBeTruthy();
+
+    emitToken({
+      instanceId,
+      elementId: 'Task_SecurityCheck',
+      state: 'COMPLETED',
+      tokenId: `${instanceId}:token-security`,
+    });
+
+    expect(screen.queryByText('Фиксация въезда транспорта на КПП...')).toBeNull();
   });
 
   // M3/M5, кабинет: на catch-событии кнопок нет, и раньше панель действий

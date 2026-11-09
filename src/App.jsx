@@ -314,6 +314,23 @@ const fieldsOf = (org) => CONTOUR_FIELDS[org] || CONTOUR_FIELDS.CUSTOMER;
 const instanceOf = (order, org) => (order ? order[fieldsOf(org).instance] || '' : '');
 
 /**
+ * Идентификатор заказа, которому принадлежит событие WS.
+ *
+ * События `COMPLETED` приходят без payload (`orderNum` не из чего взять),
+ * поэтому заказ ищется и по `orderNum`, и по идентификатору экземпляра любого
+ * контура. Используется вне `setOrders`-апдейтера: побочные эффекты
+ * (`setActionLoading`) в чистом апдейтере React недопустимы.
+ */
+const orderIdFor = (ordersList, instanceId, orderNum) => {
+  const found = ordersList.find(
+    (o) =>
+      CONTOUR_KEYS.some((key) => instanceOf(o, key) === instanceId) ||
+      (orderNum && o.id === orderNum)
+  );
+  return found ? found.id : '';
+};
+
+/**
  * Все контуры «выключены»: карточка заведена, но ни один процесс не стартовал.
  *
  * Нужно при первом заполнении карточки: поля второго и третьего контуров иначе
@@ -429,6 +446,29 @@ const isProcessFinished = (xml, elementId) => {
   if (!element) return false;
 
   return /endEvent$/i.test(element.type) || getOutgoingTargetIds(xml, elementId).length === 0;
+};
+
+/**
+ * Шаг (задача), который показывается как «текущий шаг» заказа.
+ *
+ * Подсветка схемы включает и проходные узлы (шлюзы, события), но в поле
+ * «текущий шаг» они не попадают: иначе `Gateway_PassAndQualityJoin` вставал бы
+ * в статус карточки после закрытия первой параллельной ветви. Задачи и
+ * catch-события (ждём сообщение) «текущим шагом» быть должны.
+ *
+ * @param {string} xml BPMN-схема стороны.
+ * @param {string} elementId узел схемы.
+ * @returns {boolean}
+ */
+const isStepNode = (xml, elementId) => {
+  if (!elementId) return false;
+
+  const element = listFlowElements(xml).find((item) => item.id === elementId);
+  if (!element) return false;
+
+  return !/(Gateway|StartEvent|EndEvent|IntermediateThrowEvent|BoundaryEvent)$/i.test(
+    element.type
+  );
 };
 
 /**
@@ -937,6 +977,10 @@ export default function App() {
   const [leftWidth, setLeftWidth] = useState(50);
 
   const [orders, setOrders] = useState([]);
+  // Актуальный список заказов для WS-подписок: эффекты читают его через ref,
+  // чтобы не переподписываться на каждое изменение `orders`.
+  const ordersRef = useRef(orders);
+  ordersRef.current = orders;
   const [selectedOrderId, setSelectedOrderId] = useState(null);
 
   // Поля заказа (M4): «Принять заказ клиента» заводит номенклатуру, объём,
@@ -1216,6 +1260,8 @@ export default function App() {
         attachOrderInstance(targetOrderNum, tokenOrg, instanceId);
       }
 
+      const matchedOrderId = orderIdFor(ordersRef.current, instanceId, targetOrderNum);
+
       setOrders(prevOrders => {
         const orderIndex = prevOrders.findIndex(
           o => CONTOUR_KEYS.some((key) => instanceOf(o, key) === instanceId) ||
@@ -1223,7 +1269,7 @@ export default function App() {
         );
 
         if (orderIndex !== -1) {
-          const updatedOrders = prevOrders.map((order, idx) => {
+          return prevOrders.map((order, idx) => {
             if (idx !== orderIndex) return order;
 
             // Контур токена: точная привязка экземпляра к карточке, иначе префикс
@@ -1238,19 +1284,24 @@ export default function App() {
             return {
               ...order,
               [fields.instance]: instanceId,
-              // Активный узел двигает только ACTIVE: COMPLETED прежнего узла
-              // иначе откатил бы «текущий шаг» назад.
-              [fields.active]: isActive ? (elementId || order[fields.active]) : order[fields.active],
+              // Активный узел двигает только ACTIVE. `COMPLETED` снимает
+              // активный узел только тогда, когда закрылся именно он: на
+              // параллельной вилке после закрытия ветви следующий узел не
+              // активируется, и старый `active` иначе оставлял бы кнопку шага.
+              // `TIMED_OUT`/`FAILED` активный узел не снимают — шаг всё ещё ждёт.
+              // Шлюзы и события подсвечиваются на схеме, но «текущим шагом» не
+              // становятся.
+              [fields.active]: isActive
+                ? (isStepNode(schemaXml(contour), elementId)
+                    ? (elementId || order[fields.active])
+                    : order[fields.active])
+                : (state === TOKEN_STATES.COMPLETED && order[fields.active] === elementId
+                    ? null
+                    : order[fields.active]),
               [fields.state]: nextProcessState(order[fields.state], state),
               ...payloadData
             };
           });
-
-          const updatedOrder = updatedOrders[orderIndex];
-          if (updatedOrder) {
-            setActionLoading(prev => ({ ...prev, [updatedOrder.id]: null }));
-          }
-          return updatedOrders;
         }
 
         // Заказ заводим только по активации узла: `COMPLETED` приходит и для
@@ -1275,9 +1326,19 @@ export default function App() {
           ...contourPatch('CUSTOMER', instanceId, elementId, state || 'ACTIVE'),
           ...payloadData
         };
-        setActionLoading(prev => ({ ...prev, [newOrderNum]: null }));
         return [newOrder, ...prevOrders];
       });
+
+      // Снятие индикатора — вне апдейтера `setOrders`: побочный эффект внутри
+      // апдейтера в React 18 (StrictMode) не гарантирует применение.
+      if (matchedOrderId) {
+        setActionLoading(prev => ({ ...prev, [matchedOrderId]: null }));
+      } else if (isActive && targetOrderNum) {
+        // Заказ ещё не в списке: WS-кадр `StartProcess` успевает раньше ответа
+        // HTTP, и карточку заведёт ветка «новый заказ» ниже. Индикатор запуска
+        // снимаем по номеру из payload.
+        setActionLoading(prev => ({ ...prev, [targetOrderNum]: null }));
+      }
 
       // Метрика процесса: токен встал на конечный узел схемы — процесс выполнен.
       // Отдельного события «процесс завершён» движок не публикует, поэтому финиш
@@ -1313,6 +1374,78 @@ export default function App() {
       logEvent('SYSTEM', 'ALL', 'Событие Оркестратора', `Инстанс ${instanceId} -> Узел: ${elementId || '—'} [Статус: ${state}]`);
     });
   }, [socket, logEvent, schemaXml, attachOrderInstance, refreshMetrics]);
+
+  // Завершение процесса: движок публикует `process_completed`/`process_terminated`
+  // отдельным сообщением без `element_id`, поэтому разбор токенов его не видит
+  // (`parseTokenMessage` пропускает всё, кроме `token_updated`). Закрываем заказ
+  // по факту события движка: на параллельном слиянии экземпляр завершается без
+  // активации `endEvent` в проекции, и `isProcessFinished` по токенам никогда не
+  // сработал бы — карточка «зависала» на последней кнопке.
+  useEffect(() => {
+    if (!socket) return undefined;
+
+    return socket.on(SOCKET_EVENTS.MESSAGE, (message) => {
+      if (!message || typeof message !== 'object') return;
+      const { event, instance_id: instanceId } = message;
+      if (event !== 'process_completed' && event !== 'process_terminated') return;
+      if (
+        !instanceId ||
+        isDeployInstanceId(instanceId) ||
+        instanceId.startsWith(INSTANCE_PREFIX.DEFINITION)
+      ) {
+        return;
+      }
+
+      const state = event === 'process_completed' ? 'COMPLETED' : 'TERMINATED';
+      const tokenOrg = orgOfInstance(instanceId);
+      const matchedOrderId = orderIdFor(ordersRef.current, instanceId, '');
+
+      setOrders((prevOrders) => {
+        const orderIndex = prevOrders.findIndex((order) =>
+          CONTOUR_KEYS.some((key) => instanceOf(order, key) === instanceId)
+        );
+        if (orderIndex === -1) return prevOrders;
+
+        return prevOrders.map((order, idx) => {
+          if (idx !== orderIndex) return order;
+          const boundContour =
+            CONTOUR_KEYS.find((key) => instanceOf(order, key) === instanceId) || tokenOrg;
+          const fields = CONTOUR_FIELDS[boundContour];
+          if (!fields) return order;
+          return {
+            ...order,
+            [fields.state]: state,
+            // Активного шага больше нет: иначе кнопка последнего узла (например,
+            // ОТК) осталась бы в карточке и повторное нажатие уходило бы в уже
+            // завершённый экземпляр (`no_waiting_token` в логе движка).
+            [fields.active]: null,
+          };
+        });
+      });
+
+      if (matchedOrderId) {
+        setActionLoading((prev) => ({ ...prev, [matchedOrderId]: null }));
+        setActionErrors((prev) => ({ ...prev, [matchedOrderId]: null }));
+      }
+
+      // Метрика руководителя: закрываем запуск по событию движка. Номер заказа и
+      // последний узел `completeRun` берёт из уже сохранённой записи.
+      const finishedRun = completeRun(instanceId, {
+        finishedAt: new Date().toISOString(),
+      });
+      if (finishedRun) {
+        setProcessRuns(loadRuns());
+        refreshMetrics();
+        logEvent(
+          tokenOrg,
+          'ALL',
+          'Процесс завершён',
+          `«${finishedRun.processName || finishedRun.processId || instanceId}»${finishedRun.orderNumber ? ` по заказу ${finishedRun.orderNumber}` : ''} выполнен за ${formatDuration(finishedRun.durationMs)}`,
+          finishedRun.orderNumber || null
+        );
+      }
+    });
+  }, [socket, logEvent, refreshMetrics]);
 
   /**
    * Запуск процесса по схеме, когда кнопки инициатора в ней нет.
@@ -2034,6 +2167,12 @@ export default function App() {
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
       setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(res, 'Произошла ошибка при регистрации въезда. Попробуйте еще раз.') }));
+    } else {
+      // Движок для `COMPLETED`-шага payload не возвращает, поэтому `entryTime`
+      // не приедет по WS. Фиксируем въезд локально: иначе кнопка охраны после
+      // закрытия параллельной ветви осталась бы видимой и повторное нажатие
+      // уходило бы в уже пройденный шаг.
+      setOrders(prev => prev.map(o => o.id === orderId ? { ...o, entryTime } : o));
     }
   };
 
@@ -2064,6 +2203,11 @@ export default function App() {
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
       setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(res, 'Произошла ошибка при подтверждении ОТК. Попробуйте еще раз.') }));
+    } else {
+      // `COMPLETED`-шаг не несёт payload, поэтому `checkedAt` не приедет по WS.
+      // Ставим его локально — `isOrderCompleted` сразу закрывает карточку, не
+      // дожидаясь `process_completed`.
+      setOrders(prev => prev.map(o => o.id === orderId ? { ...o, checkedAt } : o));
     }
   };
 
