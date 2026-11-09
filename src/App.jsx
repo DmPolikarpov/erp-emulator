@@ -17,12 +17,15 @@ import {
   collectActiveElementIds,
   createUuid,
   extractProcessXml,
+  findMessageThrow,
   getElementRole,
   getLocalName,
+  getMessageWait,
   getOutgoingTargetIds,
   getProcessIds,
   getProjectProcesses,
   getStartAction,
+  getStartMessageWait,
   isDeployInstanceId,
   listActions,
   listFlowElements,
@@ -311,6 +314,23 @@ const fieldsOf = (org) => CONTOUR_FIELDS[org] || CONTOUR_FIELDS.CUSTOMER;
 const instanceOf = (order, org) => (order ? order[fieldsOf(org).instance] || '' : '');
 
 /**
+ * Идентификатор заказа, которому принадлежит событие WS.
+ *
+ * События `COMPLETED` приходят без payload (`orderNum` не из чего взять),
+ * поэтому заказ ищется и по `orderNum`, и по идентификатору экземпляра любого
+ * контура. Используется вне `setOrders`-апдейтера: побочные эффекты
+ * (`setActionLoading`) в чистом апдейтере React недопустимы.
+ */
+const orderIdFor = (ordersList, instanceId, orderNum) => {
+  const found = ordersList.find(
+    (o) =>
+      CONTOUR_KEYS.some((key) => instanceOf(o, key) === instanceId) ||
+      (orderNum && o.id === orderNum)
+  );
+  return found ? found.id : '';
+};
+
+/**
  * Все контуры «выключены»: карточка заведена, но ни один процесс не стартовал.
  *
  * Нужно при первом заполнении карточки: поля второго и третьего контуров иначе
@@ -426,6 +446,29 @@ const isProcessFinished = (xml, elementId) => {
   if (!element) return false;
 
   return /endEvent$/i.test(element.type) || getOutgoingTargetIds(xml, elementId).length === 0;
+};
+
+/**
+ * Шаг (задача), который показывается как «текущий шаг» заказа.
+ *
+ * Подсветка схемы включает и проходные узлы (шлюзы, события), но в поле
+ * «текущий шаг» они не попадают: иначе `Gateway_PassAndQualityJoin` вставал бы
+ * в статус карточки после закрытия первой параллельной ветви. Задачи и
+ * catch-события (ждём сообщение) «текущим шагом» быть должны.
+ *
+ * @param {string} xml BPMN-схема стороны.
+ * @param {string} elementId узел схемы.
+ * @returns {boolean}
+ */
+const isStepNode = (xml, elementId) => {
+  if (!elementId) return false;
+
+  const element = listFlowElements(xml).find((item) => item.id === elementId);
+  if (!element) return false;
+
+  return !/(Gateway|StartEvent|EndEvent|IntermediateThrowEvent|BoundaryEvent)$/i.test(
+    element.type
+  );
 };
 
 /**
@@ -934,6 +977,10 @@ export default function App() {
   const [leftWidth, setLeftWidth] = useState(50);
 
   const [orders, setOrders] = useState([]);
+  // Актуальный список заказов для WS-подписок: эффекты читают его через ref,
+  // чтобы не переподписываться на каждое изменение `orders`.
+  const ordersRef = useRef(orders);
+  ordersRef.current = orders;
   const [selectedOrderId, setSelectedOrderId] = useState(null);
 
   // Поля заказа (M4): «Принять заказ клиента» заводит номенклатуру, объём,
@@ -1213,6 +1260,8 @@ export default function App() {
         attachOrderInstance(targetOrderNum, tokenOrg, instanceId);
       }
 
+      const matchedOrderId = orderIdFor(ordersRef.current, instanceId, targetOrderNum);
+
       setOrders(prevOrders => {
         const orderIndex = prevOrders.findIndex(
           o => CONTOUR_KEYS.some((key) => instanceOf(o, key) === instanceId) ||
@@ -1220,7 +1269,7 @@ export default function App() {
         );
 
         if (orderIndex !== -1) {
-          const updatedOrders = prevOrders.map((order, idx) => {
+          return prevOrders.map((order, idx) => {
             if (idx !== orderIndex) return order;
 
             // Контур токена: точная привязка экземпляра к карточке, иначе префикс
@@ -1235,19 +1284,24 @@ export default function App() {
             return {
               ...order,
               [fields.instance]: instanceId,
-              // Активный узел двигает только ACTIVE: COMPLETED прежнего узла
-              // иначе откатил бы «текущий шаг» назад.
-              [fields.active]: isActive ? (elementId || order[fields.active]) : order[fields.active],
+              // Активный узел двигает только ACTIVE. `COMPLETED` снимает
+              // активный узел только тогда, когда закрылся именно он: на
+              // параллельной вилке после закрытия ветви следующий узел не
+              // активируется, и старый `active` иначе оставлял бы кнопку шага.
+              // `TIMED_OUT`/`FAILED` активный узел не снимают — шаг всё ещё ждёт.
+              // Шлюзы и события подсвечиваются на схеме, но «текущим шагом» не
+              // становятся.
+              [fields.active]: isActive
+                ? (isStepNode(schemaXml(contour), elementId)
+                    ? (elementId || order[fields.active])
+                    : order[fields.active])
+                : (state === TOKEN_STATES.COMPLETED && order[fields.active] === elementId
+                    ? null
+                    : order[fields.active]),
               [fields.state]: nextProcessState(order[fields.state], state),
               ...payloadData
             };
           });
-
-          const updatedOrder = updatedOrders[orderIndex];
-          if (updatedOrder) {
-            setActionLoading(prev => ({ ...prev, [updatedOrder.id]: null }));
-          }
-          return updatedOrders;
         }
 
         // Заказ заводим только по активации узла: `COMPLETED` приходит и для
@@ -1272,9 +1326,19 @@ export default function App() {
           ...contourPatch('CUSTOMER', instanceId, elementId, state || 'ACTIVE'),
           ...payloadData
         };
-        setActionLoading(prev => ({ ...prev, [newOrderNum]: null }));
         return [newOrder, ...prevOrders];
       });
+
+      // Снятие индикатора — вне апдейтера `setOrders`: побочный эффект внутри
+      // апдейтера в React 18 (StrictMode) не гарантирует применение.
+      if (matchedOrderId) {
+        setActionLoading(prev => ({ ...prev, [matchedOrderId]: null }));
+      } else if (isActive && targetOrderNum) {
+        // Заказ ещё не в списке: WS-кадр `StartProcess` успевает раньше ответа
+        // HTTP, и карточку заведёт ветка «новый заказ» ниже. Индикатор запуска
+        // снимаем по номеру из payload.
+        setActionLoading(prev => ({ ...prev, [targetOrderNum]: null }));
+      }
 
       // Метрика процесса: токен встал на конечный узел схемы — процесс выполнен.
       // Отдельного события «процесс завершён» движок не публикует, поэтому финиш
@@ -1310,6 +1374,78 @@ export default function App() {
       logEvent('SYSTEM', 'ALL', 'Событие Оркестратора', `Инстанс ${instanceId} -> Узел: ${elementId || '—'} [Статус: ${state}]`);
     });
   }, [socket, logEvent, schemaXml, attachOrderInstance, refreshMetrics]);
+
+  // Завершение процесса: движок публикует `process_completed`/`process_terminated`
+  // отдельным сообщением без `element_id`, поэтому разбор токенов его не видит
+  // (`parseTokenMessage` пропускает всё, кроме `token_updated`). Закрываем заказ
+  // по факту события движка: на параллельном слиянии экземпляр завершается без
+  // активации `endEvent` в проекции, и `isProcessFinished` по токенам никогда не
+  // сработал бы — карточка «зависала» на последней кнопке.
+  useEffect(() => {
+    if (!socket) return undefined;
+
+    return socket.on(SOCKET_EVENTS.MESSAGE, (message) => {
+      if (!message || typeof message !== 'object') return;
+      const { event, instance_id: instanceId } = message;
+      if (event !== 'process_completed' && event !== 'process_terminated') return;
+      if (
+        !instanceId ||
+        isDeployInstanceId(instanceId) ||
+        instanceId.startsWith(INSTANCE_PREFIX.DEFINITION)
+      ) {
+        return;
+      }
+
+      const state = event === 'process_completed' ? 'COMPLETED' : 'TERMINATED';
+      const tokenOrg = orgOfInstance(instanceId);
+      const matchedOrderId = orderIdFor(ordersRef.current, instanceId, '');
+
+      setOrders((prevOrders) => {
+        const orderIndex = prevOrders.findIndex((order) =>
+          CONTOUR_KEYS.some((key) => instanceOf(order, key) === instanceId)
+        );
+        if (orderIndex === -1) return prevOrders;
+
+        return prevOrders.map((order, idx) => {
+          if (idx !== orderIndex) return order;
+          const boundContour =
+            CONTOUR_KEYS.find((key) => instanceOf(order, key) === instanceId) || tokenOrg;
+          const fields = CONTOUR_FIELDS[boundContour];
+          if (!fields) return order;
+          return {
+            ...order,
+            [fields.state]: state,
+            // Активного шага больше нет: иначе кнопка последнего узла (например,
+            // ОТК) осталась бы в карточке и повторное нажатие уходило бы в уже
+            // завершённый экземпляр (`no_waiting_token` в логе движка).
+            [fields.active]: null,
+          };
+        });
+      });
+
+      if (matchedOrderId) {
+        setActionLoading((prev) => ({ ...prev, [matchedOrderId]: null }));
+        setActionErrors((prev) => ({ ...prev, [matchedOrderId]: null }));
+      }
+
+      // Метрика руководителя: закрываем запуск по событию движка. Номер заказа и
+      // последний узел `completeRun` берёт из уже сохранённой записи.
+      const finishedRun = completeRun(instanceId, {
+        finishedAt: new Date().toISOString(),
+      });
+      if (finishedRun) {
+        setProcessRuns(loadRuns());
+        refreshMetrics();
+        logEvent(
+          tokenOrg,
+          'ALL',
+          'Процесс завершён',
+          `«${finishedRun.processName || finishedRun.processId || instanceId}»${finishedRun.orderNumber ? ` по заказу ${finishedRun.orderNumber}` : ''} выполнен за ${formatDuration(finishedRun.durationMs)}`,
+          finishedRun.orderNumber || null
+        );
+      }
+    });
+  }, [socket, logEvent, refreshMetrics]);
 
   /**
    * Запуск процесса по схеме, когда кнопки инициатора в ней нет.
@@ -1379,6 +1515,100 @@ export default function App() {
       'Процесс запущен',
       `Экземпляр ${instanceId} создан по схеме «${processTitleOf(xml)}».`,
       orderNum
+    );
+  };
+
+  /**
+   * Перечитывает заказы с сервера.
+   *
+   * Завод сам заказов не заводит: они приходят от клиента сообщением
+   * `ClientOrder`, а экземпляр завода создаёт триггер узла клиента. Карточку
+   * кабинет узнаёт по токену (`attachOrderInstance`), но если вкладка была
+   * открыта до отправки заказа, WS-кадр мог не дойти — тогда список читается
+   * заново, и менеджер видит пришедший заказ без F5.
+   */
+  const handleRefreshOrders = async () => {
+    const result = await ordersClient.listOrders();
+
+    if (!result.ok) {
+      logEvent(
+        currentUser.org,
+        currentUser.role,
+        'Список заказов не обновлён',
+        result.error || result.details || 'API заказов недоступен.',
+        null
+      );
+      return;
+    }
+
+    const remote = (result.orders || []).map(normalizeOrder).filter(Boolean);
+    setOrders(prev => mergeOrders(remote, prev));
+  };
+
+  /**
+   * Кнопка «Очистить все заказы» (M8): удаляет заказы из БД движка.
+   *
+   * Список заказов живёт на сервере, поэтому «забыть» его в браузере мало:
+   * следующий F5 вернул бы карточки обратно. Кнопка вызывает
+   * `DELETE /api/v1/orders` (`action: 'clear'` в API заказов) и очищает
+   * локальные артефакты сценария — документы, пропуска, время въезда, — иначе
+   * карточки-призраки остались бы в памяти вкладки.
+   *
+   * Экземпляры процессов в движке не останавливаются: удаляется карточка
+   * заказа, а не история прогона (процессы видны в журнале движка).
+   */
+  const handleClearOrders = async () => {
+    if (orders.length === 0) {
+      logEvent(
+        currentUser.org,
+        currentUser.role,
+        'Очистка заказов',
+        'Список заказов уже пуст — очищать нечего.',
+        null
+      );
+      return;
+    }
+
+    // Очистка необратима: без подтверждения её легко нажать вместо
+    // «Обновить список». В jsdom/тестах `confirm` может отсутствовать.
+    const question = `Удалить все заказы (${orders.length})? Экземпляры процессов в движке останутся.`;
+    const confirmed =
+      typeof window === 'undefined' || typeof window.confirm !== 'function'
+        ? true
+        : window.confirm(question);
+
+    if (!confirmed) return;
+
+    const result = await ordersClient.clearOrders();
+
+    if (!result.ok && result.status) {
+      // Шлюз ответил отказом: список на сервере цел, локальную копию не трогаем.
+      logEvent(
+        currentUser.org,
+        currentUser.role,
+        'Заказы не очищены',
+        result.error || result.details || 'API заказов вернул ошибку.',
+        null
+      );
+      return;
+    }
+
+    // API недоступен (стенд без шлюза): заказы этой вкладки всё равно чистим —
+    // серверных карточек тогда и нет, иначе список остался бы на экране.
+    setOrders([]);
+    setSelectedOrderId(null);
+    setActionErrors({});
+    setActionLoading({});
+    attachedInstances.current = new Set();
+
+    logEvent(
+      currentUser.org,
+      currentUser.role,
+      result.ok ? 'Заказы очищены' : 'Заказы очищены только в кабинете',
+      result.ok
+        ? `Удалено заказов: ${result.deleted}. Экземпляры процессов в движке остались — новые заказы начнут список заново.`
+        : `${result.error || 'API заказов недоступен.'} Список очищен в этой вкладке: серверных заказов нет.`,
+      null
     );
   };
 
@@ -1552,6 +1782,44 @@ export default function App() {
         orderNum
       );
       alert(`Схема Клиента несовместима с движком:\n${lines.join('\n')}`);
+      return;
+    }
+
+    // Заказ клиента будит завод сообщением, а экземпляр `Process_Dairy` создаёт
+    // триггер `Event_SendOrder` по **задеплоенному** определению. Ручной кнопки
+    // старта у завода больше нет, поэтому определение готовит та сторона, что
+    // отправляет заказ: иначе движок напишет `message_target_not_deployed`, и
+    // заказ будет некому принять. Деплой — upsert по `bpmn:process/@id`.
+    const factoryXml = schemaXml('CUSTOMER');
+    const factoryProblems = validateEngineSchema(factoryXml).problems;
+
+    if (factoryProblems.length > 0) {
+      const lines = schemaProblemLines(factoryProblems);
+      logEvent(
+        'CUSTOMER',
+        currentUser ? currentUser.role : 'ALL',
+        'Заказ клиента не создан: движок не примет схему завода',
+        lines.join(' '),
+        orderNum
+      );
+      alert(`Схема Молочного завода несовместима с движком:\n${lines.join('\n')}`);
+      return;
+    }
+
+    const deployFactory = await client.deploySchema('CUSTOMER', factoryXml);
+
+    if (!deployFactory.ok) {
+      setActionErrors(prev => ({
+        ...prev,
+        [orderNum]: 'Не удалось задеплоить схему завода: заказ некому принять.',
+      }));
+      logEvent(
+        'CUSTOMER',
+        currentUser ? currentUser.role : 'ALL',
+        'Заказ клиента не создан: схема завода не задеплоена',
+        'Экземпляр завода создаёт триггер сообщения ClientOrder — без определения в движке он не появится.',
+        orderNum
+      );
       return;
     }
 
@@ -1801,16 +2069,26 @@ export default function App() {
       // Старые схемы объявляют пару `counterpartEvent`/`counterpartElementId`:
       // сигнал второй стороне шлёт клиент. Демо-проект обходится сообщением
       // `MilkShipped`, которое движок доставляет заводу по `orderNum` (M3).
+      //
+      // Роль для такого сигнала не передаётся (`{ actor: '' }`): движок сверяет
+      // роль с ожидающим шагом **второй стороны** (`Task_WaitForSupplierShipment`
+      // заказчика, `MANAGER`), и под ролью поставщика шлюз отвечал `403`. Сигнал
+      // — доставка сообщения в чужой экземпляр (то же, что делает движок по
+      // `bpmn:messageFlow`), а не действие роли поставщика.
       if (shipment.action.counterpartEvent) {
         const resCust = await client.sendEvent(
           targetOrder.customerInstanceId,
           shipment.action.counterpartEvent,
           shipment.action.counterpartElementId,
-          { shippedAt, orderNum: orderId, documents: targetOrder.documents }
+          { shippedAt, orderNum: orderId, documents: targetOrder.documents },
+          { actor: '' }
         );
 
         if (!resCust.ok) {
-          setActionErrors(prev => ({ ...prev, [orderId]: 'Не удалось передать сигнал об отгрузке Заказчику.' }));
+          setActionErrors(prev => ({
+            ...prev,
+            [orderId]: eventFailure(resCust, 'Шаг выполнен, но сигнал об отгрузке Заказчику не дошёл.'),
+          }));
         }
       } else {
         logEvent(
@@ -1889,6 +2167,12 @@ export default function App() {
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
       setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(res, 'Произошла ошибка при регистрации въезда. Попробуйте еще раз.') }));
+    } else {
+      // Движок для `COMPLETED`-шага payload не возвращает, поэтому `entryTime`
+      // не приедет по WS. Фиксируем въезд локально: иначе кнопка охраны после
+      // закрытия параллельной ветви осталась бы видимой и повторное нажатие
+      // уходило бы в уже пройденный шаг.
+      setOrders(prev => prev.map(o => o.id === orderId ? { ...o, entryTime } : o));
     }
   };
 
@@ -1919,6 +2203,11 @@ export default function App() {
     if (!res.ok) {
       setActionLoading(prev => ({ ...prev, [orderId]: null }));
       setActionErrors(prev => ({ ...prev, [orderId]: eventFailure(res, 'Произошла ошибка при подтверждении ОТК. Попробуйте еще раз.') }));
+    } else {
+      // `COMPLETED`-шаг не несёт payload, поэтому `checkedAt` не приедет по WS.
+      // Ставим его локально — `isOrderCompleted` сразу закрывает карточку, не
+      // дожидаясь `process_completed`.
+      setOrders(prev => prev.map(o => o.id === orderId ? { ...o, checkedAt } : o));
     }
   };
 
@@ -1996,15 +2285,22 @@ export default function App() {
     const counterpartInstanceId = counterpartInstanceOf(order, org);
 
     if (entry.action.counterpartEvent && counterpartInstanceId) {
+      // Сигнал второй стороне уходит без роли (`{ actor: '' }`): движок сверяет
+      // роль с ожидающим шагом её контура, а не с нажатой кнопкой, поэтому роль
+      // сессии здесь даёт `403` (см. `handleSupplierShipment`).
       const counterpartRes = await client.sendEvent(
         counterpartInstanceId,
         entry.action.counterpartEvent,
         entry.action.counterpartElementId || '',
-        { orderNum: order.id, actedAt }
+        { orderNum: order.id, actedAt },
+        { actor: '' }
       );
 
       if (!counterpartRes.ok) {
-        setActionErrors(prev => ({ ...prev, [order.id]: 'Шаг выполнен, но сигнал второй стороне не ушёл.' }));
+        setActionErrors(prev => ({
+          ...prev,
+          [order.id]: eventFailure(counterpartRes, 'Шаг выполнен, но сигнал второй стороне не ушёл.'),
+        }));
       }
     }
   };
@@ -2402,6 +2698,17 @@ export default function App() {
   const canCreateOrder = Boolean(createOrderAction) && currentUser.role === actionRoleOf('CUSTOMER', createOrderAction);
 
   /**
+   * Старт процесса ждёт сообщение (message start event).
+   *
+   * Так объявлен вход завода в «Молочном заводе»: заказ приходит от клиента
+   * (`ClientOrder`), экземпляр создаёт триггер `Event_SendOrder`, поэтому
+   * кнопки инициатора у завода нет — и «Запуск по схеме» тоже не рисуется:
+   * иначе менеджер завёл бы заказ, которого никто не заказывал. Кнопка есть
+   * только у контура, чей старт объявлен `act:userAction`.
+   */
+  const startMessageWait = getStartMessageWait(schemaXml(currentUser.org));
+
+  /**
    * Кнопка старта процесса клиента (M5).
    *
    * У третьего контура ключ кнопки в `ACTION_ID` не заводится: кабинет не
@@ -2498,6 +2805,56 @@ export default function App() {
       name: node.getAttribute('name') || activeElementId,
       topic: node.getAttribute('camunda:topic') || 'default',
     };
+  })();
+
+  /**
+   * Активный шаг ждёт сообщение (catch-событие)?
+   *
+   * Узел `intermediateCatchEvent` с `messageEventDefinition` кнопок не имеет:
+   * команду присылает вторая сторона, и токен сдвигается сам (M3/M5). Без
+   * подсказки панель действий выглядела бы пустой, а «текущий шаг» показывал
+   * бы последний человеческий шаг — на этом месте демо раньше и «зависало».
+   *
+   * Ожидание ищется по набору `ACTIVE`-узлов (`collectActiveElementIds`):
+   * на параллельных ветвях их несколько, и ждать сообщение может любая.
+   *
+   * @type {{elementId: string, name: string, message: string}|null}
+   */
+  const activeMessageWait = (() => {
+    if (!currentOrder) return null;
+
+    const org = currentUser.org;
+    const xml = schemaXml(org);
+    const activeTokens = collectActiveElementIds(tokensFor(instanceOf(currentOrder, org)));
+    const elementIds =
+      activeTokens.length > 0
+        ? activeTokens
+        : [activeStepOf(currentOrder, org)].filter(Boolean);
+
+    return elementIds.map((elementId) => getMessageWait(xml, elementId)).find(Boolean) || null;
+  })();
+
+  /**
+   * Кто дошлёт ожидаемое сообщение.
+   *
+   * Отправитель ищется по схемам **других** контуров: имя сообщения — общий
+   * ключ обмена (`bpmn:message/@name`), а `messageRef` в каждом процессе свой.
+   * Если отправителя в проекте нет (сообщение приходит из внешней системы),
+   * подсказка называет ожидание без второй стороны.
+   *
+   * @type {{org: 'CUSTOMER'|'SUPPLIER'|'CLIENT', source: object}|null}
+   */
+  const messageSender = (() => {
+    if (!activeMessageWait) return null;
+
+    return (
+      CONTOUR_KEYS.filter((key) => key !== currentUser.org)
+        .map((key) => ({
+          org: key,
+          source: findMessageThrow(schemaXml(key), activeMessageWait.message),
+        }))
+        .find((item) => item.source) || null
+    );
   })();
 
   /* ------------------------------ *
@@ -2710,13 +3067,25 @@ export default function App() {
         {/* Старт процесса: кнопка инициатора объявлена на стартовом событии
             схемы (`act:userAction`); роль там указана в самой кнопке, потому что
             `bpmn:potentialOwner` по спецификации BPMN 2.0 есть только у Activity. */}
-        {canCreateOrder && (
-          <ActionButton
-            action={createOrderAction.action}
-            onClick={handleProductionCreateOrder}
-            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
-          />
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          {canCreateOrder && (
+            <ActionButton
+              action={createOrderAction.action}
+              onClick={handleProductionCreateOrder}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+            />
+          )}
+
+          {/* Сброс демо-списка: заказы живут в БД движка, поэтому чистится и
+              сервер (`DELETE /api/v1/orders`), а не только `useState`. */}
+          <button
+            onClick={handleClearOrders}
+            title="Удалить все заказы из БД движка: список начнётся заново (экземпляры процессов останутся)"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#fff', color: '#b91c1c', border: '1px solid #fca5a5', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+          >
+            <Trash2 size={15} /> Очистить все заказы
+          </button>
+        </div>
       </div>
 
       <div id="main-dashboard-container" style={{ display: 'flex', width: '100%', position: 'relative' }}>
@@ -2732,8 +3101,11 @@ export default function App() {
                 может не объявлять `act:userAction` на стартовом событии, но
                 экземпляр всё равно нужен — иначе шаги кабинета не подсветятся.
                 У клиента своя точка входа (заказ готовой продукции, ниже):
-                без карточки заказа его процесс заводу нечего обслуживать. */}
-            {((!createOrderAction && currentUser.org !== 'CLIENT') ||
+                без карточки заказа его процесс заводу нечего обслуживать.
+                Старт-сообщение (`getStartMessageWait`) — исключение: заказ
+                приходит от второй стороны, и ручной запуск создал бы заказ,
+                которого никто не заказывал. */}
+            {((!createOrderAction && !startMessageWait && currentUser.org !== 'CLIENT') ||
               (currentUser.org === 'CLIENT' && !clientStartStep)) && (
               <div style={{ padding: '16px', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', marginBottom: '16px' }}>
                 <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#1e40af', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2748,6 +3120,55 @@ export default function App() {
                 >
                   <Play size={16} /> Запустить процесс
                 </button>
+              </div>
+            )}
+
+            {/* ПРИЁМ ЗАКАЗОВ: старт процесса ждёт сообщение второй стороны
+                (`ClientOrder` от клиента). Заказ не заводят руками — его
+                присылают, а экземпляр создаёт триггер `Event_SendOrder`; шаги
+                менеджера появляются только у пришедшего заказа. Кнопки здесь
+                не запускают процесс: первая перечитывает список заказов,
+                вторая готовит определение в движке, третья очищает список
+                (`DELETE /api/v1/orders`) перед новым показом. */}
+            {startMessageWait && !isExecutive && currentUser.org !== 'CLIENT' && (
+              <div style={{ padding: '16px', backgroundColor: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '8px', marginBottom: '16px' }}>
+                <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#065f46', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <ClipboardCheck size={18} /> Приём заказов
+                </h3>
+                <p style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#065f46' }}>
+                  Заказ приходит от клиента сообщением <b>{startMessageWait.message}</b>: экземпляр
+                  процесса создаёт движок по триггеру узла клиента, поэтому кнопки
+                  «создать заказ» у контура нет. Ваш шаг появится у заказа, который пришёл.
+                </p>
+                <p style={{ margin: '0 0 12px 0', fontSize: '12px', color: '#047857' }}>
+                  Чтобы заказ дошёл, определение схемы контура должно быть в движке
+                  (его передаёт кнопка ниже или сторона, отправляющая заказ).
+                </p>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button
+                    onClick={handleRefreshOrders}
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    <RotateCcw size={16} /> Обновить список заказов
+                  </button>
+                  <button
+                    onClick={() => deployBpmnSchema(currentUser.org, schemaXml(currentUser.org))}
+                    disabled={isDeploying}
+                    title="Передать определение процесса в оркестратор: без него триггер сообщения не создаст экземпляр"
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#fff', color: '#065f46', border: '1px solid #6ee7b7', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    <Upload size={16} /> {isDeploying ? 'Деплой...' : 'Задеплоить схему приёма'}
+                  </button>
+                  {/* Список заказов живёт в БД движка: «очистить» — это DELETE,
+                      иначе следующий F5 вернул бы карточки обратно. */}
+                  <button
+                    onClick={handleClearOrders}
+                    title="Удалить все заказы из БД движка: список начнётся заново (экземпляры процессов останутся)"
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 16px', backgroundColor: '#fff', color: '#b91c1c', border: '1px solid #fca5a5', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    <Trash2 size={16} /> Очистить все заказы
+                  </button>
+                </div>
               </div>
             )}
 
@@ -3161,6 +3582,24 @@ export default function App() {
                 <p style={{ fontSize: '12px', margin: 0, color: '#1e3a8a' }}>
                   Команда опубликована в <code>mes.out.v1.cmd.{activeExternalTask.topic}</code>.
                   Результат придёт в кабинет автоматически: ответ воркера двигает процесс дальше.
+                </p>
+              </div>
+            )}
+
+            {/* 7.2. ОЖИДАНИЕ СООБЩЕНИЯ (catch-событие). Кнопок у шага нет:
+                команду пришлёт вторая сторона, и токен сдвинет её сообщение.
+                Подсказка называет сообщение и отправителя, иначе пустая панель
+                действий читается как «процесс завис». */}
+            {currentOrder && schemaStepActions.length === 0 && !activeExternalTask && activeMessageWait && (
+              <div style={{ padding: '16px', backgroundColor: '#fefce8', border: '1px solid #fde68a', borderRadius: '8px', marginBottom: '16px' }}>
+                <p style={{ fontSize: '14px', margin: '0 0 8px 0', color: '#92400e' }}>
+                  ⏳ Шаг «{activeMessageWait.name}» ждёт сообщение <code>{activeMessageWait.message}</code> [Заказ {currentOrder.id}].
+                </p>
+                <p style={{ fontSize: '12px', margin: 0, color: '#a16207' }}>
+                  {messageSender
+                    ? <>Сообщение дошлёт контур «{CONTOUR_LABELS[messageSender.org] || messageSender.org}» на шаге «{messageSender.source.name}».</>
+                    : <>Сообщение приходит из внешней системы.</>}
+                  {' '}Токен движка стоит на catch-событии и сдвинется сам: нажимать нечего.
                 </p>
               </div>
             )}

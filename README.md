@@ -139,6 +139,66 @@ Jest и через `<script>`.
 Витрина `<script>`-подключения: `npm run sdk:demo && npm start` →
 [http://localhost:3000/sdk-demo.html](http://localhost:3000/sdk-demo.html).
 
+## Кто инициализирует заказ
+
+Заказ создаёт **не руководитель**, а та роль, что объявлена в кнопке старта схемы
+(`act:userAction/@role` на `bpmn:startEvent`). Кабинет сравнивает её с ролью
+сессии в `App.jsx` (`canCreateOrder`), движок — независимо от клиента в
+`runtime/roles.rs` (`decide_start`): чужой `StartProcess` получает **403** с
+текстом «Роль DIRECTOR не может запустить процесс Process_MilkCustomer_v1: нужна
+роль PRODUCTION». Проверка действует там, где роль объявила кнопка старта; у
+завода кнопки нет (см. ниже), и прямой `StartProcess` из API движок пока
+пропускает — это ограничение проверки, а не разрешение: кабинет такой кнопки не
+рисует ([роадмап, §9](docs/dairy-plant-roadmap.md#9-риски)). Роль с
+`kind="EXECUTIVE"` («Директор завода», «Руководитель …») даёт
+схему, метрики и редактор — кнопку старта она не получает.
+
+Есть и второй способ появления заказа — **сообщение**. Если в стартовом событии
+схемы объявлено `bpmn:messageEventDefinition` (этот признак находит
+`getStartMessageWait`), кнопки старта нет вовсе: экземпляр создаёт триггер
+процесса-отправителя (у завода —
+`Event_SendOrder` клиента, сообщение `ClientOrder`), а роль продаж видит только
+пришедшие заказы.
+
+| Проект (умолчание кабинета) | Контур | Кнопка старта в схеме | Роль-инициатор | Вход |
+| --- | --- | --- | --- | --- |
+| «Закупка и приёмка молока» (`defaults/milkProcess.js`) | CUSTOMER | `createOrder` на `StartEvent_Customer` | `PRODUCTION` — «Мастер производства» | `production` / `123` |
+| «Закупка и приёмка молока» | SUPPLIER | `startSupplierProcess` на `StartEvent_Supplier`, роль не указана | любая роль контура (общая очередь) | `supplier_manager` / `123` |
+| «Молочный завод: заказ → производство → отгрузка» (`defaults/dairyPlant.js`) | CUSTOMER | кнопки нет: `Start_Dairy` — стартовое событие-сообщение `ClientOrder` (заказ приходит от клиента) | — экземпляр создаёт `Event_SendOrder` контура CLIENT | `sales` / `123` — ведёт пришедшие заказы |
+| «Молочный завод» | CLIENT | `placeClientOrder` на `Start_Client` → `Task_ConfirmOrder` | `CLIENT` — «Менеджер клиента» | `client` / `123` |
+| «Молочный завод» | SUPPLIER | `startSupplierProcess` на `Start_Supplier` → `Task_ConfirmPO` | `SUPPLIER_MANAGER` — «Менеджер по продажам сырья» | `supplier_manager` / `123` |
+
+Пароль у всех ролей один — `123` (`roleIcons.js`, `DEFAULT_PASSWORD`), логины —
+`loginOf(code)`; карточки на экране входа подписаны титулами из `role:catalog` и
+сгруппированы по контурам.
+
+Поставщика в обоих проектах руками обычно не запускают: его экземпляр создаёт
+контур Заказчика — кнопка `sendToSupplier` на `Task_CreatePurchaseOrder` в
+«Закупке…» (`startsProcess="Process_SupplierSupply_v1"`) и `trg:processTrigger`
+на `Event_SendPO` в «Молочном заводе» (`targetProcessId="Process_Supplier"`,
+`firstElementId="Task_ConfirmPO"`). Там же третья точка входа — Клиент:
+`Event_SendOrder` создаёт экземпляр завода (`targetProcessId="Process_Dairy"`,
+`instancePrefix="inst-cust-"`, `firstElementId="Task_ReceiveOrder"`), поэтому
+заказ клиента доезжает до завода без ручного старта — при условии, что схема
+завода задеплоена: определение отправляет сторона, создающая заказ
+(`deployBpmnSchema` в `App.jsx` перед `createOrder`), иначе движок ответит
+`message_target_not_deployed`. Кабинет продаж заказов не заводит: панель
+«Приём заказов» берёт их из `GET /api/v1/orders` (кнопки «Обновить список
+заказов», «Задеплоить схему приёма» и «Очистить все заказы»), а «Менеджер по
+продажам» ведёт шаг пришедшего экземпляра. Очистка удаляет карточки из БД
+движка (`DELETE /api/v1/orders`) — экземпляры процессов остаются историей
+прогона, поэтому перед новым показом список начинается с нуля, а журнал и
+метрики прошлых прогонов не пропадают.
+
+Если в схеме кнопки `createOrder` нет, кабинет показывает блок «Запуск по схеме»
+(`App.jsx`): процесс стартует со стартового события, а роль всё равно проверяет
+движок. Стартовое событие-сообщение — исключение: `getStartMessageWait` находит
+`bpmn:messageEventDefinition`, и блок не рисуется — ручного старта у такого
+процесса нет, кнопка создала бы заказ-призрак без экземпляра. Поменять инициатора
+можно без правки кода — правая панель под ролью
+`EXECUTIVE` (`BpmnEditor`) → «Кнопки участников на узле» → поле «Роль участника
+(role)» → сохранить и задеплоить схему.
+
 ## Available Scripts
 
 In the project directory, you can run:
@@ -150,6 +210,17 @@ Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
 
 The page will reload when you make changes.\
 You may also see any lint errors in the console.
+
+Если старт падает с `Invalid options object. Dev Server has been initialized
+using an options object that does not match the API schema. - options.allowedHosts[0]
+should be a non-empty string`, это `react-scripts` + включённый `proxy`: он берёт
+`allowedHosts` из приватного IPv4 машины, а первый не-internal адрес здесь —
+Radmin VPN (`26.220.114.239`), поэтому `lanUrlForConfig` пуст. Положите в
+`.env.development.local` (файл в `.gitignore`) строку
+`DANGEROUSLY_DISABLE_HOST_CHECK=true` — и `npm start` заработает как обычно.
+`HOST=localhost` не помогает: `lanUrlForConfig` остаётся пустым при любом `HOST`.
+Диагностика — `node ..\..\wip\probe-allowed-host.cjs`; подробнее — таблица
+диагностики в основном [README](../../README.md).
 
 ### `npm test`
 

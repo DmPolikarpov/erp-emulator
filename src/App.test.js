@@ -248,6 +248,7 @@ jest.mock('./ordersApi', () => {
       getOrder: jest.fn(),
       createOrder: jest.fn(),
       attachInstance: jest.fn(),
+      clearOrders: jest.fn(),
     },
   };
 });
@@ -293,6 +294,7 @@ const {
   getOrder: mockGetOrder,
   createOrder: mockCreateOrder,
   attachInstance: mockAttachInstance,
+  clearOrders: mockClearOrders,
 } = jest.requireMock('./ordersApi').ordersClient;
 
 const { load: mockLoadMetrics } = jest.requireMock('./metricsApi').metricsClient;
@@ -313,6 +315,15 @@ const emitToken = (token) => {
   act(() => {
     (mockSocketListeners[SOCKET_EVENTS.TOKEN] || []).forEach((listener) =>
       listener(token)
+    );
+  });
+};
+
+/** Доставляет произвольное JSON-сообщение шлюза подписчикам сокета. */
+const emitMessage = (message) => {
+  act(() => {
+    (mockSocketListeners[SOCKET_EVENTS.MESSAGE] || []).forEach((listener) =>
+      listener(message)
     );
   });
 };
@@ -365,6 +376,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
     mockGetOrder.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
     mockCreateOrder.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
     mockAttachInstance.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
+    mockClearOrders.mockResolvedValue({ ok: false, error: 'API заказов недоступен.' });
 
     // API метрик по умолчанию тоже недоступен — стенд без HTTP-шлюза: панель
     // руководителя показывает метрики этого браузера (как до M7). Тесты M7
@@ -428,8 +440,10 @@ describe('App: интеграция с BPMN Client SDK', () => {
   });
 
   // Движок держит на экземпляр ровно один ACTIVE-токен: активируя следующий
-  // узел, он закрывает прежний событием `COMPLETED` (см. тесты ниже).
-  it('COMPLETED прежнего узла не двигает текущий шаг и не закрывает заказ', () => {
+  // узел, он закрывает прежний событием `COMPLETED`. Если после `COMPLETED`
+  // следующий узел не активировался (например, слияние параллельной ветви),
+  // «текущий шаг» снимается, чтобы кнопка пройденного узла не осталась в карточке.
+  it('COMPLETED текущего узла снимает его из «текущего шага», не закрывая заказ', () => {
     openAs('Руководитель Заказчика');
 
     emitToken({
@@ -448,11 +462,11 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     const viewerProps = lastProps(mockViewerProps);
 
-    // Подсветка: узел ушёл в зелёный трейл, «текущий шаг» остался на месте.
+    // Подсветка: узел ушёл в зелёный трейл, активного шага больше нет.
     expect(viewerProps.tokens).toEqual({
       Task_CreatePurchaseOrder: 'COMPLETED',
     });
-    expect(viewerProps.activeElementId).toBe('Task_CreatePurchaseOrder');
+    expect(viewerProps.activeElementId).toBe('');
 
     // Статус процесса в таблице руководителя остался ACTIVE: событие COMPLETED
     // закрывает прежний узел, а не заказ (иначе здесь было бы COMPLETED).
@@ -613,6 +627,155 @@ describe('App: интеграция с BPMN Client SDK', () => {
     // Следующий узел по схеме — слияние ветвей.
     expect(elementId).toBe('Gateway_PassAndQualityJoin');
     expect(outputData.token_id).toBe(`${instanceId}:token-security`);
+  });
+
+  // Подсветка схемы включает проходные узлы (шлюзы, события), но «текущим
+  // шагом» заказа они не становятся: поле active остаётся за задачами.
+  it('шлюз подсвечивается, но не становится текущим шагом', () => {
+    openAs('Руководитель Заказчика');
+
+    const instanceId = 'inst-cust-gateway-step';
+    emitToken({
+      instanceId,
+      elementId: 'Task_QualityControl',
+      state: 'ACTIVE',
+      payload: { orderNum: '№842' },
+    });
+    emitToken({
+      instanceId,
+      elementId: 'Gateway_PassAndQualityJoin',
+      state: 'ACTIVE',
+    });
+
+    const viewerProps = lastProps(mockViewerProps);
+
+    expect(viewerProps.tokens).toEqual({
+      Task_QualityControl: 'ACTIVE',
+      Gateway_PassAndQualityJoin: 'ACTIVE',
+    });
+    expect(viewerProps.activeElementId).toBe('Task_QualityControl');
+  });
+
+  // На параллельном слиянии экземпляр завершается без активации `endEvent` в
+  // проекции токенов, поэтому финиш фиксируется по отдельному событию движка
+  // `process_completed` (сообщение без `element_id`, его `parseTokenMessage`
+  // отбрасывает). Карточка должна закрыть заказ и снять кнопку последнего узла.
+  it('заказ закрывается по событию движка `process_completed`', () => {
+    openAs('Менеджер закупок');
+
+    emitToken({
+      instanceId: 'inst-cust-completed',
+      elementId: 'Task_QualityControl',
+      state: 'ACTIVE',
+      payload: { orderNum: '№840' },
+    });
+
+    emitMessage({
+      event: 'process_completed',
+      instance_id: 'inst-cust-completed',
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(screen.getByText(/полностью завершен/)).toBeTruthy();
+  });
+
+  // Завершение первой ветви на параллельной вилке не активирует следующий шаг
+  // (следующий узел — шлюз слияния, в проекцию он не попадает), поэтому движок
+  // присылает только `token_updated` с `state: COMPLETED` и без payload.
+  // Индикатор «Фиксация въезда...» должен сниматься именно по этому событию.
+  it('COMPLETED первой ветви снимает индикатор шага охраны КПП', async () => {
+    openAs('Охрана КПП');
+
+    const instanceId = 'inst-cust-security-first';
+    emitToken({
+      instanceId,
+      elementId: 'Task_SecurityCheck',
+      state: 'ACTIVE',
+      tokenId: `${instanceId}:token-security`,
+      payload: { orderNum: '№841', passData: { passNumber: 'ПР-100000' } },
+    });
+
+    fireEvent.click(screen.getByText('Проверить пропуск и открыть ворота'));
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalled());
+    expect(screen.getByText('Фиксация въезда транспорта на КПП...')).toBeTruthy();
+
+    emitToken({
+      instanceId,
+      elementId: 'Task_SecurityCheck',
+      state: 'COMPLETED',
+      tokenId: `${instanceId}:token-security`,
+    });
+
+    expect(screen.queryByText('Фиксация въезда транспорта на КПП...')).toBeNull();
+  });
+
+  // M3/M5, кабинет: на catch-событии кнопок нет, и раньше панель действий
+  // просто пустела — на показе это читалось как «процесс завис». Теперь шаг
+  // ожидания объясняется: какое сообщение ждём и кто его дошлёт. Подсказка
+  // берётся из схемы (`getMessageWait`/`findMessageThrow`), а не из кода
+  // кабинета, поэтому работает и для проекта, загруженного из редактора.
+  it('ожидание сообщения объясняется подсказкой вместо пустых кнопок', () => {
+    createProject({ name: 'Молочный завод (ожидание)', xml: DAIRY_PLANT_PROJECT_XML });
+
+    openAs('Менеджер по закупкам');
+
+    emitToken({
+      instanceId: 'inst-cust-wait-message',
+      elementId: 'Task_WaitPOConfirmed',
+      state: 'ACTIVE',
+      payload: { orderNum: '№901' },
+    });
+
+    // Шаг назван по событию схемы, сообщение — по объявлению `bpmn:message`.
+    expect(screen.getByText(/ждёт сообщение/).textContent).toContain(
+      'Ожидание подтверждения заказа'
+    );
+    expect(screen.getByText('PurchaseOrderConfirmed')).toBeTruthy();
+    // Отправитель — вторая сторона проекта: подтверждение шлёт Поставщик.
+    expect(screen.getByText(/Сообщение дошлёт контур «ПОСТАВЩИК»/)).toBeTruthy();
+
+    // На человеческом шаге подсказки нет: там ждут кнопку, а не сообщение.
+    // Движок закрывает catch-событие `COMPLETED` в момент активации следующего
+    // узла — так же, как это делают тесты подсветки выше.
+    emitToken({
+      instanceId: 'inst-cust-wait-message',
+      elementId: 'Task_WaitPOConfirmed',
+      state: 'COMPLETED',
+      payload: {},
+    });
+    emitToken({
+      instanceId: 'inst-cust-wait-message',
+      elementId: 'Task_ReceiveMilk',
+      state: 'ACTIVE',
+      payload: { orderNum: '№901' },
+    });
+
+    expect(screen.queryByText(/ждёт сообщение/)).toBeNull();
+  });
+
+  // Подсказка объясняет ожидание, но показ должен видеть и сам узел: токен
+  // приходит на catch-событие, а просмотрщик рисует маркер по карте токенов.
+  // Схему в кабинете показывает только руководитель завода (`DIRECTOR`,
+  // `kind="EXECUTIVE"`), поэтому проверяем от него.
+  it('catch-событие подсвечивается на самом узле ожидания', () => {
+    createProject({ name: 'Молочный завод (подсветка)', xml: DAIRY_PLANT_PROJECT_XML });
+
+    openAs('Директор завода');
+
+    emitToken({
+      instanceId: 'inst-cust-wait-highlight',
+      elementId: 'Task_WaitPOConfirmed',
+      state: 'ACTIVE',
+      payload: { orderNum: '№902' },
+    });
+
+    const viewerProps = lastProps(mockViewerProps);
+
+    // Подсветка стоит на ожидании, а не на предыдущем человеческом шаге
+    // (`Task_CheckStock`), и «текущий шаг» — тоже оно.
+    expect(viewerProps.tokens).toEqual({ Task_WaitPOConfirmed: 'ACTIVE' });
+    expect(viewerProps.activeElementId).toBe('Task_WaitPOConfirmed');
   });
 
   // Просмотрщик показывает проект целиком, а токены приходят по экземплярам:
@@ -1389,6 +1552,50 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(counterpart[0]).toBe('inst-cust-counterpart');
     expect(counterpart[1]).toBe('SupplierShippedSignal');
     expect(counterpart[2]).toBe('Task_ReceiveDocsAndIssuePass');
+    // Сигнал — системная доставка: движок сверяет роль с шагом второй стороны,
+    // и роль сессии даёт `403`. Поэтому пятый аргумент гасит роль только у него.
+    expect(counterpart[4]).toEqual({ actor: '' });
+    expect(step[4]).toBeUndefined();
+  });
+
+  /**
+   * Старая схема (демо-проект SDK, `milkProcess.js`): отгрузку закрывает
+   * `handleSupplierShipment`, и сигнал Заказчику шлёт тот же клиент. Движок
+   * сверяет роль не с нажатой кнопкой, а с ожидающим шагом **заказчика**
+   * (`Task_WaitForSupplierShipment`, `MANAGER`), поэтому под ролью поставщика
+   * шлюз отвечал `403`, а приёмка документов не открывалась.
+   */
+  it('отгрузка по старой схеме шлёт сигнал Заказчику без роли сессии (M6)', async () => {
+    openAs('Менеджер Поставщика');
+
+    emitToken({
+      instanceId: 'inst-cust-legacy-signal',
+      elementId: 'Task_WaitForSupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№913' },
+    });
+    emitToken({
+      instanceId: 'inst-supp-legacy-signal',
+      elementId: 'Task_SupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№913' },
+    });
+
+    fireEvent.click(screen.getByText('Подтвердить отгрузку'));
+
+    await waitFor(() => expect(mockSendEvent).toHaveBeenCalledTimes(2));
+
+    const [step, counterpart] = mockSendEvent.mock.calls;
+
+    // Свой шаг закрывается ролью сессии...
+    expect(step[0]).toBe('inst-supp-legacy-signal');
+    expect(step[4]).toBeUndefined();
+
+    // ...а сигнал второй стороне — без неё.
+    expect(counterpart[0]).toBe('inst-cust-legacy-signal');
+    expect(counterpart[1]).toBe('SupplierShippedSignal');
+    expect(counterpart[2]).toBe('Task_ReceiveDocsAndIssuePass');
+    expect(counterpart[4]).toEqual({ actor: '' });
   });
 
   it('заказ поставщику уходит сообщением: экземпляр второй стороны создаёт движок (M3)', async () => {
@@ -1401,12 +1608,27 @@ describe('App: интеграция с BPMN Client SDK', () => {
     });
 
     openAs('Менеджер по продажам');
-    fireEvent.click((await screen.findAllByText('Принять заказ клиента'))[0]);
 
-    await waitFor(() => expect(mockSendEvent).toHaveBeenCalled());
+    // Заказ у завода не заводят кнопкой: он приходит от клиента сообщением
+    // ClientOrder, и экземпляр завода создаёт триггер `Event_SendOrder`. Поэтому
+    // у менеджера нет ни кнопки старта, ни «Запуска по схеме» — есть приём.
+    expect(screen.queryByText('Принять заказ клиента')).toBeNull();
+    expect(screen.queryByText('Запуск по схеме')).toBeNull();
+    expect(screen.getByText('Приём заказов')).toBeTruthy();
 
-    const orderNum = mockSendEvent.mock.calls[0][3].orderNum;
-    const plantInstanceId = mockSendEvent.mock.calls[0][0];
+    // Движок создал экземпляр завода по сообщению: кабинет узнаёт о заказе из
+    // токена (`inst-cust-<orderNum>`) и показывает менеджеру его шаг.
+    const orderNum = '№915';
+    const plantInstanceId = 'inst-cust-m3';
+
+    emitToken({
+      instanceId: plantInstanceId,
+      elementId: 'Task_ReceiveOrder',
+      state: 'ACTIVE',
+      payload: { orderNum },
+    });
+
+    expect(await screen.findByText('Зарегистрировать заказ в 1С:УТ')).toBeTruthy();
 
     // Один токен завода прошёл закупку: шаг отправки активен.
     emitToken({
@@ -1827,6 +2049,13 @@ describe('App: интеграция с BPMN Client SDK', () => {
 
     fireEvent.click(screen.getByText(/Оформить заказ заводу/));
 
+    // Схема завода уходит в движок до сообщения: экземпляр `Process_Dairy`
+    // создаёт триггер `Event_SendOrder`, а не кабинет — ручной кнопки старта у
+    // завода нет, поэтому определение готовит сторона, отправляющая заказ.
+    await waitFor(() => expect(mockDeploySchema).toHaveBeenCalled());
+    expect(mockDeploySchema.mock.calls[0][0]).toBe('CUSTOMER');
+    expect(mockDeploySchema.mock.calls[0][1]).toContain('Process_Dairy');
+
     await waitFor(() => expect(mockCreateOrder).toHaveBeenCalledTimes(1));
     expect(mockCreateOrder.mock.calls[0][0]).toMatchObject({ orderNum: '№101' });
 
@@ -2025,14 +2254,9 @@ describe('App: интеграция с BPMN Client SDK', () => {
    * ------------------------------------------------------------------ */
 
   it('создание заказа уходит в API с полями формы (M4)', async () => {
-    createProject({
-      name: 'Молочный завод (M4)',
-      xml: buildProjectXml([
-        { xml: DAIRY_PLANT_PROCESS_XML, participantName: 'Молочный завод' },
-        { xml: DAIRY_SUPPLIER_PROCESS_XML, participantName: 'Поставщик сырья' },
-      ]),
-    });
-
+    // Контур, который заводит заказ сам, — производство демо-проекта: у завода
+    // в «Молочном заводе» такой кнопки нет, его заказ приходит от клиента
+    // сообщением (проверено тестом M3 выше).
     mockCreateOrder.mockResolvedValueOnce({
       ok: true,
       order: {
@@ -2060,13 +2284,12 @@ describe('App: интеграция с BPMN Client SDK', () => {
         dueDate: '2026-11-05',
         counterparty: 'ООО «Тест»',
         customerInstanceId: 'inst-cust-api',
-        customerActiveElementId: 'Task_ReceiveOrder',
+        customerActiveElementId: 'Task_CreatePurchaseOrder',
         customerProcessState: 'ACTIVE',
       },
     });
 
-    render(<App />);
-    fireEvent.click(screen.getByText('Менеджер по продажам'));
+    openAs('Мастер производства');
 
     // Форма заказа: «100 Л» без номенклатуры больше нет — поля редактируются.
     fireEvent.change(screen.getByLabelText('Поле заказа: Номенклатура'), {
@@ -2082,7 +2305,7 @@ describe('App: интеграция с BPMN Client SDK', () => {
       target: { value: 'ООО «Тест»' },
     });
 
-    fireEvent.click((await screen.findAllByText('Принять заказ клиента'))[0]);
+    fireEvent.click((await screen.findAllByText('Создать внутренний заказ на 100 л'))[0]);
 
     await waitFor(() => expect(mockCreateOrder).toHaveBeenCalled());
 
@@ -2183,5 +2406,80 @@ describe('App: интеграция с BPMN Client SDK', () => {
     expect(
       mockAttachInstance.mock.calls.filter((call) => call[2] === 'inst-supp-777')
     ).toHaveLength(1);
+  });
+
+  it('кнопка «Очистить все заказы» удаляет их в БД движка, а не только в браузере (M8)', async () => {
+    createProject({
+      name: 'Молочный завод (M8)',
+      xml: buildProjectXml([
+        { xml: DAIRY_PLANT_PROCESS_XML, participantName: 'Молочный завод' },
+        { xml: DAIRY_SUPPLIER_PROCESS_XML, participantName: 'Поставщик сырья' },
+      ]),
+    });
+
+    mockListOrders.mockResolvedValue({
+      ok: true,
+      orders: [
+        {
+          orderNum: '№921',
+          status: 'IN_PROGRESS',
+          nomenclature: 'Ряженка 4%',
+          volumeLiters: 120,
+          fatContent: 4,
+          packaging: 'ПЭТ 0,5 л',
+          dueDate: '2026-12-05',
+          counterparty: 'ООО «Ромашка»',
+          customerInstanceId: 'inst-cust-921',
+          customerActiveElementId: 'Task_ReceiveOrder',
+          customerProcessState: 'ACTIVE',
+        },
+      ],
+    });
+    mockClearOrders.mockResolvedValue({ ok: true, deleted: 1 });
+
+    // `window.confirm` в jsdom не реализован: без подмены очистка не началась бы.
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+
+    openAs('Менеджер по продажам');
+
+    // Карточка с сервера в баре «Внутренние заказы»: номер — бизнес-ключ.
+    expect((await screen.findAllByText('Заказ №921')).length).toBeGreaterThan(0);
+
+    // Кнопка есть и в баре «Внутренние заказы», и в панели «Приём заказов»:
+    // сбросить демо-список должен уметь любой кабинет, а не только продажи.
+    const buttons = screen.getAllByText('Очистить все заказы');
+    expect(buttons).toHaveLength(2);
+
+    fireEvent.click(buttons[0]);
+
+    // Спрашиваем подтверждение: очистка необратима.
+    await waitFor(() => expect(mockClearOrders).toHaveBeenCalledTimes(1));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Удалить все заказы'));
+
+    // Карточка исчезает из кабинета: список чистится и на экране, и в движке.
+    await waitFor(() => expect(screen.queryAllByText('Заказ №921')).toHaveLength(0));
+    expect(screen.getByText('Заказов пока нет.')).toBeTruthy();
+  });
+
+  it('без API кнопка очистки чистит список этой вкладки (M8)', async () => {
+    jest.spyOn(window, 'confirm').mockReturnValue(true);
+
+    openAs('Руководитель Заказчика');
+
+    emitToken({
+      instanceId: 'inst-cust-930',
+      elementId: 'Task_WaitForSupplierShipment',
+      state: 'ACTIVE',
+      payload: { orderNum: '№930' },
+    });
+
+    expect(screen.queryByText('Заказов пока нет.')).toBeNull();
+
+    fireEvent.click(screen.getAllByText('Очистить все заказы')[0]);
+
+    // Стенд без шлюза: серверных карточек нет, поэтому чистится локальный список
+    // (иначе заказ-призрак остался бы на экране до F5).
+    await waitFor(() => expect(mockClearOrders).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText('Заказов пока нет.')).toBeTruthy());
   });
 });

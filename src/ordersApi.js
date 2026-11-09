@@ -187,6 +187,17 @@ export function mergeOrders(remoteOrders, localOrders) {
   return [...merged, ...byId.values()];
 }
 
+/**
+ * Подсказка для 5xx, в котором нет разборчивого тела.
+ *
+ * CRA-прокси dev-сервера (`proxy` в `package.json`) отдаёт браузеру 500 с
+ * пустым/HTML-телом, когда `kubectl port-forward` до шлюза не поднят —
+ * например, после `rollout restart` проброс умирает вместе со старым подом.
+ * Без подсказки в журнале кабинета остаётся бесполезное «вернул ошибку (500)».
+ */
+export const GATEWAY_5XX_HINT =
+  'ответ без тела: скорее всего не поднят проброс до шлюза (wip\\port-forward.cmd) или упал http-cluster';
+
 /** Достаёт причину отказа из ответа шлюза (JSON или текст). */
 async function readFailure(response) {
   try {
@@ -243,11 +254,15 @@ export class OrdersClient {
       });
 
       if (!response.ok) {
+        const details = await readFailure(response);
+
         return {
           ok: false,
           status: response.status,
           error: `API заказов вернул ошибку (${response.status})`,
-          details: await readFailure(response),
+          // Серверное объяснение важнее подсказки: 5xx от движка приходит с
+          // `error`/`details` в теле, и подменять его нельзя.
+          details: details || (response.status >= 500 ? GATEWAY_5XX_HINT : null),
         };
       }
 
@@ -306,6 +321,22 @@ export class OrdersClient {
     if (!result.ok) return result;
 
     return { ok: true, order: result.data.order || null };
+  }
+
+  /**
+   * `DELETE /api/v1/orders` → `{ok, deleted}`: очистка всех заказов (M8).
+   *
+   * Заказы удаляются из БД движка, а не только из `useState` кабинета — иначе
+   * следующий F5 вернул бы их обратно. Экземпляры процессов остаются в движке:
+   * кнопка сбрасывает демо-список, а не историю прогонов.
+   */
+  async clearOrders() {
+    const result = await this.request('', { method: 'DELETE' });
+    if (!result.ok) return result;
+
+    const deleted = Number(result.data.deleted);
+
+    return { ok: true, deleted: Number.isFinite(deleted) ? deleted : 0 };
   }
 }
 

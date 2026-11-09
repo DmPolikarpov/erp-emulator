@@ -279,4 +279,39 @@ describe('httpClient: GatewayClient.sendEvent', () => {
     expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
     expect(JSON.parse(init.body)).not.toHaveProperty('actor');
   });
+
+  /**
+   * Сигнал второй стороне (`counterpartEvent` старых схем) — системная
+   * доставка, а не действие роли: движок сверяет роль с ожидающим шагом
+   * **второго** контура, и под ролью сессии шлюз отвечает `403`
+   * («Роль SUPPLIER_MANAGER не может завершить шаг Task_WaitForSupplierShipment»).
+   * Поэтому роль гасится только для этого события — остальные вызовы того же
+   * клиента по-прежнему несут роль сессии.
+   */
+  it('умеет отправить событие без роли (сигнал второй стороне)', async () => {
+    const fetchImpl = jest.fn(async () => createResponse());
+    const client = new GatewayClient('/api/v1/process/instances', { fetchImpl });
+
+    client.actor = 'SUPPLIER_MANAGER';
+    await client.sendEvent(
+      'inst-cust-1',
+      'SupplierShippedSignal',
+      'Task_ReceiveDocsAndIssuePass',
+      { orderNum: '№101' },
+      { actor: '' }
+    );
+
+    const [, init] = fetchImpl.mock.calls[0];
+    expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
+    expect(JSON.parse(init.body)).not.toHaveProperty('actor');
+
+    // Переопределение действует на один запрос: роль клиента не изменилась.
+    expect(client.actor).toBe('SUPPLIER_MANAGER');
+
+    await client.sendEvent('inst-supp-1', 'CompleteBlock', 'EndEvent_Supplier');
+
+    const [, nextInit] = fetchImpl.mock.calls[1];
+    expect(nextInit.headers['X-Actor-Role']).toBe('SUPPLIER_MANAGER');
+    expect(JSON.parse(nextInit.body).actor).toBe('SUPPLIER_MANAGER');
+  });
 });

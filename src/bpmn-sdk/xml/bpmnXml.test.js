@@ -4,6 +4,7 @@ import {
   DEFAULT_ACTION_EVENT,
   ENGINE_FLOW_NODE_TYPES,
   escapeRegExp,
+  findMessageThrow,
   getActionAssignments,
   getElementAction,
   getElementActions,
@@ -11,11 +12,15 @@ import {
   getElementRole,
   getElementTrigger,
   getLocalName,
+  getMessageEvent,
+  getMessageNames,
+  getMessageWait,
   getNextElementId,
   getOutgoingTargetIds,
   getProcessIds,
   getRoleAssignments,
   getStartAction,
+  getStartMessageWait,
   getTriggerAssignments,
   isActionHostType,
   isElementIdAvailable,
@@ -32,6 +37,7 @@ import {
   isValidXml,
   listActions,
   listFlowElements,
+  listMessageEvents,
   listTriggers,
   normalizeAction,
   normalizePayloadKeys,
@@ -1480,6 +1486,138 @@ describe('bpmnXml: кнопки участников (act:userAction)', () => {
     } finally {
       global.DOMParser = domParser;
     }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Сообщения: объявления и throw/catch-события
+ * ------------------------------------------------------------------ */
+
+const MESSAGE_BPMN = `<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Definitions_Msg" targetNamespace="http://bpmn.io/schema/bpmn">
+  <bpmn:message id="Message_MilkShipped" name="MilkShipped" />
+  <bpmn:message id="Message_PurchaseOrder" />
+  <bpmn:process id="Process_Plant" isExecutable="true">
+    <bpmn:startEvent id="Start_Msg">
+      <bpmn:messageEventDefinition messageRef="Message_PurchaseOrder" />
+    </bpmn:startEvent>
+    <bpmn:intermediateCatchEvent id="Event_MilkShipped" name="Молоко отгружено">
+      <bpmn:messageEventDefinition messageRef="Message_MilkShipped" />
+    </bpmn:intermediateCatchEvent>
+    <bpmn:intermediateCatchEvent id="Event_Timer">
+      <bpmn:timerEventDefinition />
+    </bpmn:intermediateCatchEvent>
+    <bpmn:intermediateThrowEvent id="Event_SendPO" name="Заказ отправлен поставщику">
+      <bpmn:messageEventDefinition messageRef="Message_PurchaseOrder" />
+    </bpmn:intermediateThrowEvent>
+    <bpmn:endEvent id="End_Msg">
+      <bpmn:messageEventDefinition messageRef="Message_MilkShipped" />
+    </bpmn:endEvent>
+  </bpmn:process>
+</bpmn:definitions>`;
+
+describe('bpmnXml: сообщения (bpmn:message и throw/catch)', () => {
+  it('собирает объявления `bpmn:message`: id → имя', () => {
+    // Имя без `@name` — сам идентификатор: так подсказка не остаётся пустой,
+    // а движок читает событие по `messageRef` (`runtime::messages`).
+    expect(getMessageNames(MESSAGE_BPMN)).toEqual({
+      Message_MilkShipped: 'MilkShipped',
+      Message_PurchaseOrder: 'Message_PurchaseOrder',
+    });
+    expect(getMessageNames('')).toEqual({});
+    expect(getMessageNames(undefined)).toEqual({});
+  });
+
+  it('перечисляет события сообщений в порядке документа и без таймеров', () => {
+    expect(listMessageEvents(MESSAGE_BPMN).map((event) => [event.elementId, event.kind])).toEqual([
+      ['Start_Msg', 'catch'],
+      ['Event_MilkShipped', 'catch'],
+      ['Event_SendPO', 'throw'],
+      ['End_Msg', 'throw'],
+    ]);
+    // Событие без `messageEventDefinition` (таймер) в список не попадает.
+    expect(listMessageEvents(MESSAGE_BPMN).map((event) => event.elementId)).not.toContain(
+      'Event_Timer'
+    );
+    expect(listMessageEvents('<broken>')).toEqual([]);
+  });
+
+  it('читает событие сообщения на узле: имя события, имя сообщения и `messageRef`', () => {
+    expect(getMessageEvent(MESSAGE_BPMN, 'Event_MilkShipped')).toEqual({
+      elementId: 'Event_MilkShipped',
+      kind: 'catch',
+      type: 'intermediateCatchEvent',
+      name: 'Молоко отгружено',
+      message: 'MilkShipped',
+      messageRef: 'Message_MilkShipped',
+    });
+
+    // У конечного события своего имени нет — подписью становится имя сообщения.
+    expect(getMessageEvent(MESSAGE_BPMN, 'End_Msg')).toMatchObject({
+      kind: 'throw',
+      name: 'MilkShipped',
+      message: 'MilkShipped',
+    });
+
+    expect(getMessageEvent(MESSAGE_BPMN, 'Event_Timer')).toBeNull();
+    expect(getMessageEvent(MESSAGE_BPMN, 'Start_Msg').message).toBe('Message_PurchaseOrder');
+    expect(getMessageEvent(MESSAGE_BPMN, '')).toBeNull();
+    expect(getMessageEvent('', 'Event_MilkShipped')).toBeNull();
+  });
+
+  it('ожидание сообщения — только catch-событие', () => {
+    expect(getMessageWait(MESSAGE_BPMN, 'Event_MilkShipped')).toMatchObject({
+      elementId: 'Event_MilkShipped',
+      kind: 'catch',
+      message: 'MilkShipped',
+    });
+
+    // Отправка — не ожидание: у узла есть команда, подсказка «ждём» ему не нужна.
+    expect(getMessageWait(MESSAGE_BPMN, 'Event_SendPO')).toBeNull();
+    expect(getMessageWait(MESSAGE_BPMN, 'End_Msg')).toBeNull();
+    expect(getMessageWait(MESSAGE_BPMN, 'Event_Timer')).toBeNull();
+    expect(getMessageWait(MESSAGE_BPMN, 'Task_Missing')).toBeNull();
+  });
+
+  /**
+   * Старт процесса, который открывает вторая сторона.
+   *
+   * Так объявлен вход завода в «Молочном заводе»: `ClientOrder` от клиента.
+   * Кабинет по этому признаку не рисует ни кнопку инициатора, ни «Запуск по
+   * схеме»: экземпляр создаёт триггер узла-отправителя, а заказ нельзя завести
+   * руками. У обычного старта (`act:userAction`) ответ `null`.
+   */
+  it('находит стартовое событие-сообщение (message start event)', () => {
+    expect(getStartMessageWait(MESSAGE_BPMN)).toMatchObject({
+      elementId: 'Start_Msg',
+      kind: 'catch',
+      type: 'startEvent',
+      // Объявление есть, но без `@name` — именем сообщения остаётся сам `id`.
+      message: 'Message_PurchaseOrder',
+      messageRef: 'Message_PurchaseOrder',
+    });
+
+    expect(getStartMessageWait(SIMPLE_BPMN)).toBeNull();
+    expect(getStartMessageWait('')).toBeNull();
+    expect(getStartMessageWait(undefined)).toBeNull();
+    expect(getStartMessageWait('<broken>')).toBeNull();
+  });
+
+  it('находит отправителя сообщения по имени', () => {
+    // `MilkShipped` шлёт конечное событие, `PurchaseOrder` — промежуточное.
+    expect(findMessageThrow(MESSAGE_BPMN, 'MilkShipped')).toMatchObject({
+      elementId: 'End_Msg',
+      kind: 'throw',
+    });
+    expect(findMessageThrow(MESSAGE_BPMN, 'Message_PurchaseOrder')).toMatchObject({
+      elementId: 'Event_SendPO',
+    });
+
+    // Сравнение по имени сообщения, а не по `messageRef`: catch-узел того же
+    // имени отправителем не считается, а неизвестное имя — `null`.
+    expect(findMessageThrow(MESSAGE_BPMN, 'PurchaseOrder')).toBeNull();
+    expect(findMessageThrow(MESSAGE_BPMN, '')).toBeNull();
+    expect(findMessageThrow('', 'MilkShipped')).toBeNull();
   });
 });
 

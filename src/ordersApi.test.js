@@ -7,6 +7,7 @@
  */
 
 import {
+  GATEWAY_5XX_HINT,
   ORDER_STATUS,
   ORDERS_API_BASE_URL,
   OrdersClient,
@@ -47,6 +48,18 @@ const jsonResponse = (payload, status = 200) => ({
   ok: status >= 200 && status < 300,
   status,
   json: async () => payload,
+});
+
+/**
+ * Ответ без JSON в теле — так отвечает CRA-прокси кабинета, когда шлюз
+ * недоступен (HTML-страница ошибки): `readFailure` остаётся без объяснения.
+ */
+const htmlResponse = (body, status) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  json: async () => {
+    throw new SyntaxError(`Unexpected token < in JSON at position 0: ${body}`);
+  },
 });
 
 describe('ordersApi: нумерация и форматирование', () => {
@@ -258,6 +271,39 @@ describe('ordersApi: HTTP-клиент', () => {
     });
   });
 
+  it('очищает все заказы DELETE-ом и возвращает число удалённых (M8)', async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse({ ok: true, deleted: 3 }));
+    const client = new OrdersClient('http://gateway/api/v1/orders', { fetchImpl });
+
+    const result = await client.clearOrders();
+
+    expect(result).toEqual({ ok: true, deleted: 3 });
+
+    const [url, options] = fetchImpl.mock.calls[0];
+
+    expect(url).toBe('http://gateway/api/v1/orders');
+    expect(options.method).toBe('DELETE');
+    // Тела нет: очистка удаляет весь список, а не выбранный заказ.
+    expect(options.body).toBeUndefined();
+  });
+
+  it('очистка без числа удалённых не врёт про ноль и переживает отказ', async () => {
+    const withoutCount = new OrdersClient('', {
+      fetchImpl: jest.fn(async () => jsonResponse({ ok: true })),
+    });
+
+    expect(await withoutCount.clearOrders()).toEqual({ ok: true, deleted: 0 });
+
+    const refused = new OrdersClient('', {
+      fetchImpl: jest.fn(async () => jsonResponse({ error: 'ошибка хранилища заказов' }, 500)),
+    });
+
+    const failure = await refused.clearOrders();
+
+    expect(failure.ok).toBe(false);
+    expect(failure.status).toBe(500);
+  });
+
   it('разбирает 400 с ошибками полей и 409 как «заказ уже есть»', async () => {
     const validation = new OrdersClient('', {
       fetchImpl: jest.fn(async () =>
@@ -293,6 +339,37 @@ describe('ordersApi: HTTP-клиент', () => {
     expect(duplicate.ok).toBe(false);
     expect(duplicate.status).toBe(409);
     expect(duplicate.details).toContain('order already exists');
+  });
+
+  it('на 5xx без тела подсказывает про проброс до шлюза', async () => {
+    // CRA-прокси отвечает 500 пустым/HTML-телом, когда `port-forward` мёртв:
+    // одно «вернул ошибку (500)» в журнале кабинета ничего не объясняет.
+    const proxied = new OrdersClient('', {
+      fetchImpl: jest.fn(async () =>
+        htmlResponse('<html>Error occurred while trying to proxy</html>', 500)
+      ),
+    });
+
+    const proxiedFailure = await proxied.createOrder({ orderNum: '№101' });
+
+    expect(proxiedFailure.status).toBe(500);
+    expect(proxiedFailure.details).toBe(GATEWAY_5XX_HINT);
+
+    // 4xx не подсказка: тело 400/409 приходит от движка и уже информативно.
+    const rejected = new OrdersClient('', {
+      fetchImpl: jest.fn(async () => htmlResponse('', 400)),
+    });
+
+    expect((await rejected.createOrder({})).details).toBeNull();
+
+    // Серверное объяснение 5xx не подменяется: движок говорит, что случилось.
+    const engineError = new OrdersClient('', {
+      fetchImpl: jest.fn(async () => jsonResponse({ error: 'ошибка хранилища заказов' }, 503)),
+    });
+
+    expect((await engineError.createOrder({ orderNum: '№101' })).details).toBe(
+      'ошибка хранилища заказов'
+    );
   });
 
   it('не бросает исключений, когда API недоступен или медлит', async () => {

@@ -81,6 +81,11 @@ export const DAIRY_SALES_ROLE = 'SALES';
  * сообщения движок находит по `orderNum`, поэтому завод не знает
  * `instanceId` процесса клиента. Обратное направление (MF1, `ClientOrder`)
  * объявлено триггером в схеме клиента: экземпляр завода создаёт движок.
+ *
+ * Поэтому `Start_Dairy` — стартовое событие-сообщение (`messageEventDefinition`
+ * на `ClientOrder`), а не кнопка: заказ у завода не заводят руками, его
+ * присылает клиент, и первый шаг менеджера (`Task_ReceiveOrder`) появляется
+ * только у пришедшего заказа.
  */
 export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
@@ -98,7 +103,8 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
   <bpmn:message id="Message_PurchaseOrder" name="PurchaseOrder" />
   <bpmn:message id="Message_PurchaseOrderConfirmed" name="PurchaseOrderConfirmed" />
   <bpmn:message id="Message_MilkShipped" name="MilkShipped" />
-  <!-- Обмен с клиентом (MF2/MF6): подтверждение заказа и отгрузка готовой продукции. -->
+  <!-- Обмен с клиентом (MF1/MF2/MF6): заказ, его подтверждение и отгрузка ГП. -->
+  <bpmn:message id="Message_ClientOrder" name="ClientOrder" />
   <bpmn:message id="Message_OrderConfirmed" name="OrderConfirmed" />
   <bpmn:message id="Message_GoodsShipped" name="GoodsShipped" />
 
@@ -180,12 +186,11 @@ export const DAIRY_PLANT_PROCESS_XML = `<?xml version="1.0" encoding="UTF-8"?>
       </bpmn:lane>
     </bpmn:laneSet>
 
-    <!-- Продажи: заказ клиента приходит сообщением (MF1), кнопка старта — ручной вход. -->
+    <!-- Продажи: заказ приходит сообщением (MF1). Ручного старта у завода нет:
+         экземпляр создаёт триггер узла клиента, токен встаёт на приём заказа. -->
     <bpmn:startEvent id="Start_Dairy" name="Заказ клиента получен">
-      <bpmn:extensionElements>
-        <act:userAction id="createOrder" label="Принять заказ клиента" role="SALES" icon="PlusCircle" elementId="Task_ReceiveOrder" />
-      </bpmn:extensionElements>
-      <bpmn:documentation>СОП-01/MF1: заказ приходит от клиента сообщением ClientOrder — экземпляр завода создаёт триггер узла клиента. Кнопка старта осталась для ручного заведения заказа, когда клиентского контура нет.</bpmn:documentation>
+      <bpmn:documentation>СОП-01/MF1: заказ приходит от клиента сообщением ClientOrder — экземпляр завода (inst-cust-&lt;orderNum&gt;) создаёт триггер узла Event_SendOrder, токен встаёт на Task_ReceiveOrder. Кнопки старта у завода нет: заказ нельзя завести руками, менеджер видит только пришедшие заказы.</bpmn:documentation>
+      <bpmn:messageEventDefinition messageRef="Message_ClientOrder" />
       <bpmn:outgoing>SF1</bpmn:outgoing>
     </bpmn:startEvent>
 
